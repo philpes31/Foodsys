@@ -1,0 +1,14 @@
+{
+  "name": "balcao-delivery-saas",
+  "version": "0.1.0",
+  "description": "SaaS de delivery multiempresa (pizzaria, hamburgueria, açaí, mercado, farmácia...) — sem dependências externas",
+  "type": "module",
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "start": "node --no-warnings src/server.js",
+    "dev": "node --no-warnings --watch src/server.js",
+    "seed": "node --no-warnings src/seed.js",
+    "test": "node --no-warnings --test test/*.test.js"
+  },
+  "license": "UNLICENSED"
+}
