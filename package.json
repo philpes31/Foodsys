@@ -1,14 +1,12 @@
 {
   "name": "balcao-delivery-saas",
-  "version": "0.1.0",
-  "description": "SaaS de delivery multiempresa (pizzaria, hamburgueria, açaí, mercado, farmácia...) — sem dependências externas",
+  "version": "0.2.0",
+  "description": "SaaS de delivery multiempresa sobre Supabase (pizzaria, hamburgueria, açaí, mercado, farmácia...)",
   "type": "module",
-  "engines": { "node": ">=22.5" },
+  "engines": { "node": ">=20" },
   "scripts": {
-    "start": "node --no-warnings src/server.js",
-    "dev": "node --no-warnings --watch src/server.js",
-    "seed": "node --no-warnings src/seed.js",
-    "test": "node --no-warnings --test test/*.test.js"
+    "dev": "node scripts/serve.js",
+    "test": "node --test test/*.test.js"
   },
   "license": "UNLICENSED"
 }

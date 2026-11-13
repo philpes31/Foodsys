@@ -1,92 +1,102 @@
-# Balcão — SaaS de delivery para qualquer negócio
+# Balcão — SaaS de delivery para qualquer negócio (Supabase)
 
-Plataforma multiempresa de pedidos online e delivery: pizzaria, hamburgueria, açaiteria, mercado, farmácia ou qualquer outro negócio que venda por entrega. Cada empresa tem sua loja online com a própria marca, fila de preparo em tempo real, despacho de entregadores, cardápio com grupos de opções e relatórios. O dono da plataforma gerencia as empresas assinantes e os planos.
+Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria, açaiteria, mercado, farmácia ou qualquer negócio que venda por entrega.
 
-**Sem dependências externas:** só Node.js 22.5 ou mais novo (usa o SQLite embutido do Node). Não precisa de `npm install`.
+- **Supabase** guarda tudo: banco Postgres, login (Supabase Auth), tempo real (Realtime) e regras de segurança (RLS).
+- **O site** são só arquivos estáticos em `public/` (HTML, CSS e JS puro, sem build). Hospede de graça na Vercel, na Netlify ou no Cloudflare Pages.
+- **Não há servidor próprio para manter.** Toda regra que importa (preço do pedido, permissões, fluxo de status) roda dentro do banco.
 
-## Começar em 1 minuto
+## Colocar no ar (cerca de 10 minutos)
 
-```bash
-cp .env.example .env      # ajuste SECRET e PLATFORM_PASSWORD
-npm start                 # http://localhost:3000
-npm test                  # 10 testes de ponta a ponta da API
+### 1. Criar o banco no Supabase
+1. Crie um projeto em [supabase.com](https://supabase.com).
+2. Abra **SQL Editor → New query**, cole todo o conteúdo de `supabase/migrations/20261113000000_balcao.sql` e clique em **Run**.
+   - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
+
+### 2. Configurar o login
+Em **Authentication → URL Configuration**:
+- **Site URL:** o endereço onde o site vai ficar, por exemplo `https://seu-app.vercel.app`.
+- **Redirect URLs:** adicione `https://seu-app.vercel.app/**` e, para testar no seu computador, `http://localhost:3000/**`.
+
+A confirmação de e-mail vem ligada por padrão, e assim é mais seguro. Para testar mais rápido, dá para desligar em **Authentication → Sign In / Providers → Email → Confirm email**.
+
+### 3. Ligar o site ao seu projeto
+Em **Project Settings → API**, copie a **Project URL** e a chave **anon public** para `public/config.js`:
+
+```js
+export const SUPABASE_URL = 'https://xxxx.supabase.co';
+export const SUPABASE_ANON_KEY = 'eyJ...';
 ```
 
-No primeiro start o servidor cria o banco em `data/balcao.db`, a conta do dono da plataforma e, com `SEED_DEMO=1`, quatro empresas de demonstração com pedidos simulados.
+A chave anon pode ficar no site, porque ela é pública por natureza. **Nunca** use a chave `service_role` no site.
 
-| Acesso | E-mail | Senha |
+### 4. Testar no computador
+```bash
+npm run dev      # http://localhost:3000  (precisa só do Node 20+)
+```
+
+### 5. Publicar
+- **Vercel:** importe o repositório, deixe o framework como "Other" e publique. O `vercel.json` já configura as rotas.
+- **Netlify:** importe o repositório e publique. O `netlify.toml` já configura as rotas.
+
+Depois de publicar, volte ao passo 2 e confira se o endereço final está na Site URL.
+
+### 6. Virar administrador da plataforma
+Crie sua conta pelo site em `/entrar/cadastro`. Depois rode este comando no SQL Editor, com o seu e-mail:
+
+```sql
+insert into public.platform_admins (user_id)
+select id from auth.users where email = 'seu-email@exemplo.com';
+```
+
+A partir daí, o endereço `/plataforma` mostra todas as empresas.
+
+## Como funciona para cada perfil
+
+| Perfil | Onde | O que faz |
 |---|---|---|
-| Plataforma (dono do SaaS) | `PLATFORM_EMAIL` do `.env` | `PLATFORM_PASSWORD` do `.env` |
-| Pizzaria | dono@fornodavila.demo | demo1234 |
-| Hamburgueria | dono@brasaburger.demo | demo1234 |
-| Açaiteria | dono@acaidapraia.demo | demo1234 |
-| Mercado | dono@bompreco.demo | demo1234 |
+| Cliente final | `/loja/<endereço>` | Monta o pedido com opções (tamanho, meio a meio, adicionais, complementos), escolhe entrega por bairro ou retirada, usa cupom, escolhe Pix, cartão ou dinheiro com troco e acompanha o pedido em `/pedido/<código>`. Não precisa de conta. |
+| Dono da empresa | `/entrar/cadastro` e depois `/comecar` | Cria a conta e a loja escolhendo o segmento. O sistema já cria cardápio de exemplo, bairros e cupons, e há um botão para gerar pedidos de exemplo. |
+| Dono da empresa | `/painel` | Fila de preparo em tempo real com aviso sonoro, entregas e entregadores, cardápio com editor de grupos de opções, relatórios, configurações, equipe e plano. |
+| Atendente | `/painel` | Opera pedidos e entregas e marca itens esgotados. O dono adiciona o atendente pelo e-mail, depois que ele cria uma conta. |
+| Dono da plataforma | `/plataforma` | Vê a receita recorrente (MRR), o volume vendido e os pedidos de todas as empresas. Muda planos e suspende ou reativa empresas. |
 
-Lojas públicas: `/loja/forno-da-vila`, `/loja/brasa-burger`, `/loja/acai-da-praia`, `/loja/mercadinho-bom-preco`.
+## Segurança (no banco, não no navegador)
 
-## O que cada perfil faz
+- **RLS em todas as tabelas.** Cada empresa só vê os próprios pedidos, cupons, entregadores e equipe. O público só lê o cardápio, os bairros e o nome das lojas ativas.
+- **O pedido é criado pela função `place_order`.** Ela recalcula preço, opções, taxa e desconto a partir do cardápio, valida o mínimo e o máximo de cada grupo de opções, o pedido mínimo, se a loja está aberta e o limite do plano. O navegador não consegue gravar direto na tabela de pedidos.
+- **Mudança de status só pela função `change_order_status`,** que segue o fluxo recebido → em preparo → pronto → saiu para entrega → entregue e exige um entregador ativo para despachar.
+- **Plano e suspensão** só mudam pelas funções próprias. O dono não consegue alterar essas colunas direto na tabela.
+- **Empresa suspensa** some da vitrine, para de receber pedidos e a equipe perde o acesso aos dados.
 
-**Cliente final** (sem login), em `/loja/<endereço>`:
-- monta o pedido com grupos de opções (tamanho, meio a meio, adicionais, complementos, combos);
-- escolhe entrega por bairro ou retirada, aplica cupom e paga com Pix, cartão na entrega ou dinheiro com troco;
-- acompanha o pedido em `/pedido/<código>`, que se atualiza sozinha.
+## Testes
 
-**Dono da empresa**, em `/painel`:
-- **Preparo:** fila em 3 colunas que recebe os pedidos na hora (SSE) com aviso sonoro. O nome da aba muda conforme o segmento: Cozinha, Chapa, Montagem ou Separação.
-- **Entregas:** despacho para um entregador e confirmação da entrega ou da retirada.
-- **Cardápio:** produtos e editor de grupos de opções (mínimo e máximo de escolhas, preço adicional por opção), além de marcar itens esgotados.
-- **Relatórios:** faturamento, ticket médio, tempo médio até a entrega, vendas por dia e por horário, mais vendidos, formas de pagamento e taxas a repassar aos entregadores.
-- **Configurações:** dados da loja, cor da marca, pedido mínimo, aberta ou fechada, bairros e taxas, cupons, entregadores, equipe e plano.
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 12 testes cobrem:
+- isolamento entre empresas;
+- permissões de dono, atendente e anônimo;
+- cálculo de preço com opções e cupom;
+- fluxo de status, limites do plano, editor de produto e relatórios.
 
-**Atendente** (cadastrado pelo dono): opera preparo e entregas e marca itens esgotados. Não vê relatórios nem configurações.
-
-**Dono da plataforma**, em `/plataforma`: vê a receita recorrente (MRR), o volume vendido e os pedidos de todas as empresas. Cadastra empresas a partir de modelos por segmento, muda o plano e suspende ou reativa empresas. Empresa suspensa tem a loja fora do ar e o login bloqueado.
+```bash
+PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test
+```
 
 ## Estrutura
 
 ```
-src/
-  server.js     servidor HTTP, rotas da API, SSE, arquivos estáticos, inicialização
-  service.js    regras de negócio: empresas, cardápio, pedidos, status, relatórios
-  db.js         esquema SQLite (valores em centavos)
-  auth.js       senhas com scrypt e tokens assinados com HMAC
-  templates.js  modelos de catálogo por segmento e planos
-  seed.js       dados de demonstração
-public/         frontend (HTML, CSS e JS puro, sem etapa de build)
-test/           testes da API com node:test
+supabase/migrations/   esquema, RLS, funções e modelos por segmento (um arquivo SQL)
+public/                site estático: index.html, style.css, app.js, config.js
+scripts/serve.js       servidor local de desenvolvimento
+test/                  testes do banco e simulação do auth do Supabase
+vercel.json, netlify.toml   rotas para hospedagem estática
 ```
 
-## Regras importantes já implementadas
-
-- **Preço calculado no servidor:** o navegador envia só produto, quantidade e opções. Total, taxa e desconto são recalculados a partir do cardápio.
-- **Validação das opções:** cada grupo de opções exige o mínimo e respeita o máximo de escolhas, e uma opção só vale para o próprio produto.
-- **Isolamento entre empresas:** toda consulta da área logada filtra por empresa, e há teste cobrindo isso.
-- **Fluxo de status controlado:** recebido → em preparo → pronto → saiu para entrega → entregue, com cancelamento até ficar pronto. Pedido de retirada não passa por "saiu para entrega", e o despacho exige um entregador ativo.
-- **Limite de pedidos por mês no plano Básico**, pedido mínimo por loja e limite de tentativas de login.
-
-## API (resumo)
-
-Público: `GET /api/meta`, `POST /api/auth/login`, `GET /api/public/stores/:slug`, `POST /api/public/stores/:slug/coupon`, `POST /api/public/stores/:slug/orders`, `GET /api/public/orders/:code`.
-
-Empresa (Bearer token): `GET|PUT /api/store`, `PUT /api/store/plan`, `GET|POST /api/products`, `PUT|DELETE /api/products/:id`, `PATCH /api/products/:id/availability`, CRUD em `/api/zones`, `/api/coupons`, `/api/couriers` e `/api/team`, `GET /api/orders?status=`, `POST /api/orders/:id/status`, `GET /api/reports?days=`, `GET /api/events` (SSE).
-
-Plataforma: `GET /api/platform/overview`, `POST /api/platform/tenants`, `PATCH /api/platform/tenants/:id`.
-
-Valores em dinheiro trafegam em **centavos** (inteiros).
-
-## Colocar no ar
-
-1. Use um servidor ou contêiner com Node 22.5 ou mais novo (Railway, Render, Fly.io, uma VPS etc.).
-2. Defina `SECRET` (um valor longo e aleatório), `PLATFORM_EMAIL`, `PLATFORM_PASSWORD` e `SEED_DEMO=0`.
-3. Guarde `data/` num volume persistente e faça backup do `balcao.db`.
-4. Coloque HTTPS na frente (Caddy, Nginx ou o próprio provedor).
+Valores em dinheiro são inteiros em **centavos**.
 
 ## Próximos passos sugeridos
 
-- **Pagamento online:** Pix com QR Code e cartão via Mercado Pago, Asaas ou Stripe, com confirmação por webhook antes de mandar o pedido para o preparo.
-- **Cobrança da assinatura** das empresas (recorrência no mesmo gateway) e período de teste.
-- **Notificações por WhatsApp** de mudança de status (API oficial ou um provedor).
-- **App ou página do entregador**, com aceite e localização.
-- **Taxa por distância** (raio em km) como alternativa às taxas por bairro, e horários de funcionamento automáticos.
-- **Upload de fotos** dos produtos (S3 ou R2) e domínio próprio por loja (plano Rede).
-- **Postgres** quando o volume crescer: o esquema em `db.js` é SQL padrão e migra com poucas mudanças.
+- **Pagamento online:** Pix e cartão via Mercado Pago, Asaas ou Stripe. Uma Edge Function do Supabase recebe o webhook e só então libera o pedido para o preparo.
+- **Cobrança automática da assinatura** das empresas no mesmo gateway.
+- **WhatsApp a cada mudança de status:** um Database Webhook ou uma Edge Function chamando a API do WhatsApp.
+- **Fotos dos produtos** com Supabase Storage.
+- **Horários de funcionamento automáticos** e taxa de entrega por distância.
