@@ -29,7 +29,7 @@ before(() => {
   psql(['-d', 'postgres', '-c', `drop database if exists ${DB}`]);
   psql(['-d', 'postgres', '-c', `create database ${DB}`]);
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
-  psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations/20261113000000_balcao.sql')]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -170,4 +170,39 @@ test('limite mensal do plano Básico', () => {
   const p = menu('brasa').find(x => x.groups.length === 0);
   assert.throws(() => order('brasa', { customer, fulfillment: 'pickup', payment: 'Pix', items: [{ productId: p.id, qty: 1 }] }), /limite/);
   sql(`update plans set monthly_orders = 300 where name = 'Básico'`);
+});
+
+test('horário automático: dentro, fora e virada da meia-noite', () => {
+  const at = (iso) => sql(`select store_open_at(t, '${iso}'::timestamptz) from tenants t where id = '${pizzaId}'`);
+  // sexta (5): 18:00–02:00 | sábado (6): 11:00–14:00 ; horário de São Paulo (-03)
+  sql(`update tenants set auto_hours = true, hours = '{"5":[["18:00","02:00"]],"6":[["11:00","14:00"]]}' where id = '${pizzaId}'`, U.pizza);
+  assert.equal(at('2026-11-13T19:00:00-03:00'), 't');   // sexta 19h
+  assert.equal(at('2026-11-13T17:59:00-03:00'), 'f');   // sexta antes de abrir
+  assert.equal(at('2026-11-14T01:30:00-03:00'), 't');   // sábado 1h30, ainda faixa de sexta
+  assert.equal(at('2026-11-14T02:00:00-03:00'), 'f');   // fechou às 2h
+  assert.equal(at('2026-11-14T12:00:00-03:00'), 't');   // sábado almoço
+  assert.equal(at('2026-11-15T12:00:00-03:00'), 'f');   // domingo sem horário
+  fails(`update tenants set hours = '{"9":[["25:00","10:00"]]}' where id = '${pizzaId}'`, U.pizza, /check constraint|valid_hours/);
+  sql(`update tenants set auto_hours = false where id = '${pizzaId}'`, U.pizza);
+});
+
+test('pedido respeita o horário automático', () => {
+  sql(`update tenants set auto_hours = true, hours = '{}' where id = '${pizzaId}'`, U.pizza);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  assert.throws(() => order('forno-da-vila', { customer, fulfillment: 'pickup', payment: 'Pix', items: [{ productId: p.id, qty: 1 }] }), /fechada/);
+  sql(`update tenants set auto_hours = false where id = '${pizzaId}'`, U.pizza);
+  assert.ok(order('forno-da-vila', { customer, fulfillment: 'pickup', payment: 'Pix', items: [{ productId: p.id, qty: 1 }] }).code);
+});
+
+test('fotos: dono grava só na pasta da própria empresa', () => {
+  sql(`insert into storage.objects (bucket_id, name) values ('product-images', '${pizzaId}/foto.jpg')`, U.pizza);
+  fails(`insert into storage.objects (bucket_id, name) values ('product-images', '${pizzaId}/hack.jpg')`, U.burger, /row-level security/);
+  fails(`insert into storage.objects (bucket_id, name) values ('product-images', '../x.jpg')`, U.pizza, /row-level security/);
+  fails(`insert into storage.objects (bucket_id, name) values ('product-images', '${pizzaId}/x.jpg')`, U.staff, /row-level security/);
+  const pid = sql(`select id from products where tenant_id = '${pizzaId}' and name = 'Margherita'`);
+  const body = (img) => `'{"category":"Pizzas","name":"Margherita","price":4200,"image_path":"${img}"}'`;
+  sql(`select save_product('${pizzaId}', ${pid}, ${body(pizzaId + '/foto.jpg')})`, U.pizza);
+  assert.equal(sql(`select image_path from products where id = ${pid}`, null), `${pizzaId}/foto.jpg`);
+  fails(`select save_product('${pizzaId}', ${pid}, ${body(burgerId + '/foto.jpg')})`, U.pizza, /Foto inválida/);
+  fails(`select save_product('${pizzaId}', ${pid}, ${body('http://evil/x.jpg')})`, U.pizza, /Foto inválida/);
 });

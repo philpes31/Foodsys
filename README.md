@@ -10,7 +10,9 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
 
 ### 1. Criar o banco no Supabase
 1. Crie um projeto em [supabase.com](https://supabase.com).
-2. Abra **SQL Editor → New query**, cole todo o conteúdo de `supabase/migrations/20261113000000_balcao.sql` e clique em **Run**.
+2. Abra **SQL Editor → New query** e rode, **nesta ordem**, cada arquivo de `supabase/migrations/` (cole o conteúdo inteiro e clique em **Run**):
+   1. `20261113000000_balcao.sql` (tabelas, segurança e funções)
+   2. `20261114000000_horarios_fotos.sql` (horário automático e fotos dos produtos)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -55,9 +57,9 @@ A partir daí, o endereço `/plataforma` mostra todas as empresas.
 
 | Perfil | Onde | O que faz |
 |---|---|---|
-| Cliente final | `/loja/<endereço>` | Monta o pedido com opções (tamanho, meio a meio, adicionais, complementos), escolhe entrega por bairro ou retirada, usa cupom, escolhe Pix, cartão ou dinheiro com troco e acompanha o pedido em `/pedido/<código>`. Não precisa de conta. |
+| Cliente final | `/loja/<endereço>` | Vê se a loja está aberta (e quando abre), preenche o endereço pelo CEP, monta o pedido com opções (tamanho, meio a meio, adicionais, complementos), escolhe entrega por bairro ou retirada, usa cupom, escolhe Pix, cartão ou dinheiro com troco e acompanha o pedido em `/pedido/<código>`. Não precisa de conta. |
 | Dono da empresa | `/entrar/cadastro` e depois `/comecar` | Cria a conta e a loja escolhendo o segmento. O sistema já cria cardápio de exemplo, bairros e cupons, e há um botão para gerar pedidos de exemplo. |
-| Dono da empresa | `/painel` | Fila de preparo em tempo real com aviso sonoro, entregas e entregadores, cardápio com editor de grupos de opções, relatórios, configurações, equipe e plano. |
+| Dono da empresa | `/painel` | Fila de preparo em tempo real com aviso sonoro e impressão de comanda (impressora térmica 80 mm), entregas com mensagem pronta no WhatsApp para cliente e entregador (com link do mapa), cardápio com fotos e grupos de opções, horário de funcionamento automático, relatórios, equipe e plano. |
 | Atendente | `/painel` | Opera pedidos e entregas e marca itens esgotados. O dono adiciona o atendente pelo e-mail, depois que ele cria uma conta. |
 | Dono da plataforma | `/plataforma` | Vê a receita recorrente (MRR), o volume vendido e os pedidos de todas as empresas. Muda planos e suspende ou reativa empresas. |
 
@@ -69,13 +71,20 @@ A partir daí, o endereço `/plataforma` mostra todas as empresas.
 - **Plano e suspensão** só mudam pelas funções próprias. O dono não consegue alterar essas colunas direto na tabela.
 - **Empresa suspensa** some da vitrine, para de receber pedidos e a equipe perde o acesso aos dados.
 
+## Dicas de uso
+
+- **Impressão da comanda:** na tela de preparo, o botão **Imprimir** abre a impressão do navegador já no formato 80 mm. Escolha a impressora térmica e, nas configurações de impressão, desmarque "Cabeçalhos e rodapés". Marque **Imprimir comanda ao aceitar** para imprimir automaticamente ao aceitar o pedido. No Chrome, dá para pular a janela de impressão abrindo o navegador com `--kiosk-printing`.
+- **WhatsApp:** os botões abrem o WhatsApp Web ou o app com a mensagem pronta (aceito, pronto, saiu para entrega...) e o link de acompanhamento. Basta tocar em enviar.
+- **Horário:** com "Abrir e fechar sozinha" ligado, a loja só aceita pedidos dentro dos horários. O banco confere isso, não só a tela. O checkbox "Receber pedidos" pausa a loja na hora, mesmo dentro do horário.
+
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 12 testes cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 15 testes cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;
-- fluxo de status, limites do plano, editor de produto e relatórios.
+- fluxo de status, limites do plano, editor de produto e relatórios;
+- horário automático (inclusive passando da meia-noite) e permissões das fotos no Storage.
 
 ```bash
 PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test
@@ -98,5 +107,4 @@ Valores em dinheiro são inteiros em **centavos**.
 - **Pagamento online:** Pix e cartão via Mercado Pago, Asaas ou Stripe. Uma Edge Function do Supabase recebe o webhook e só então libera o pedido para o preparo.
 - **Cobrança automática da assinatura** das empresas no mesmo gateway.
 - **WhatsApp a cada mudança de status:** um Database Webhook ou uma Edge Function chamando a API do WhatsApp.
-- **Fotos dos produtos** com Supabase Storage.
-- **Horários de funcionamento automáticos** e taxa de entrega por distância.
+- **Taxa de entrega por distância** e página do entregador no celular.
