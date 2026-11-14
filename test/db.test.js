@@ -13,7 +13,7 @@ const psql = (args, input) => execFileSync('psql', ['-X', '-q', '-v', 'ON_ERROR_
 
 // Executa SQL como um usuário (uuid), como anônimo (null) ou como superusuário ('admin').
 function sql(query, as = 'admin') {
-  const head = as === 'admin' ? '' : as === null ? 'set local role anon;' : `set local role authenticated; set local request.jwt.claim.sub = '${as}';`;
+  const head = as === 'admin' ? '' : as === null ? 'set local role anon;' : as === 'service' ? 'set local role service_role;' : `set local role authenticated; set local request.jwt.claim.sub = '${as}';`;
   try {
     const out = psql(['-d', DB], `begin; ${head} ${query}; commit;`).trim();
     return out;
@@ -29,7 +29,7 @@ before(() => {
   psql(['-d', 'postgres', '-c', `drop database if exists ${DB}`]);
   psql(['-d', 'postgres', '-c', `create database ${DB}`]);
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -205,4 +205,62 @@ test('fotos: dono grava só na pasta da própria empresa', () => {
   assert.equal(sql(`select image_path from products where id = ${pid}`, null), `${pizzaId}/foto.jpg`);
   fails(`select save_product('${pizzaId}', ${pid}, ${body(burgerId + '/foto.jpg')})`, U.pizza, /Foto inválida/);
   fails(`select save_product('${pizzaId}', ${pid}, ${body('http://evil/x.jpg')})`, U.pizza, /Foto inválida/);
+});
+
+test('Pix online: configuração do token é só do dono e o token nunca vaza', () => {
+  const tok = 'TEST-1234567890123456789012-abcdef';
+  fails(`select set_pix_settings('${pizzaId}', 'qualquer', true)`, U.pizza, /Access Token inválido/);
+  fails(`select set_pix_settings('${pizzaId}', null, true)`, U.pizza, /Cadastre o Access Token/);
+  fails(`select set_pix_settings('${pizzaId}', '${tok}', true)`, U.staff, /Sem permissão/);
+  fails(`select set_pix_settings('${pizzaId}', '${tok}', true)`, U.burger, /Sem permissão/);
+  const st = json(`set_pix_settings('${pizzaId}', '${tok}', true)`, U.pizza);
+  assert.deepEqual([st.configured, st.enabled, st.test, st.hint], [true, true, true, '…cdef']);
+  fails(`select * from tenant_pix`, U.pizza, /permission denied/);
+  fails(`select * from tenant_pix`, null, /permission denied/);
+  fails(`select pix_order('X')`, null, /permission denied/);
+  fails(`select pix_token('${pizzaId}')`, U.pizza, /permission denied/);
+  assert.equal(sql(`select pix_token('${pizzaId}')`, 'service'), tok);
+});
+
+test('Pix online: pedido espera pagamento, entra no preparo quando pago', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const body = { customer, fulfillment: 'pickup', payment: 'Pix online', items: [{ productId: p.id, qty: 2 }] };
+  const r = order('forno-da-vila', body);
+  assert.equal(r.pix, true);
+  const o = json(`pix_order('${r.code}')`, 'service');
+  assert.equal(o.status, 'pagamento');
+  assert.equal(o.token.startsWith('TEST-'), true);
+  assert.equal(sql(`select count(*) from orders where id = ${o.id} and status = 'novo'`, U.pizza), '0');
+  fails(`select change_order_status(${o.id}, 'preparo')`, U.pizza, /Não é possível/);
+  sql(`select pix_save(${o.id}, 'MP-1', '000201PIX', 'iVBOR', now() + interval '30 minutes')`, 'service');
+  assert.equal(json(`track_order('${r.code}')`, null).order.pix.qr, '000201PIX');
+  fails(`select pix_apply('${pizzaId}', ${o.id}, 'MP-1', 'approved', ${r.total - 1})`, 'service', /diferente do total/);
+  fails(`select pix_apply('${pizzaId}', ${o.id}, 'MP-OUTRO', 'approved', ${r.total})`, 'service', /não corresponde/);
+  fails(`select pix_apply('${burgerId}', ${o.id}, 'MP-1', 'approved', ${r.total})`, 'service', /não encontrado/);
+  assert.equal(sql(`select pix_apply('${pizzaId}', ${o.id}, 'MP-1', 'approved', ${r.total})`, 'service'), 'novo');
+  assert.equal(sql(`select pix_apply('${pizzaId}', ${o.id}, 'MP-1', 'approved', ${r.total})`, 'service'), 'novo');
+  assert.equal(sql(`select count(*) from order_events where order_id = ${o.id} and status = 'novo'`), '1');
+  const t = json(`track_order('${r.code}')`, null).order;
+  assert.deepEqual([t.status, t.paymentStatus, t.pix], ['novo', 'paid', null]);
+});
+
+test('Pix online: expira, mas pagamento atrasado ainda vale', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const r = order('forno-da-vila', { customer, fulfillment: 'pickup', payment: 'Pix online', items: [{ productId: p.id, qty: 1 }] });
+  const id = json(`pix_order('${r.code}')`, 'service').id;
+  sql(`update orders set created_at = now() - interval '2 hours' where id = ${id}`);
+  assert.ok(+sql(`select pix_expire_overdue()`, 'service') >= 1);
+  assert.equal(sql(`select status || '/' || payment_status from orders where id = ${id}`), 'cancelado/expired');
+  assert.equal(sql(`select pix_apply('${pizzaId}', ${id}, 'MP-9', 'approved', ${r.total})`, 'service'), 'novo');
+  // loja não aceita mais Pix online -> pedido recusado
+  sql(`select set_pix_settings('${pizzaId}', null, false)`, U.pizza);
+  assert.throws(() => order('forno-da-vila', { customer, fulfillment: 'pickup', payment: 'Pix online', items: [{ productId: p.id, qty: 1 }] }), /não aceita Pix online/);
+});
+
+test('relatório ignora pedidos aguardando pagamento', () => {
+  sql(`select set_pix_settings('${pizzaId}', null, true)`, U.pizza);
+  const before = json(`store_report('${pizzaId}', 7)`, U.pizza).orders;
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  order('forno-da-vila', { customer, fulfillment: 'pickup', payment: 'Pix online', items: [{ productId: p.id, qty: 1 }] });
+  assert.equal(json(`store_report('${pizzaId}', 7)`, U.pizza).orders, before);
 });

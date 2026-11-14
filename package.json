@@ -6,7 +6,7 @@
   "engines": { "node": ">=20" },
   "scripts": {
     "dev": "node scripts/serve.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --no-warnings --experimental-strip-types --test test/*.test.js"
   },
   "license": "UNLICENSED"
 }

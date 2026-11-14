@@ -27,6 +27,12 @@ const TR = [[/Invalid login credentials/i, 'E-mail ou senha incorretos'], [/Emai
 const tr = m => (TR.find(([re]) => re.test(m)) || [0, m])[1];
 async function q(promise) { const { data, error } = await promise; if (error) throw new Error(tr(error.message || 'Erro')); return data; }
 const rpc = (fn, args) => q(sb.rpc(fn, args));
+// Edge Function do Pix (Mercado Pago)
+async function pixCall(body) {
+  const { data, error } = await sb.functions.invoke('pix', { body });
+  if (error) { let m = error.message; try { m = (await error.context.json()).error || m; } catch {} throw new Error(/Failed to send|fetch/i.test(m) ? 'Não foi possível falar com o serviço de Pix. Tente de novo.' : m); }
+  return data;
+}
 
 /* ---------- interface ---------- */
 function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2800); }
@@ -106,7 +112,7 @@ function customerMsg(o, storeName) {
   }[o.status];
   return `${m}\nAcompanhe: ${trackUrl(o)}`;
 }
-const courierMsg = o => `Entrega #${o.number}\n${o.customer_name} · ${o.customer_phone}\n${o.address} — ${o.zone_name}\nPagamento: ${o.payment} · ${brl(o.total)}${o.change_for ? ` (troco p/ ${brl(o.change_for)})` : ''}\nMapa: ${mapsUrl(o)}`;
+const courierMsg = o => `Entrega #${o.number}\n${o.customer_name} · ${o.customer_phone}\n${o.address} — ${o.zone_name}\n${o.payment_status === 'paid' ? `JÁ PAGO (${o.payment}) · não cobrar` : `Cobrar: ${o.payment} · ${brl(o.total)}${o.change_for ? ` (troco p/ ${brl(o.change_for)})` : ''}`}\nMapa: ${mapsUrl(o)}`;
 const waBtn = (href, label = 'WhatsApp') => href ? `<a class="btn ghost sm" href="${esc(href)}" target="_blank" rel="noopener">${label}</a>` : '';
 
 /* ---------- comanda (impressora térmica 80 mm) ---------- */
@@ -120,7 +126,7 @@ function printTicket(o, storeName) {
     <div class="li"><span>Subtotal</span><span>${brl(o.subtotal)}</span></div>
     ${o.fee ? `<div class="li"><span>Entrega</span><span>${brl(o.fee)}</span></div>` : ''}${o.discount ? `<div class="li"><span>Desconto</span><span>-${brl(o.discount)}</span></div>` : ''}
     <div class="li big"><b>TOTAL</b><b>${brl(o.total)}</b></div>
-    <div>Pagamento: ${esc(o.payment)}${o.change_for ? ` · troco p/ ${brl(o.change_for)}` : ''}</div></div>`;
+    <div>Pagamento: ${esc(o.payment)}${o.change_for ? ` · troco p/ ${brl(o.change_for)}` : ''}${o.payment_status === 'paid' ? ' · <b>PAGO</b>' : ''}</div></div>`;
   window.print();
 }
 
@@ -327,11 +333,12 @@ async function vShop(slug) {
       <label>Rua<input id="kRua" required minlength="3" autocomplete="address-line1" value="${esc(last.rua || '')}" placeholder="Rua, avenida…"></label>
       <label>Complemento / referência<input id="kComp" value="${esc(last.comp || '')}" placeholder="Apto, bloco, ponto de referência"></label>
       <p class="mut" id="kZone" style="margin:0">Bairro de entrega: <b>${esc(t.zone.name)}</b> · taxa ${t.fee ? brl(t.fee) : 'grátis'}</p>`}
-      <label>Pagamento<select id="kPay"><option>Pix</option><option>Cartão na entrega</option><option>Dinheiro</option></select></label>
+      <label>Pagamento<select id="kPay">${S.pix_online ? '<option value="Pix online" selected>Pix agora (QR Code, confirmação automática)</option>' : ''}<option value="Pix">Pix na entrega</option><option>Cartão na entrega</option><option>Dinheiro</option></select></label>
+      <label id="kEm" ${S.pix_online ? '' : 'hidden'}>E-mail (para o comprovante do Pix)<input id="kEmail" type="email" autocomplete="email" value="${esc(last.email || '')}" placeholder="voce@email.com"></label>
       <label id="kTr" hidden>Troco para (R$)<input id="kT" inputmode="decimal" placeholder="Ex.: 100"></label>
       <div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>
       <div class="row" style="justify-content:flex-end"><button type="button" class="ghost" id="kX">Voltar</button><button class="pri" id="kGo">Enviar pedido</button></div></form>`);
-    $('#kPay').onchange = e => $('#kTr').hidden = e.target.value !== 'Dinheiro';
+    $('#kPay').onchange = e => { $('#kTr').hidden = e.target.value !== 'Dinheiro'; $('#kEm').hidden = e.target.value !== 'Pix online'; };
     $('#kX').onclick = closeDlg;
     // CEP → rua e bairro (ViaCEP). Se o bairro existir na lista de entrega da loja, já seleciona.
     const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
@@ -353,14 +360,18 @@ async function vShop(slug) {
       e.preventDefault(); $('#kGo').disabled = true;
       try {
         const customer = { name: $('#kN').value, phone: $('#kP').value };
+        const pixOnline = $('#kPay').value === 'Pix online', email = $('#kEmail').value.trim();
+        if (pixOnline && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) throw new Error('Informe seu e-mail para gerar o Pix');
         const addr = t.pickup ? '' : `${$('#kRua').value.trim()}, ${$('#kNum').value.trim()}${$('#kComp').value.trim() ? ' - ' + $('#kComp').value.trim() : ''}${$('#kCep').value.trim() ? ' - CEP ' + $('#kCep').value.trim() : ''}`;
         const zoneNow = totals().zone;
         const r = await rpc('place_order', { p_slug: slug, p: {
           customer, fulfillment: t.pickup ? 'pickup' : 'delivery', zoneId: zoneNow?.id, address: addr, payment: $('#kPay').value,
           changeFor: $('#kT').value ? toCents($('#kT').value) : undefined, coupon: coupon?.code,
           items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: c.notes })) } });
-        local.set('customer', t.pickup ? { ...last, ...customer } : { ...customer, cep: $('#kCep').value, rua: $('#kRua').value, num: $('#kNum').value, comp: $('#kComp').value });
-        cart = []; saveCart(); closeDlg(); go(`/pedido/${r.code}`);
+        local.set('customer', { ...last, ...customer, ...(email ? { email } : {}), ...(t.pickup ? {} : { cep: $('#kCep').value, rua: $('#kRua').value, num: $('#kNum').value, comp: $('#kComp').value }) });
+        cart = []; saveCart();
+        if (r.pix) { $('#kGo').textContent = 'Gerando Pix…'; try { await pixCall({ action: 'create', code: r.code, email }); } catch (err) { toast(err.message); } }
+        closeDlg(); go(`/pedido/${r.code}`);
       } finally { const b = $('#kGo'); if (b) b.disabled = false; }
     });
   };
@@ -385,16 +396,22 @@ async function vShop(slug) {
 
 /* ---------- acompanhamento do pedido ---------- */
 async function vTrack(code) {
-  const draw = async () => {
+  let lastSig = '';
+  const draw = async (force) => {
     const r = await rpc('track_order', { p_code: code });
     if (!r) throw new Error('Pedido não encontrado');
     const { store: S, order: o } = r;
+    const sig = JSON.stringify(r);
+    if (!force && sig === lastSig) return o.status;
+    lastSig = sig;
+    if (o.status === 'pagamento') { drawPix(S, o); return o.status; }
     setColor(S.color); $('#bName').textContent = S.name; header('', false);
     const flow = o.fulfillment === 'pickup' ? ['novo', 'preparo', 'pronto', 'entregue'] : ['novo', 'preparo', 'pronto', 'rota', 'entregue'];
     const idx = flow.indexOf(o.status), at = Object.fromEntries(o.events.map(e => [e.status, e.at]));
     app.innerHTML = `<h2>Pedido #${o.number}</h2><p class="lead">Olá, ${esc(o.customerName)}! Esta página atualiza sozinha.</p>
     <div class="panel" style="max-width:760px">
-      ${o.status === 'cancelado' ? `<span class="badge b-r">Pedido cancelado pela loja.${S.phone ? ' Contato: ' + esc(S.phone) : ''}</span>` :
+      ${o.paymentStatus === 'paid' ? '<span class="badge b-g">Pagamento confirmado</span>' : ''}
+      ${o.status === 'cancelado' ? `<span class="badge b-r">${o.paymentStatus === 'expired' ? 'Pedido cancelado: o Pix não foi pago dentro do prazo.' : 'Pedido cancelado pela loja.'}${S.phone ? ' Contato: ' + esc(S.phone) : ''}</span>` :
       `<div class="steps">${flow.map((s, i) => `<span class="${i <= idx ? 'on' : ''}">${s === 'pronto' && o.fulfillment === 'pickup' ? 'Pronto p/ retirar' : SLABEL[s]}${at[s] ? `<br><small>${hhmm(at[s])}</small>` : ''}</span>`).join('')}</div>`}
       ${o.courier ? `<p><b>${esc(o.courier)}</b> está a caminho de ${esc(o.address)}, ${esc(o.zone)}.</p>` : ''}
       <table><tbody>${o.items.map(x => `<tr><td>${x.qty}× ${esc(x.product_name)}${x.options_text ? `<br><span class="mut">${esc(x.options_text)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}</td><td class="n price">${brl(x.qty * x.unit_price)}</td></tr>`).join('')}
@@ -404,11 +421,32 @@ async function vTrack(code) {
       <a class="btn ghost" href="/loja/${esc(S.slug)}" data-link>Voltar à loja</a></div>`;
     return o.status;
   };
-  const st = await draw();
+  // Tela de pagamento: QR Code, copia-e-cola, prazo e botão "Já paguei"
+  const drawPix = (S, o) => {
+    setColor(S.color); $('#bName').textContent = S.name; header('', false);
+    const left = o.pix?.expiresAt ? Math.max(0, Math.round((new Date(o.pix.expiresAt) - Date.now()) / 60000)) : null;
+    app.innerHTML = `<h2>Pague com Pix</h2><p class="lead">Pedido #${o.number} · ${esc(S.name)} — assim que o pagamento cair, ele vai direto para o preparo. Esta página atualiza sozinha.</p>
+    <div class="panel pix" style="max-width:560px">
+      <div class="tot"><span>Total</span><span class="price">${brl(o.total)}</span></div>
+      ${o.pix ? `${o.pix.qrBase64 ? `<img class="qr" src="data:image/png;base64,${esc(o.pix.qrBase64)}" alt="QR Code do Pix">` : ''}
+        <label>Pix copia e cola<textarea id="pixCode" readonly rows="3">${esc(o.pix.qr)}</textarea></label>
+        <button class="pri" id="pixCopy">Copiar código Pix</button>
+        <p class="mut" style="margin:0">Abra o app do seu banco, escolha Pix → QR Code ou "copia e cola". ${left != null ? `O código vale por mais ${left} min.` : ''}</p>
+        <button class="ghost" id="pixCheck">Já paguei</button>`
+      : `<p>Gere o código Pix para pagar.</p><label>E-mail (para o comprovante)<input id="pixEmail" type="email" value="${esc(local.get('customer', {}).email || '')}"></label><button class="pri" id="pixNew">Gerar Pix</button>`}
+    </div>`;
+  };
+  app.onclick = attempt(async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.id === 'pixCopy') { const ta = $('#pixCode'); try { await navigator.clipboard.writeText(ta.value); } catch { ta.select(); document.execCommand('copy'); } toast('Código copiado. Cole no app do banco.'); }
+    if (b.id === 'pixNew') { b.disabled = true; try { await pixCall({ action: 'create', code, email: $('#pixEmail').value }); await draw(true); } finally { b.disabled = false; } }
+    if (b.id === 'pixCheck') { b.disabled = true; try { const r = await pixCall({ action: 'check', code }); toast(r.paid ? 'Pagamento confirmado!' : 'Ainda não caiu. Pode levar alguns segundos.'); await draw(true); } finally { b.disabled = false; } }
+  });
+  const st = await draw(true);
   if (!['entregue', 'cancelado'].includes(st)) {
-    const h = setInterval(async () => { try { if (['entregue', 'cancelado'].includes(await draw())) clearInterval(h); } catch {} }, 8000);
-    cleanup = () => clearInterval(h);
-  }
+    const h = setInterval(async () => { try { if (['entregue', 'cancelado'].includes(await draw())) clearInterval(h); } catch {} }, 5000);
+    cleanup = () => { clearInterval(h); app.onclick = null; };
+  } else cleanup = () => { app.onclick = null; };
 }
 
 /* ================= PAINEL DA EMPRESA ================= */
@@ -445,6 +483,7 @@ async function pOrders(S) {
       return `<div class="col"><h3>${t}<span class="badge">${os.length}</span></h3>${os.map(o => `<div class="tk ${mins(o.created_at) > 25 ? 'late' : ''}">
         <div class="top"><span>#${o.number}</span><span class="price">${mins(o.created_at)} min</span></div>
         <span class="mut">${esc(o.customer_name)} · ${o.fulfillment === 'pickup' ? 'Retirada' : 'Entrega · ' + esc(o.zone_name)} · ${esc(o.payment)}${o.change_for ? ` (troco p/ ${brl(o.change_for)})` : ''}</span>
+        ${o.payment_status === 'paid' ? '<span><span class="badge b-g">PAGO ONLINE</span></span>' : ''}
         ${itemsList(o)}<b class="price">${brl(o.total)}</b>
         <div class="row">${a ? `<button class="ok sm" data-st="${next}" data-id="${o.id}">${a}</button>` : `<span class="badge b-g">Aguardando ${o.fulfillment === 'pickup' ? 'cliente' : 'entregador'}</span>`}
         ${k !== 'pronto' ? `<button class="ghost sm" data-st="cancelado" data-id="${o.id}">${k === 'novo' ? 'Recusar' : 'Cancelar'}</button>` : ''}
@@ -460,7 +499,10 @@ async function pOrders(S) {
     await load();
   });
   app.onchange = e => { if (e.target.id === 'autoPrint') local.set('autoPrint', e.target.checked); };
-  const stop = live(S.id, p => { if (p?.eventType === 'INSERT') { beep(); toast(`Novo pedido #${p.new.number}`); } load().catch(() => {}); });
+  const stop = live(S.id, p => {
+    if (p?.new?.status === 'novo' && !orders.some(o => o.id === p.new.id)) { beep(); toast(`Novo pedido #${p.new.number}${p.new.payment_status === 'paid' ? ' (Pix pago)' : ''}`); }
+    load().catch(() => {});
+  });
   cleanup = () => { stop(); app.onclick = app.onchange = null; };
   await load();
 }
@@ -602,10 +644,11 @@ async function pReports(S) {
 async function pConfig(S) {
   const plans = await q(sb.from('plans').select('*').order('sort'));
   const draw = async () => {
-    const [st, zones, coupons, couriers, team, nOrders] = await Promise.all([
+    const [st, zones, coupons, couriers, team, nOrders, pix] = await Promise.all([
       q(sb.from('tenants').select('*').eq('id', S.id).single()), q(sb.from('zones').select('*').eq('tenant_id', S.id).order('id')),
       q(sb.from('coupons').select('*').eq('tenant_id', S.id).order('id')), q(sb.from('couriers').select('*').eq('tenant_id', S.id).order('id')),
-      rpc('list_team', { p_tenant: S.id }), sb.from('orders').select('id', { count: 'exact', head: true }).eq('tenant_id', S.id).then(r => r.count || 0)]);
+      rpc('list_team', { p_tenant: S.id }), sb.from('orders').select('id', { count: 'exact', head: true }).eq('tenant_id', S.id).then(r => r.count || 0),
+      rpc('pix_settings', { p_tenant: S.id }).catch(() => null)]);
     const link = `${location.origin}/loja/${st.slug}`;
     app.innerHTML = `<h2>Configurações</h2><p class="lead">Endereço da sua loja: <a href="${link}" target="_blank" rel="noopener">${esc(link)}</a> <button class="ghost sm" id="copy">Copiar</button></p>
     ${nOrders ? '' : '<div class="panel" style="margin-bottom:20px"><h3>Quer ver o sistema funcionando?</h3><p class="mut" style="margin:0">Gere pedidos de exemplo para testar a fila, as entregas e os relatórios.</p><button class="ok" id="demo">Gerar 12 pedidos de exemplo</button></div>'}
@@ -633,6 +676,18 @@ async function pConfig(S) {
     <div class="panel"><h3>Equipe</h3><table><tbody>${team.map(u => `<tr><td>${esc(u.email)}</td><td>${u.role === 'owner' ? 'Dono' : 'Atendente'}</td><td class="n">${u.role === 'staff' ? `<button class="ghost sm" data-staff="${u.user_id}" aria-label="Remover">×</button>` : ''}</td></tr>`).join('')}</tbody></table>
       <form id="fTeam" class="row" style="flex-wrap:nowrap"><input id="tE" type="email" placeholder="E-mail do atendente" required><button class="ghost">Adicionar</button></form>
       <p class="mut" style="margin:0">O atendente precisa criar uma conta em /entrar/cadastro antes. Ele opera pedidos, entregas e disponibilidade do cardápio, sem acesso a relatórios e configurações.</p></div>
+    <form class="panel" id="fPix"><h3>Pix online (Mercado Pago)</h3>
+      ${pix ? `<p class="mut" style="margin:0">Situação: ${pix.enabled ? '<span class="badge b-g">Ativo na loja</span>' : '<span class="badge">Desligado</span>'}
+        ${pix.configured ? ` · Access Token cadastrado (${esc(pix.hint)})${pix.test ? ' · <span class="badge b-a">modo de teste</span>' : ''}` : ''}</p>` : '<p class="mut" style="margin:0">Rode a migração do Pix no Supabase para usar este recurso.</p>'}
+      <p class="mut" style="margin:0">O cliente paga com QR Code na hora de pedir, o dinheiro cai direto na sua conta do Mercado Pago e o pedido só aparece no preparo depois de pago.</p>
+      <details><summary class="mut">Como pegar o Access Token</summary><ol class="mut">
+        <li>Entre em mercadopago.com.br/developers com a conta que vai receber.</li>
+        <li>Clique em <b>Suas integrações → Criar aplicação</b> (pagamentos online, sem plataforma pronta).</li>
+        <li>Em <b>Credenciais de produção</b>, copie o <b>Access Token</b> (começa com APP_USR-). Para testar sem dinheiro de verdade, use o de <b>teste</b> (TEST-).</li>
+        <li>Sua conta precisa ter uma <b>chave Pix cadastrada</b> no Mercado Pago.</li></ol></details>
+      <label>Access Token<input id="pxTok" type="password" autocomplete="off" placeholder="${pix?.configured ? 'Deixe em branco para manter o atual' : 'APP_USR-...'}"></label>
+      <label class="chk"><input type="checkbox" id="pxOn" ${pix?.enabled ? 'checked' : ''}> Oferecer "Pix agora" na loja</label>
+      <button class="pri" ${pix ? '' : 'disabled'}>Salvar Pix</button></form>
     <div class="panel"><h3>Assinatura</h3><div class="plans">${plans.map(p => `<div class="plan ${st.plan === p.name ? 'on' : ''}"><b>${esc(p.name)}</b><span class="price"><b>${brl(p.price)}</b>/mês</span><span class="mut">${esc(p.features)}</span>${st.plan === p.name ? '<span class="badge b-g">Plano atual</span>' : `<button class="ghost sm" data-plan="${esc(p.name)}">Mudar</button>`}</div>`).join('')}</div></div></div>`;
   };
   const refreshBrand = async () => { await loadMe(); setColor(ME.tenant.color); $('#bName').textContent = ME.tenant.name; };
@@ -669,6 +724,7 @@ async function pConfig(S) {
       if ($('#hAuto').checked && !Object.keys(hours).length) throw new Error('Preencha pelo menos um dia antes de ligar o horário automático');
       await q(sb.from('tenants').update({ hours, auto_hours: $('#hAuto').checked }).eq('id', S.id));
     }
+    if (id === 'fPix') { await rpc('set_pix_settings', { p_tenant: S.id, p_token: $('#pxTok').value.trim() || null, p_enabled: $('#pxOn').checked }); }
     if (id === 'fZone') { const fee = toCents($('#zF').value); if (!Number.isInteger(fee) || fee < 0) throw new Error('Taxa inválida'); await q(sb.from('zones').insert({ tenant_id: S.id, name: $('#zN').value.trim(), fee })); }
     if (id === 'fCup') await q(sb.from('coupons').insert({ tenant_id: S.id, code: $('#cuC').value.trim().toUpperCase(), percent: +$('#cuP').value || 0, free_shipping: $('#cuF').checked }));
     if (id === 'fCour') await q(sb.from('couriers').insert({ tenant_id: S.id, name: $('#crN').value.trim(), phone: $('#crP').value.trim() }));

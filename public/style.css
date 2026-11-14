@@ -122,3 +122,6 @@ td.n,th.n{text-align:right}
 #fHours{grid-column:1/-1}
 .hours{width:auto}.hours input[type=time]{width:132px}
 @media(max-width:600px){.hours input[type=time]{width:100%}}
+.pix .qr{width:240px;height:240px;margin:0 auto;image-rendering:pixelated;background:#fff;padding:8px;border-radius:12px}
+.pix textarea{width:100%;font:13px/1.4 monospace;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--soft);resize:none;word-break:break-all}
+details summary{cursor:pointer}details ol{margin:8px 0 0;padding-left:20px}

@@ -13,6 +13,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
 2. Abra **SQL Editor → New query** e rode, **nesta ordem**, cada arquivo de `supabase/migrations/` (cole o conteúdo inteiro e clique em **Run**):
    1. `20261113000000_balcao.sql` (tabelas, segurança e funções)
    2. `20261114000000_horarios_fotos.sql` (horário automático e fotos dos produtos)
+   3. `20261115000000_pix_online.sql` (Pix online pelo Mercado Pago)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -71,6 +72,26 @@ A partir daí, o endereço `/plataforma` mostra todas as empresas.
 - **Plano e suspensão** só mudam pelas funções próprias. O dono não consegue alterar essas colunas direto na tabela.
 - **Empresa suspensa** some da vitrine, para de receber pedidos e a equipe perde o acesso aos dados.
 
+### 7. Ligar o Pix online (opcional, por loja)
+
+O Pix online usa uma **Edge Function** do Supabase, a `supabase/functions/pix/index.ts`. Ela cria a cobrança no Mercado Pago e recebe a confirmação do pagamento.
+
+1. **Publique a função.** Use um dos dois jeitos:
+   - **Pelo painel:** abra **Edge Functions → Deploy a new function → Via Editor**, dê o nome `pix`, apague o código de exemplo, cole o conteúdo de `supabase/functions/pix/index.ts` e clique em **Deploy function**.
+   - **Pela CLI:** `supabase functions deploy pix --no-verify-jwt`
+2. **Desligue a verificação de JWT.** Na função `pix`, abra **Details / Settings** e desligue **Enforce JWT verification** ("Verify JWT"). É necessário porque o aviso do Mercado Pago chega sem login. A função confere cada pagamento direto na API do Mercado Pago, então isso não abre brecha.
+3. **Confira as chaves (geralmente não precisa fazer nada).** `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` já vêm prontas. Se os logs da função reclamarem da chave, crie em **Edge Functions → Secrets** um segredo chamado `SERVICE_ROLE_KEY` com a sua **Secret key** (`sb_secret_...`).
+4. **Cada loja liga a própria conta.** No painel da loja, em **Configurações → Pix online**, a loja cola o **Access Token** do Mercado Pago dela e marca "Oferecer Pix agora". O guia de onde pegar o token aparece na própria tela.
+
+**Como funciona:**
+- O cliente escolhe **"Pix agora"**, informa o e-mail e recebe o QR Code com o copia e cola, válido por 30 minutos.
+- O pedido fica **aguardando pagamento**: não aparece no preparo e não conta nos relatórios.
+- Quando o Mercado Pago confirma, o pedido entra na fila com aviso sonoro e o selo **PAGO ONLINE**. Na mensagem do entregador sai "JÁ PAGO · não cobrar".
+- Se não for pago em 45 minutos, o pedido é cancelado sozinho. Se o pagamento cair depois do prazo, o pedido volta para a fila.
+- O valor cobrado vem sempre do banco, e a confirmação só vale se o valor pago for igual ao total do pedido.
+
+**Para testar:** as credenciais de teste (`TEST-`) do Mercado Pago geram QR Codes, mas o Pix de teste não pode ser pago de verdade. O jeito mais simples é usar o token de produção com um produto de R$ 1,00 e depois devolver o valor pelo app do Mercado Pago.
+
 ## Dicas de uso
 
 - **Impressão da comanda:** na tela de preparo, o botão **Imprimir** abre a impressão do navegador já no formato 80 mm. Escolha a impressora térmica e, nas configurações de impressão, desmarque "Cabeçalhos e rodapés". Marque **Imprimir comanda ao aceitar** para imprimir automaticamente ao aceitar o pedido. No Chrome, dá para pular a janela de impressão abrindo o navegador com `--kiosk-printing`.
@@ -79,12 +100,13 @@ A partir daí, o endereço `/plataforma` mostra todas as empresas.
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 15 testes cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 26 testes (banco e Edge Function do Pix com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;
 - fluxo de status, limites do plano, editor de produto e relatórios;
-- horário automático (inclusive passando da meia-noite) e permissões das fotos no Storage.
+- horário automático (inclusive passando da meia-noite) e permissões das fotos no Storage;
+- Pix online: token protegido, valor conferido, webhook reconferido na API, expiração e pagamento atrasado.
 
 ```bash
 PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test
@@ -93,7 +115,8 @@ PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test
 ## Estrutura
 
 ```
-supabase/migrations/   esquema, RLS, funções e modelos por segmento (um arquivo SQL)
+supabase/migrations/   esquema, RLS, funções e modelos por segmento (rodar em ordem)
+supabase/functions/pix Edge Function do Pix (Mercado Pago)
 public/                site estático: index.html, style.css, app.js, config.js
 scripts/serve.js       servidor local de desenvolvimento
 test/                  testes do banco e simulação do auth do Supabase
@@ -104,7 +127,7 @@ Valores em dinheiro são inteiros em **centavos**.
 
 ## Próximos passos sugeridos
 
-- **Pagamento online:** Pix e cartão via Mercado Pago, Asaas ou Stripe. Uma Edge Function do Supabase recebe o webhook e só então libera o pedido para o preparo.
+- **Cartão de crédito online** (Checkout do Mercado Pago) usando a mesma função de pagamentos.
 - **Cobrança automática da assinatura** das empresas no mesmo gateway.
 - **WhatsApp a cada mudança de status:** um Database Webhook ou uma Edge Function chamando a API do WhatsApp.
 - **Taxa de entrega por distância** e página do entregador no celular.
