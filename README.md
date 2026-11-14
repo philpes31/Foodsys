@@ -15,6 +15,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    2. `20261114000000_horarios_fotos.sql` (horário automático e fotos dos produtos)
    3. `20261115000000_pix_online.sql` (Pix online pelo Mercado Pago)
    4. `20261116000000_assinaturas.sql` (assinatura mensal das lojas)
+   5. `20261117000000_entregador_clientes_lgpd.sql` (página do entregador, clientes e LGPD)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -115,22 +116,41 @@ Toda loja nova ganha **14 dias grátis**. Depois disso, a loja paga a mensalidad
 - **Para você, em `/plataforma`:** aparecem quantas lojas estão pagando e quantas estão em teste, a receita mensal real e a potencial, e o status de cada loja. Os botões **+30 dias**, **+7 dias teste** e **Grátis** servem para quem paga por fora (Pix, boleto) ou para parceiros.
 - O cliente da loja bloqueada vê "Temporariamente indisponível", e o banco recusa pedidos novos.
 
+### 9. Termos de Uso, privacidade e LGPD
+
+As páginas `/termos` e `/privacidade` são **modelos**. Antes de vender:
+1. Preencha os dados da sua empresa em `public/config.js`, no bloco `PLATFORM`: razão social, CNPJ, e-mail e cidade do foro.
+2. Peça para um advogado revisar os textos, que ficam em `public/legal.js`.
+
+O que já está pronto:
+- **No cadastro:** a conta só é criada com o aceite dos termos. A versão aceita e a data ficam registradas no usuário.
+- **No checkout:** aparece um aviso com o link para a política de privacidade.
+- **Pedido de exclusão de dados (LGPD):** em **Clientes → Excluir dados**, a loja apaga nome, telefone e endereço de um cliente em todos os pedidos. Os valores continuam nos relatórios.
+- **Retenção:** a função `anonymize_old_orders(24)` anonimiza pedidos com mais de 24 meses. Para rodar todo mês, ative a extensão **pg_cron** (Database → Extensions) e rode no SQL Editor:
+  ```sql
+  select cron.schedule('anonimizar-pedidos', '0 4 1 * *', $$select public.anonymize_old_orders(24)$$);
+  ```
+- **Exclusão da loja:** em **Configurações → Excluir loja**, o dono apaga tudo, depois de cancelar a assinatura.
+
 ## Dicas de uso
 
 - **Impressão da comanda:** na tela de preparo, o botão **Imprimir** abre a impressão do navegador já no formato 80 mm. Escolha a impressora térmica e, nas configurações de impressão, desmarque "Cabeçalhos e rodapés". Marque **Imprimir comanda ao aceitar** para imprimir automaticamente ao aceitar o pedido. No Chrome, dá para pular a janela de impressão abrindo o navegador com `--kiosk-printing`.
+- **Entregador:** em **Configurações → Entregadores → Enviar link**, cada entregador recebe pelo WhatsApp um link próprio. Ele abre no celular, sem senha, e mostra as entregas dele com endereço, valor a cobrar ou "já pago", e os botões de mapa, WhatsApp, ligar e **Entreguei**. **Novo link** desativa o anterior (use quando um entregador sair).
+- **Clientes:** a aba **Clientes** lista quem já pediu, com número de pedidos, total gasto e último pedido. Clientes que não pedem há mais de 30 dias aparecem como "sumido", e um botão de WhatsApp manda uma mensagem pronta para chamar de volta. Dá para baixar a lista em planilha (CSV).
 - **WhatsApp:** os botões abrem o WhatsApp Web ou o app com a mensagem pronta (aceito, pronto, saiu para entrega...) e o link de acompanhamento. Basta tocar em enviar.
 - **Horário:** com "Abrir e fechar sozinha" ligado, a loja só aceita pedidos dentro dos horários. O banco confere isso, não só a tela. O checkbox "Receber pedidos" pausa a loja na hora, mesmo dentro do horário.
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 36 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 39 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;
 - fluxo de status, limites do plano, editor de produto e relatórios;
 - horário automático (inclusive passando da meia-noite) e permissões das fotos no Storage;
 - Pix online: token protegido, valor conferido, webhook reconferido na API, expiração e pagamento atrasado;
-- assinatura: teste grátis, carência, bloqueio de pedidos, só o dono assina, avisos reconferidos na API.
+- assinatura: teste grátis, carência, bloqueio de pedidos, só o dono assina, avisos reconferidos na API;
+- link do entregador, lista de clientes, exclusão de dados (LGPD), retenção e exclusão da loja.
 
 ```bash
 PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test
@@ -154,4 +174,5 @@ Valores em dinheiro são inteiros em **centavos**.
 
 - **Cartão de crédito online** (Checkout do Mercado Pago) usando a mesma função de pagamentos.
 - **WhatsApp a cada mudança de status:** um Database Webhook ou uma Edge Function chamando a API do WhatsApp.
-- **Taxa de entrega por distância** e página do entregador no celular.
+- **Taxa de entrega por distância** (raio em km a partir da loja).
+- **Programa de fidelidade** sobre a aba Clientes (ex.: a cada 10 pedidos, um cupom).

@@ -1,7 +1,9 @@
 // Frontend do Balcão sobre Supabase: loja pública, acompanhamento, cadastro, painel da empresa e painel da plataforma.
 // JavaScript puro, sem build. A segurança está no banco (RLS + funções), não aqui.
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
+import { SUPABASE_URL, SUPABASE_ANON_KEY, PLATFORM as P0 } from './config.js';
+import { termsHtml, privacyHtml, LEGAL_VERSION } from './legal.js';
+const PLATFORM = { name: 'Balcão', company: '', cnpj: '', email: '', city: '', ...(P0 || {}) };
 
 const $ = s => document.querySelector(s);
 const app = $('#app');
@@ -185,6 +187,8 @@ async function render() {
     if (p[0] === 'loja' && p[1]) return await vShop(p[1]);
     if (p[0] === 'pedido' && p[1]) return await vTrack(p[1]);
     if (p[0] === 'entrar') return vAuth(p[1]);
+    if (p[0] === 'termos' || p[0] === 'privacidade') return vLegal(p[0]);
+    if (p[0] === 'entregador' && p[1]) return await vCourier(p[1]);
     await loadMe();
     if (p[0] === 'comecar') { if (!ME) return go('/entrar/cadastro'); return await vStart(); }
     if (p[0] === 'painel') { if (!ME) return go('/entrar'); if (!ME.tenant) return go(ME.isAdmin ? '/plataforma' : '/comecar'); return await vPanel(p[1] || 'pedidos'); }
@@ -198,6 +202,47 @@ function vSetup() {
   app.innerHTML = `<div class="panel auth" style="max-width:640px"><h2>Falta configurar o Supabase</h2>
     <p>Edite <code>public/config.js</code> com a <b>Project URL</b> e a chave <b>anon public</b> do seu projeto (Supabase → Project Settings → API) e recarregue a página.</p>
     <p class="mut">O passo a passo completo está no README do repositório.</p></div>`;
+}
+
+/* ---------- termos e privacidade ---------- */
+function vLegal(which) {
+  setColor('#d62828'); $('#bName').textContent = PLATFORM.name; header('', false);
+  const missing = !PLATFORM.company || !PLATFORM.cnpj || !PLATFORM.email || !PLATFORM.city;
+  app.innerHTML = `<article class="panel legal">${missing ? '<p class="banner warn" style="margin:0">Modelo: preencha os dados da empresa em <code>public/config.js</code> (PLATFORM) e revise o texto com um advogado.</p>' : ''}
+    ${which === 'termos' ? termsHtml(PLATFORM) : privacyHtml(PLATFORM)}</article>`;
+}
+
+/* ---------- página do entregador (link secreto, sem login) ---------- */
+async function vCourier(token) {
+  let lastSig = '';
+  const draw = async (force) => {
+    const r = await rpc('courier_portal', { p_token: token });
+    if (!r) { app.innerHTML = '<div class="panel auth"><h2>Link inválido</h2><p>Peça um link novo para a loja.</p></div>'; header('', false); return false; }
+    const sig = JSON.stringify(r); if (!force && sig === lastSig) return true; lastSig = sig;
+    setColor(r.store.color); $('#bName').textContent = r.store.name; header('', false);
+    app.innerHTML = `<div class="courier"><h2>Olá, ${esc(r.courier.name.split(' ')[0])}!</h2>
+      <p class="lead">Hoje: <b>${r.today.deliveries}</b> entrega(s) · ${brl(r.today.fees)} em taxas. Esta página atualiza sozinha.</p>
+      ${r.deliveries.map(d => `<div class="panel dl">
+        <div class="row between"><b class="big">#${d.number}</b><span class="mut">saiu há ${mins(d.since)} min</span></div>
+        <div><b>${esc(d.customerName)}</b></div>
+        <div class="addr">${esc(d.address)}<br><span class="mut">${esc(d.zone)}</span></div>
+        <div class="${d.paid ? 'badge b-g' : 'badge b-a'}" style="font-size:14px;padding:6px 10px">${d.paid ? 'JÁ PAGO · não cobrar' : `Cobrar ${brl(d.total)} · ${esc(d.payment)}${d.changeFor ? ` · levar troco p/ ${brl(d.changeFor)}` : ''}`}</div>
+        <div class="mut">${d.items.map(esc).join(' · ')}</div>
+        <div class="grid" style="grid-template-columns:repeat(3,minmax(0,1fr));gap:8px">
+          <a class="btn ghost" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(d.address + ', ' + d.zone)}" target="_blank" rel="noopener">Mapa</a>
+          ${waBtn(waLink(d.customerPhone, `Olá, ${d.customerName.split(' ')[0]}! Sou o entregador da ${r.store.name} e estou chegando com seu pedido #${d.number}.`), 'WhatsApp').replace('btn ghost sm', 'btn ghost') || '<span></span>'}
+          <a class="btn ghost" href="tel:${esc(String(d.customerPhone).replace(/[^\d+]/g, ''))}">Ligar</a></div>
+        <button class="ok" data-done="${d.id}">Entreguei</button></div>`).join('') || '<div class="panel"><p class="empty">Nenhuma entrega com você agora.</p></div>'}
+      ${r.store.phone ? `<p class="mut">Dúvidas: ${esc(r.store.phone)}</p>` : ''}</div>`;
+    return true;
+  };
+  app.onclick = attempt(async e => {
+    const b = e.target.closest('button[data-done]'); if (!b) return;
+    if (!sure(b)) return;
+    await rpc('courier_deliver', { p_token: token, p_order: +b.dataset.done }); toast('Entrega confirmada'); await draw(true);
+  });
+  if (await draw(true)) { const h = setInterval(() => draw().catch(() => {}), 15000); cleanup = () => { clearInterval(h); app.onclick = null; }; }
+  else cleanup = () => { app.onclick = null; };
 }
 
 /* ---------- início ---------- */
@@ -218,13 +263,15 @@ function vAuth(mode = 'login') {
   app.innerHTML = `<form class="panel auth" id="fAuth"><h2>${T[0]}</h2><p class="mut">${T[1]}</p>
     ${mode !== 'nova' ? '<label>E-mail<input id="aE" type="email" required autocomplete="username"></label>' : ''}
     ${mode !== 'senha' ? `<label>Senha<input id="aP" type="password" required minlength="8" autocomplete="${mode === 'login' ? 'current-password' : 'new-password'}"></label>` : ''}
+    ${mode === 'cadastro' ? '<label class="chk" style="align-items:flex-start"><input type="checkbox" id="aTerms" required> <span>Li e aceito os <a href="/termos" target="_blank">Termos de Uso</a> e a <a href="/privacidade" target="_blank">Política de Privacidade</a>.</span></label>' : ''}
     <button class="pri">${T[2]}</button>
     <p class="mut" style="margin:0">${mode === 'login' ? '<a href="/entrar/cadastro" data-link>Criar conta</a> · <a href="/entrar/senha" data-link>Esqueci a senha</a>' : '<a href="/entrar" data-link>Voltar para entrar</a>'}</p></form>`;
   $('#fAuth').onsubmit = attempt(async e => {
     e.preventDefault(); const email = $('#aE')?.value.trim(), password = $('#aP')?.value;
     if (mode === 'login') { await q(sb.auth.signInWithPassword({ email, password })); await loadMe(); go(ME?.tenant ? '/painel' : ME?.isAdmin ? '/plataforma' : '/comecar'); }
     if (mode === 'cadastro') {
-      const r = await q(sb.auth.signUp({ email, password, options: { emailRedirectTo: `${location.origin}/comecar` } }));
+      if (!$('#aTerms').checked) throw new Error('Aceite os Termos de Uso e a Política de Privacidade');
+      const r = await q(sb.auth.signUp({ email, password, options: { emailRedirectTo: `${location.origin}/comecar`, data: { terms_version: LEGAL_VERSION, terms_accepted_at: new Date().toISOString() } } }));
       if (r.session) go('/comecar');
       else app.innerHTML = `<div class="panel auth"><h2>Confira seu e-mail</h2><p>Enviamos um link de confirmação para <b>${esc(email)}</b>. Depois de confirmar, você volta para cá e cria sua loja.</p></div>`;
     }
@@ -352,6 +399,7 @@ async function vShop(slug) {
       <label id="kEm" ${S.pix_online ? '' : 'hidden'}>E-mail (para o comprovante do Pix)<input id="kEmail" type="email" autocomplete="email" value="${esc(last.email || '')}" placeholder="voce@email.com"></label>
       <label id="kTr" hidden>Troco para (R$)<input id="kT" inputmode="decimal" placeholder="Ex.: 100"></label>
       <div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>
+      <p class="mut" style="margin:0;font-size:13px">Seus dados são usados só para preparar e entregar este pedido. <a href="/privacidade" target="_blank">Política de Privacidade</a>.</p>
       <div class="row" style="justify-content:flex-end"><button type="button" class="ghost" id="kX">Voltar</button><button class="pri" id="kGo">Enviar pedido</button></div></form>`);
     $('#kPay').onchange = e => { $('#kTr').hidden = e.target.value !== 'Dinheiro'; $('#kEm').hidden = e.target.value !== 'Pix online'; };
     $('#kX').onclick = closeDlg;
@@ -468,11 +516,11 @@ async function vTrack(code) {
 async function vPanel(tab) {
   const S = ME.tenant, owner = ME.role === 'owner';
   setColor(S.color); $('#bName').textContent = S.name;
-  const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ['cardapio', 'Cardápio'], ...(owner ? [['relatorios', 'Relatórios'], ['config', 'Configurações']] : [])];
+  const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ['cardapio', 'Cardápio'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['config', 'Configurações']] : [])];
   if (!tabs.some(t => t[0] === tab)) tab = 'pedidos';
   $('#banner').innerHTML = billingBanner(S, owner);
   header(tabs.map(([k, n]) => `<a href="/painel/${k}" data-link class="${k === tab ? 'on' : ''}">${esc(n)}</a>`).join('') + `<a href="/loja/${S.slug}" target="_blank" rel="noopener">Ver loja ↗</a>` + (ME.isAdmin ? '<a href="/plataforma" data-link>Plataforma</a>' : ''));
-  await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, relatorios: pReports, config: pConfig })[tab](S, owner);
+  await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, clientes: pCustomers, relatorios: pReports, config: pConfig })[tab](S, owner);
 }
 
 function billingBanner(t, owner) {
@@ -535,7 +583,7 @@ async function pOrders(S) {
 async function pDelivery(S) {
   let ready = [], route = [], couriers = [];
   const load = async () => {
-    [ready, route, couriers] = await Promise.all([fetchOrders(S.id, ['pronto']), fetchOrders(S.id, ['rota']), q(sb.from('couriers').select('*').eq('tenant_id', S.id).order('id'))]);
+    [ready, route, couriers] = await Promise.all([fetchOrders(S.id, ['pronto']), fetchOrders(S.id, ['rota']), q(sb.from('couriers').select('id, tenant_id, name, phone, active').eq('tenant_id', S.id).order('id'))]);
     draw();
   };
   const draw = () => {
@@ -644,6 +692,39 @@ async function pMenu(S, owner) {
   await load();
 }
 
+/* ---------- clientes ---------- */
+async function pCustomers(S) {
+  let list = [], term = '';
+  const load = async () => { list = await rpc('store_customers', { p_tenant: S.id, p_search: term || null }); draw(); };
+  const draw = () => {
+    const box = $('#custList');
+    const html = `<div class="scroll"><table class="stack"><thead><tr><th>Cliente</th><th class="n">Pedidos</th><th class="n">Total gasto</th><th>Último pedido</th><th></th></tr></thead><tbody>
+      ${list.map(c => `<tr><td data-l="Cliente"><b>${esc(c.name)}</b><br><span class="mut">${esc(c.phone)}${c.address ? ' · ' + esc(c.address) : ''}</span></td>
+        <td data-l="Pedidos" class="n">${c.orders}</td><td data-l="Total gasto" class="n price">${brl(c.spent)}</td>
+        <td data-l="Último pedido">${new Date(c.lastOrder).toLocaleDateString('pt-BR')}${mins(c.lastOrder) > 30 * 1440 ? ' <span class="badge b-a">sumido</span>' : ''}</td>
+        <td data-l=""><span class="row">${waBtn(waLink(c.phone, `Olá, ${c.name.split(' ')[0]}! Aqui é da ${S.name}. Sentimos sua falta! 😊`))}<button class="ghost sm" data-anon="${esc(c.phone)}">Excluir dados</button></span></td></tr>`).join('') || '<tr><td class="mut">Nenhum cliente encontrado.</td></tr>'}</tbody></table></div>`;
+    if (box) { box.innerHTML = html; return; }
+    app.innerHTML = `<div class="row between"><div><h2>Clientes</h2><p class="lead">Quem já pediu na sua loja, montado a partir dos pedidos. Clientes sem pedir há mais de 30 dias aparecem como "sumido".</p></div>
+      <span class="row"><button class="ghost" id="csv">Baixar planilha (CSV)</button></span></div>
+      <div class="panel"><input id="custQ" type="search" placeholder="Buscar por nome ou telefone" value="${esc(term)}"><div id="custList">${html}</div>
+      <p class="mut" style="margin:0">"Excluir dados" atende pedidos de exclusão da LGPD: apaga nome, telefone e endereço desse cliente em todos os pedidos da loja. Os valores continuam nos relatórios.</p></div>`;
+  };
+  let tmr;
+  app.oninput = e => { if (e.target.id !== 'custQ') return; clearTimeout(tmr); tmr = setTimeout(() => { term = e.target.value.trim(); load().catch(err => toast(err.message)); }, 300); };
+  app.onclick = attempt(async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.anon) { if (!sure(b)) return; const n = await rpc('anonymize_customer', { p_tenant: S.id, p_phone: b.dataset.anon }); toast(`Dados removidos de ${n} pedido(s)`); await load(); }
+    if (b.id === 'csv') {
+      const rows = [['Nome', 'Telefone', 'Endereço', 'Pedidos', 'Total gasto', 'Primeiro pedido', 'Último pedido'],
+        ...list.map(c => [c.name, c.phone, c.address || '', c.orders, fromCents(c.spent), new Date(c.firstOrder).toLocaleDateString('pt-BR'), new Date(c.lastOrder).toLocaleDateString('pt-BR')])];
+      const csv = '\ufeff' + rows.map(r => r.map(x => `"${String(x).replace(/"/g, '""')}"`).join(';')).join('\n');
+      const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })); a.download = `clientes-${S.slug}.csv`; a.click(); URL.revokeObjectURL(a.href);
+    }
+  });
+  cleanup = () => { app.oninput = app.onclick = null; clearTimeout(tmr); };
+  await load();
+}
+
 /* ---------- relatórios ---------- */
 async function pReports(S) {
   let days = 7;
@@ -668,10 +749,12 @@ async function pReports(S) {
 /* ---------- configurações ---------- */
 async function pConfig(S) {
   const plans = await q(sb.from('plans').select('*').order('sort'));
+  let couriers = [];
   const draw = async () => {
-    const [st, zones, coupons, couriers, team, nOrders, pix, bill] = await Promise.all([
+    let st, zones, coupons, team, nOrders, pix, bill;
+    [st, zones, coupons, couriers, team, nOrders, pix, bill] = await Promise.all([
       q(sb.from('tenants').select('*').eq('id', S.id).single()), q(sb.from('zones').select('*').eq('tenant_id', S.id).order('id')),
-      q(sb.from('coupons').select('*').eq('tenant_id', S.id).order('id')), q(sb.from('couriers').select('*').eq('tenant_id', S.id).order('id')),
+      q(sb.from('coupons').select('*').eq('tenant_id', S.id).order('id')), q(sb.from('couriers').select('id, tenant_id, name, phone, active').eq('tenant_id', S.id).order('id')),
       rpc('list_team', { p_tenant: S.id }), sb.from('orders').select('id', { count: 'exact', head: true }).eq('tenant_id', S.id).then(r => r.count || 0),
       rpc('pix_settings', { p_tenant: S.id }).catch(() => null), rpc('billing_info', { p_tenant: S.id }).catch(() => null)]);
     const link = `${location.origin}/loja/${st.slug}`;
@@ -696,7 +779,8 @@ async function pConfig(S) {
       <form id="fZone" class="row" style="flex-wrap:nowrap"><input id="zN" placeholder="Bairro" required maxlength="60"><input id="zF" inputmode="decimal" placeholder="Taxa" style="width:100px" required><button class="ghost">Adicionar</button></form></div>
     <div class="panel"><h3>Cupons</h3><table><tbody>${coupons.map(c => `<tr><td><b>${esc(c.code)}</b><br><span class="mut">${[c.percent ? c.percent + '% de desconto' : '', c.free_shipping ? 'frete grátis' : ''].filter(Boolean).join(' + ')}</span></td><td class="n"><button class="sm ${c.active ? 'ok' : 'ghost'}" data-cup="${c.id}" data-on="${c.active ? 1 : 0}">${c.active ? 'Ativo' : 'Pausado'}</button> <button class="ghost sm" data-del="coupons:${c.id}" aria-label="Remover">×</button></td></tr>`).join('')}</tbody></table>
       <form id="fCup" class="row"><input id="cuC" placeholder="CÓDIGO" required pattern="[A-Za-z0-9]{2,20}" style="flex:1"><input id="cuP" type="number" min="0" max="90" placeholder="%" style="width:80px"><label class="chk"><input type="checkbox" id="cuF"> Frete grátis</label><button class="ghost">Criar</button></form></div>
-    <div class="panel"><h3>Entregadores</h3><table><tbody>${couriers.map(c => `<tr><td>${esc(c.name)}<br><span class="mut">${esc(c.phone)}</span></td><td class="n"><button class="ghost sm" data-del="couriers:${c.id}" aria-label="Remover">×</button></td></tr>`).join('')}</tbody></table>
+    <div class="panel"><h3>Entregadores</h3><table><tbody>${couriers.map(c => `<tr><td>${esc(c.name)}<br><span class="mut">${esc(c.phone)}</span></td><td class="n"><span class="row" style="justify-content:flex-end"><button class="ghost sm" data-clink="${c.id}">Enviar link</button><button class="ghost sm" data-crot="${c.id}">Novo link</button><button class="ghost sm" data-del="couriers:${c.id}" aria-label="Remover">×</button></span></td></tr>`).join('')}</tbody></table>
+      <p class="mut" style="margin:0">Cada entregador recebe um link próprio para ver as entregas dele no celular e marcar "Entreguei", sem precisar de senha. "Novo link" desativa o anterior.</p>
       <form id="fCour" class="row" style="flex-wrap:nowrap"><input id="crN" placeholder="Nome" required maxlength="60"><input id="crP" placeholder="Telefone"><button class="ghost">Adicionar</button></form></div>
     <div class="panel"><h3>Equipe</h3><table><tbody>${team.map(u => `<tr><td>${esc(u.email)}</td><td>${u.role === 'owner' ? 'Dono' : 'Atendente'}</td><td class="n">${u.role === 'staff' ? `<button class="ghost sm" data-staff="${u.user_id}" aria-label="Remover">×</button>` : ''}</td></tr>`).join('')}</tbody></table>
       <form id="fTeam" class="row" style="flex-wrap:nowrap"><input id="tE" type="email" placeholder="E-mail do atendente" required><button class="ghost">Adicionar</button></form>
@@ -725,15 +809,29 @@ async function pConfig(S) {
         ${bill.status === 'active' ? '<button class="ghost" id="subNow">Trocar cartão</button>' : ''}
         ${bill.hasSubscription ? '<button class="ghost" id="subSync">Atualizar status</button>' : ''}
         ${bill.hasSubscription && bill.status !== 'canceled' ? '<button class="ghost" id="subCancel">Cancelar assinatura</button>' : ''}</span>
-      <p class="mut" style="margin:0">Pagamento mensal no cartão pelo Mercado Pago. ${bill.status === 'trial' ? 'Assinando agora, a primeira cobrança só acontece quando o teste grátis terminar.' : ''}</p>` : ''}</div></div>`;
+      <p class="mut" style="margin:0">Pagamento mensal no cartão pelo Mercado Pago. ${bill.status === 'trial' ? 'Assinando agora, a primeira cobrança só acontece quando o teste grátis terminar.' : ''}</p>` : ''}</div>
+    <form class="panel danger" id="fDel"><h3>Excluir loja</h3><p class="mut" style="margin:0">Apaga a loja e todos os dados dela (cardápio, pedidos, clientes, equipe). <b>Não tem volta.</b> Cancele a assinatura antes.</p>
+      <label>Para confirmar, digite o endereço da loja: <b>${esc(st.slug)}</b><input id="delSlug" autocomplete="off"></label>
+      <button class="ghost">Excluir loja definitivamente</button></form></div>`;
   };
   const refreshBrand = async () => { await loadMe(); setColor(ME.tenant.color); $('#bName').textContent = ME.tenant.name; };
   app.onclick = attempt(async e => {
-    const b = e.target.closest('button'); if (!b || b.type === 'submit') return;
+    // botões de envio de formulário são tratados no onsubmit; os demais (fora de formulários) aqui
+    const b = e.target.closest('button'); if (!b || (b.type === 'submit' && b.closest('form'))) return;
     if (b.id === 'copyMon') { for (let i = 0; i < 7; i++) for (const k of 'abcd') $(`#h${i}${k}`).value = $(`#h1${k}`).value; return; }
     if (b.id === 'copy') { try { await navigator.clipboard.writeText(`${location.origin}/loja/${S.slug}`); toast('Link copiado'); } catch { toast('Copie o link manualmente'); } return; }
     if (b.id === 'demo') { b.disabled = true; await rpc('generate_demo_orders', { p_tenant: S.id, p_count: 12 }); toast('Pedidos de exemplo criados'); }
     if (b.dataset.del) { if (!sure(b)) return; const [t, id] = b.dataset.del.split(':'); await q(sb.from(t).delete().eq('id', +id)); }
+    if (b.dataset.clink || b.dataset.crot) {
+      const id = +(b.dataset.clink || b.dataset.crot);
+      if (b.dataset.crot && !sure(b)) return;
+      const tok = await rpc('courier_link', { p_courier: id, p_rotate: !!b.dataset.crot });
+      const c = couriers.find(x => x.id === id), link = `${location.origin}/entregador/${tok}`;
+      const wa = waLink(c?.phone, `Olá, ${c?.name}! Este é o seu link de entregas da ${S.name}: ${link}`);
+      if (wa) window.open(wa, '_blank', 'noopener');
+      else { try { await navigator.clipboard.writeText(link); toast('Link copiado'); } catch { prompt('Copie o link do entregador:', link); } }
+      if (b.dataset.clink) return;
+    }
     if (b.dataset.staff) { if (!sure(b)) return; await rpc('remove_staff', { p_tenant: S.id, p_user: b.dataset.staff }); }
     if (b.dataset.cup) await q(sb.from('coupons').update({ active: b.dataset.on !== '1' }).eq('id', +b.dataset.cup));
     if (b.dataset.plan) {
@@ -773,6 +871,7 @@ async function pConfig(S) {
     if (id === 'fCup') await q(sb.from('coupons').insert({ tenant_id: S.id, code: $('#cuC').value.trim().toUpperCase(), percent: +$('#cuP').value || 0, free_shipping: $('#cuF').checked }));
     if (id === 'fCour') await q(sb.from('couriers').insert({ tenant_id: S.id, name: $('#crN').value.trim(), phone: $('#crP').value.trim() }));
     if (id === 'fTeam') await rpc('add_staff', { p_tenant: S.id, p_email: $('#tE').value });
+    if (id === 'fDel') { await rpc('delete_my_tenant', { p_tenant: S.id, p_confirm_slug: $('#delSlug').value }); local.set('tenant', null); toast('Loja excluída'); return go('/'); }
     toast('Salvo'); await draw();
   });
   cleanup = () => { app.onclick = app.onchange = app.onsubmit = null; };

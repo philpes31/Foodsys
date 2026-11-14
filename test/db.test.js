@@ -29,7 +29,7 @@ before(() => {
   psql(['-d', 'postgres', '-c', `drop database if exists ${DB}`]);
   psql(['-d', 'postgres', '-c', `create database ${DB}`]);
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -310,4 +310,64 @@ test('assinatura: plataforma libera grátis ou dá dias', () => {
   const o = json('platform_overview()', U.admin);
   assert.equal(typeof o.paying, 'number'); assert.ok('trials' in o);
   assert.equal(o.tenants.find(x => x.id === pizzaId).canSell, true);
+});
+
+test('entregador: link secreto mostra só as entregas dele e permite marcar entregue', () => {
+  sql(`update tenants set billing_status = 'free' where id = '${burgerId}'`);
+  const c = sql(`insert into couriers (tenant_id, name, phone) values ('${burgerId}', 'Lia', '11911112222') returning id`, U.burger);
+  fails(`select access_token from couriers where id = ${c}`, U.burger, /permission denied/);
+  assert.equal(sql(`select count(*) from (select id, name from couriers where id = ${c}) x`, U.burger), '1');
+  fails(`select courier_link(${c})`, U.pizza, /Sem permissão/);
+  fails(`select courier_link(${c})`, U.staff, /Sem permissão/);
+  const tok = sql(`select courier_link(${c})`, U.burger);
+  assert.equal(tok.length, 64);
+  // despacha um pedido pronto de entrega para a Lia
+  const p = menu('brasa').find(x => x.groups.length === 0);
+  const r = order('brasa', { customer, fulfillment: 'delivery', zoneId: zones('brasa')[0].id, address: 'Rua C, 30', payment: 'Pix', items: [{ productId: p.id, qty: 1 }] });
+  const oid = sql(`select id from orders where public_code = '${r.code}'`);
+  sql(`select change_order_status(${oid}, 'preparo'); select change_order_status(${oid}, 'pronto'); select change_order_status(${oid}, 'rota', ${c})`, U.burger);
+  const portal = json(`courier_portal('${tok}')`, null);
+  assert.equal(portal.courier.name, 'Lia');
+  assert.equal(portal.deliveries.length, 1);
+  assert.equal(portal.deliveries[0].address, 'Rua C, 30');
+  assert.equal(sql(`select courier_portal('curto')`, null), '');
+  fails(`select courier_deliver('${'x'.repeat(64)}', ${oid})`, null, /Link inválido/);
+  sql(`select courier_deliver('${tok}', ${oid})`, null);
+  assert.equal(sql(`select status from orders where id = ${oid}`), 'entregue');
+  fails(`select courier_deliver('${tok}', ${oid})`, null, /não encontrada/);
+  assert.equal(json(`courier_portal('${tok}')`, null).today.deliveries, 1);
+  // trocar o link invalida o antigo
+  const tok2 = sql(`select courier_link(${c}, true)`, U.burger);
+  assert.notEqual(tok2, tok);
+  assert.equal(sql(`select courier_portal('${tok}')`, null), '');
+});
+
+test('clientes: lista agrupada por telefone, busca e exclusão de dados (LGPD)', () => {
+  const list = json(`store_customers('${burgerId}')`, U.burger);
+  assert.ok(list.length >= 5);
+  const maria = list.find(x => x.phone === '11999990000');
+  assert.ok(maria.orders >= 1 && maria.spent > 0);
+  assert.equal(json(`store_customers('${burgerId}', 'Ana')`, U.burger).every(x => /Ana/.test(x.name)), true);
+  assert.ok(json(`store_customers('${burgerId}', '99999')`, U.burger).length >= 1);
+  fails(`select store_customers('${burgerId}')`, U.pizza, /Sem permissão/);
+  fails(`select anonymize_customer('${burgerId}', '11999990000')`, U.staff, /Sem permissão/);
+  const n = +sql(`select anonymize_customer('${burgerId}', '(11) 99999-0000')`, U.burger);
+  assert.ok(n >= 1);
+  assert.equal(sql(`select count(*) from orders where tenant_id = '${burgerId}' and customer_phone = '11999990000'`), '0');
+  assert.equal(json(`store_customers('${burgerId}')`, U.burger).some(x => x.phone === '11999990000'), false);
+  // pedidos da pizzaria com o mesmo telefone não são afetados
+  assert.ok(+sql(`select count(*) from orders where tenant_id = '${pizzaId}' and customer_phone = '11999990000'`) > 0);
+});
+
+test('LGPD: retenção e exclusão da loja', () => {
+  sql(`update orders set created_at = now() - interval '30 months' where id = (select min(id) from orders where tenant_id = '${pizzaId}')`);
+  fails(`select anonymize_old_orders(24)`, U.pizza, /Sem permissão/);
+  assert.equal(sql(`select anonymize_old_orders(24)`, U.admin), '1');
+  assert.equal(sql(`select anonymize_old_orders(24)`, 'service'), '0');
+  assert.equal(sql(`select anonymize_old_orders(24)`), '0');
+  fails(`select delete_my_tenant('${burgerId}', 'errado')`, U.burger, /para confirmar/);
+  fails(`select delete_my_tenant('${burgerId}', 'brasa')`, U.staff, /Sem permissão/);
+  sql(`select delete_my_tenant('${burgerId}', 'brasa')`, U.burger);
+  assert.equal(sql(`select count(*) from tenants where id = '${burgerId}'`), '0');
+  assert.equal(sql(`select count(*) from orders where tenant_id = '${burgerId}'`), '0');
 });
