@@ -1,3 +1,4 @@
+[hidden]{display:none!important}
 :root{color-scheme:light dark;--bg:light-dark(#fff,#151211);--card:light-dark(#fff,#1f1b19);--soft:light-dark(#f5f2f0,#272220);--ink:light-dark(#1d1716,#f4eeea);--mut:light-dark(#6b605c,#a89d98);--line:light-dark(#e8e0db,#3a322f);--red:#d62828;--red2:color-mix(in srgb,var(--red) 78%,#000);--basil:#2f8f46;--amber:#e9a23b}
 *{box-sizing:border-box;min-width:0}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 Inter,system-ui,sans-serif;overflow-x:clip}
@@ -139,3 +140,7 @@ details summary{cursor:pointer}details ol{margin:8px 0 0;padding-left:20px}
 .danger{border-color:#d6282866}.danger button{color:#d62828;border-color:#d6282866}
 @media print{#foot,#banner{display:none!important}}
 .courier .badge{white-space:normal}
+.tiers{width:auto}.tiers td{padding:4px 6px 4px 0;border:0}.tiers input{width:110px;min-height:40px}
+.loyal{display:grid;gap:8px;padding:12px;border-radius:12px;background:var(--soft)}
+.stamps{display:flex;flex-wrap:wrap;gap:6px}.stamps i{width:22px;height:22px;border-radius:50%;border:2px solid var(--red)}.stamps i.on{background:var(--red)}
+input[type=radio]{width:20px;min-height:20px;accent-color:var(--red);flex:none}

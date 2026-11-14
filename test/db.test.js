@@ -29,7 +29,7 @@ before(() => {
   psql(['-d', 'postgres', '-c', `drop database if exists ${DB}`]);
   psql(['-d', 'postgres', '-c', `create database ${DB}`]);
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -370,4 +370,53 @@ test('LGPD: retenção e exclusão da loja', () => {
   sql(`select delete_my_tenant('${burgerId}', 'brasa')`, U.burger);
   assert.equal(sql(`select count(*) from tenants where id = '${burgerId}'`), '0');
   assert.equal(sql(`select count(*) from orders where tenant_id = '${burgerId}'`), '0');
+});
+
+test('entrega por distância: faixas, fora da área e cálculo no banco', () => {
+  // loja na Praça da Sé (SP)
+  fails(`update tenants set delivery_mode = 'distance', lat = null where id = '${pizzaId}'`, U.pizza, /check constraint/);
+  fails(`update tenants set distance_tiers = '[[0, 100]]' where id = '${pizzaId}'`, U.pizza, /check constraint|valid_tiers/);
+  sql(`update tenants set delivery_mode = 'distance', lat = -23.5503, lng = -46.6339, distance_tiers = '[[2, 500], [5, 800], [8, 1200]]' where id = '${pizzaId}'`, U.pizza);
+  // Av. Paulista (~2,6 km em linha reta) -> faixa de até 5 km
+  const q = json(`delivery_quote('forno-da-vila', -23.5614, -46.6559)`, null);
+  assert.ok(q.km > 2 && q.km < 3, JSON.stringify(q)); assert.equal(q.fee, 800); assert.equal(q.inArea, true);
+  const far = json(`delivery_quote('forno-da-vila', -23.0, -46.0)`, null);
+  assert.equal(far.inArea, false); assert.equal(far.fee, null);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const base = { customer: { name: 'Teo', phone: '11955554444' }, fulfillment: 'delivery', address: 'Av. Paulista, 1000', payment: 'Pix', items: [{ productId: p.id, qty: 1 }] };
+  const r = order('forno-da-vila', { ...base, lat: -23.5614, lng: -46.6559, zoneId: 999999 });
+  assert.equal(r.total, p.price + 800);
+  assert.equal(sql(`select delivery_km || '|' || zone_name from orders where public_code = '${r.code}'`), sql(`select delivery_km || '|' || replace(delivery_km::text, '.', ',') || ' km' from orders where public_code = '${r.code}'`));
+  assert.throws(() => order('forno-da-vila', { ...base, lat: -23.0, lng: -46.0 }), /fora da área/);
+  assert.throws(() => order('forno-da-vila', base), /localizar o endereço/);
+  assert.throws(() => order('forno-da-vila', { ...base, lat: 'x; drop table orders', lng: 1 }), /localizar o endereço/);
+  // retirada continua sem taxa e sem localização
+  assert.ok(order('forno-da-vila', { ...base, fulfillment: 'pickup' }).code);
+  sql(`update tenants set delivery_mode = 'zones' where id = '${pizzaId}'`, U.pizza);
+});
+
+test('fidelidade: selos por pedido entregue e desconto automático no próximo', () => {
+  fails(`update tenants set loyalty_every = 1 where id = '${pizzaId}'`, U.pizza, /check constraint/);
+  sql(`update tenants set loyalty_enabled = true, loyalty_every = 3, loyalty_percent = 20 where id = '${pizzaId}'`, U.pizza);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const c2 = { name: 'Fiel', phone: '(21) 97777-6666' };
+  const mk = (extra = {}) => order('forno-da-vila', { customer: c2, fulfillment: 'pickup', payment: 'Pix', items: [{ productId: p.id, qty: 2 }], ...extra });
+  const deliver = code => { const id = sql(`select id from orders where public_code = '${code}'`);
+    sql(`select change_order_status(${id}, 'preparo'); select change_order_status(${id}, 'pronto'); select change_order_status(${id}, 'entregue')`, U.pizza); };
+  for (let i = 0; i < 3; i++) { const r = mk(); assert.equal(r.total, p.price * 2); deliver(r.code); }
+  assert.equal(json(`store_customers('${pizzaId}', '97777')`, U.pizza)[0].stamps, 3);
+  const prize = mk();                                   // 3 selos -> 20% neste pedido
+  assert.equal(prize.total, p.price * 2 - Math.round(p.price * 2 * 0.2));
+  const tr = json(`track_order('${prize.code}')`, null).order;
+  assert.equal(tr.loyaltyDiscount, Math.round(p.price * 2 * 0.2));
+  assert.equal(tr.loyalty.stamps, 0);                   // prêmio usado: selos zeram
+  assert.equal(mk().total, p.price * 2);                // próximo pedido sem desconto
+  // se o pedido premiado for cancelado, o prêmio volta
+  sql(`select change_order_status((select id from orders where public_code = '${prize.code}'), 'cancelado')`, U.pizza);
+  assert.equal(json(`store_customers('${pizzaId}', '97777')`, U.pizza)[0].stamps, 3);
+  // cupom maior que a fidelidade: vale o cupom
+  sql(`update tenants set loyalty_percent = 5 where id = '${pizzaId}'`, U.pizza);
+  const withCoupon = mk({ coupon: 'PRIMEIRA10' });
+  assert.equal(withCoupon.total, p.price * 2 - Math.round(p.price * 2 * 0.1));
+  assert.equal(sql(`select coalesce(coupon_code, '-') || '/' || loyalty_discount from orders where public_code = '${withCoupon.code}'`), 'PRIMEIRA10/0');
 });

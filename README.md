@@ -16,6 +16,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    3. `20261115000000_pix_online.sql` (Pix online pelo Mercado Pago)
    4. `20261116000000_assinaturas.sql` (assinatura mensal das lojas)
    5. `20261117000000_entregador_clientes_lgpd.sql` (página do entregador, clientes e LGPD)
+   6. `20261118000000_distancia_fidelidade.sql` (taxa por distância e programa de fidelidade)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -137,12 +138,21 @@ O que já está pronto:
 - **Impressão da comanda:** na tela de preparo, o botão **Imprimir** abre a impressão do navegador já no formato 80 mm. Escolha a impressora térmica e, nas configurações de impressão, desmarque "Cabeçalhos e rodapés". Marque **Imprimir comanda ao aceitar** para imprimir automaticamente ao aceitar o pedido. No Chrome, dá para pular a janela de impressão abrindo o navegador com `--kiosk-printing`.
 - **Entregador:** em **Configurações → Entregadores → Enviar link**, cada entregador recebe pelo WhatsApp um link próprio. Ele abre no celular, sem senha, e mostra as entregas dele com endereço, valor a cobrar ou "já pago", e os botões de mapa, WhatsApp, ligar e **Entreguei**. **Novo link** desativa o anterior (use quando um entregador sair).
 - **Clientes:** a aba **Clientes** lista quem já pediu, com número de pedidos, total gasto e último pedido. Clientes que não pedem há mais de 30 dias aparecem como "sumido", e um botão de WhatsApp manda uma mensagem pronta para chamar de volta. Dá para baixar a lista em planilha (CSV).
+- **Taxa por distância:** em **Configurações → Taxa de entrega**, escolha **Por distância**, marque a localização da loja e defina faixas como "até 2 km R$ 5, até 5 km R$ 8, até 8 km R$ 12".
+  - Para a localização, digite o CEP e o número e clique em **Localizar**, ou cole as coordenadas do Google Maps (botão direito no local).
+  - No checkout, o cliente digita o CEP e o número, o endereço é localizado no mapa (BrasilAPI e OpenStreetMap) e a taxa aparece antes de enviar. Fora da última faixa, o pedido não é aceito.
+  - A distância é **em linha reta**, então deixe uma folga nas faixas.
+  - O banco recalcula a taxa a partir das coordenadas do endereço. O link do mapa para o entregador já usa o ponto exato.
+- **Fidelidade:** em **Configurações → Programa de fidelidade**, defina, por exemplo, "a cada 10 pedidos entregues, 10% de desconto".
+  - O cliente é reconhecido pelo telefone e o desconto entra sozinho no pedido seguinte. Não soma com cupom: vale o maior.
+  - Se o pedido premiado for cancelado, o prêmio volta.
+  - O cliente vê o cartão de selos na página do pedido, e a loja vê os selos de cada cliente na aba **Clientes**.
 - **WhatsApp:** os botões abrem o WhatsApp Web ou o app com a mensagem pronta (aceito, pronto, saiu para entrega...) e o link de acompanhamento. Basta tocar em enviar.
 - **Horário:** com "Abrir e fechar sozinha" ligado, a loja só aceita pedidos dentro dos horários. O banco confere isso, não só a tela. O checkbox "Receber pedidos" pausa a loja na hora, mesmo dentro do horário.
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 39 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 41 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;
@@ -150,7 +160,8 @@ O que já está pronto:
 - horário automático (inclusive passando da meia-noite) e permissões das fotos no Storage;
 - Pix online: token protegido, valor conferido, webhook reconferido na API, expiração e pagamento atrasado;
 - assinatura: teste grátis, carência, bloqueio de pedidos, só o dono assina, avisos reconferidos na API;
-- link do entregador, lista de clientes, exclusão de dados (LGPD), retenção e exclusão da loja.
+- link do entregador, lista de clientes, exclusão de dados (LGPD), retenção e exclusão da loja;
+- taxa por distância (faixas, fora da área, coordenadas inválidas) e fidelidade (selos, resgate, cancelamento, cupom maior).
 
 ```bash
 PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test
@@ -174,5 +185,5 @@ Valores em dinheiro são inteiros em **centavos**.
 
 - **Cartão de crédito online** (Checkout do Mercado Pago) usando a mesma função de pagamentos.
 - **WhatsApp a cada mudança de status:** um Database Webhook ou uma Edge Function chamando a API do WhatsApp.
-- **Taxa de entrega por distância** (raio em km a partir da loja).
-- **Programa de fidelidade** sobre a aba Clientes (ex.: a cada 10 pedidos, um cupom).
+- **Distância pela rua** (rota de carro) com um serviço de mapas pago, no lugar da linha reta.
+- **Campanhas** para clientes "sumidos" a partir da aba Clientes.

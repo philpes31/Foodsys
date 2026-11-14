@@ -116,7 +116,7 @@ function openState(t) {
 const waNumber = phone => { const d = String(phone || '').replace(/\D/g, ''); return d.length >= 12 && d.startsWith('55') ? d : d.length >= 10 ? '55' + d : ''; };
 const waLink = (phone, text) => { const n = waNumber(phone); return n ? `https://wa.me/${n}?text=${encodeURIComponent(text)}` : ''; };
 const trackUrl = o => `${location.origin}/pedido/${o.public_code}`;
-const mapsUrl = o => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${o.address}, ${o.zone_name}`)}`;
+const mapsUrl = o => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(o.dest_lat ? `${o.dest_lat},${o.dest_lng}` : / km$/.test(o.zone_name) ? o.address : `${o.address}, ${o.zone_name}`)}`;
 function customerMsg(o, storeName) {
   const n = o.customer_name.split(' ')[0];
   const m = {
@@ -131,6 +131,37 @@ function customerMsg(o, storeName) {
 }
 const courierMsg = o => `Entrega #${o.number}\n${o.customer_name} · ${o.customer_phone}\n${o.address} — ${o.zone_name}\n${o.payment_status === 'paid' ? `JÁ PAGO (${o.payment}) · não cobrar` : `Cobrar: ${o.payment} · ${brl(o.total)}${o.change_for ? ` (troco p/ ${brl(o.change_for)})` : ''}`}\nMapa: ${mapsUrl(o)}`;
 const waBtn = (href, label = 'WhatsApp') => href ? `<a class="btn ghost sm" href="${esc(href)}" target="_blank" rel="noopener">${label}</a>` : '';
+
+/* ---------- endereço: CEP e localização ---------- */
+// CEP → rua, bairro, cidade e (quando houver) coordenadas. BrasilAPI primeiro, ViaCEP de reserva.
+async function lookupCep(cep) {
+  cep = String(cep).replace(/\D/g, '');
+  if (cep.length !== 8) return null;
+  try {
+    const r = await fetch(`https://brasilapi.com.br/api/cep/v2/${cep}`);
+    if (r.ok) { const j = await r.json(); const c = j.location?.coordinates || {};
+      return { street: j.street || '', district: j.neighborhood || '', city: j.city || '', state: j.state || '', lat: +c.latitude || null, lng: +c.longitude || null }; }
+  } catch {}
+  try {
+    const j = await (await fetch(`https://viacep.com.br/ws/${cep}/json/`)).json();
+    if (!j.erro) return { street: j.logradouro || '', district: j.bairro || '', city: j.localidade || '', state: j.uf || '', lat: null, lng: null };
+  } catch {}
+  return null;
+}
+// Endereço completo → coordenadas (OpenStreetMap). Se não achar, usa as coordenadas do CEP.
+async function locateAddress({ street, number, city, state, cep }, cepInfo) {
+  if (street && city) {
+    try {
+      const u = new URL('https://nominatim.openstreetmap.org/search');
+      Object.entries({ format: 'json', limit: '1', countrycodes: 'br', street: `${number || ''} ${street}`.trim(), city, state: state || '', postalcode: String(cep || '').replace(/\D/g, '') })
+        .forEach(([k, v]) => v && u.searchParams.set(k, v));
+      const j = await (await fetch(u, { headers: { 'Accept-Language': 'pt-BR' } })).json();
+      if (j[0]) return { lat: +j[0].lat, lng: +j[0].lon };
+    } catch {}
+  }
+  return cepInfo?.lat ? { lat: cepInfo.lat, lng: cepInfo.lng } : null;
+}
+const kmTxt = km => `${String(km).replace('.', ',')} km`;
 
 /* ---------- comanda (impressora térmica 80 mm) ---------- */
 function printTicket(o, storeName) {
@@ -229,7 +260,7 @@ async function vCourier(token) {
         <div class="${d.paid ? 'badge b-g' : 'badge b-a'}" style="font-size:14px;padding:6px 10px">${d.paid ? 'JÁ PAGO · não cobrar' : `Cobrar ${brl(d.total)} · ${esc(d.payment)}${d.changeFor ? ` · levar troco p/ ${brl(d.changeFor)}` : ''}`}</div>
         <div class="mut">${d.items.map(esc).join(' · ')}</div>
         <div class="grid" style="grid-template-columns:repeat(3,minmax(0,1fr));gap:8px">
-          <a class="btn ghost" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(d.address + ', ' + d.zone)}" target="_blank" rel="noopener">Mapa</a>
+          <a class="btn ghost" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(/ km$/.test(d.zone) ? d.address : d.address + ', ' + d.zone)}" target="_blank" rel="noopener">Mapa</a>
           ${waBtn(waLink(d.customerPhone, `Olá, ${d.customerName.split(' ')[0]}! Sou o entregador da ${r.store.name} e estou chegando com seu pedido #${d.number}.`), 'WhatsApp').replace('btn ghost sm', 'btn ghost') || '<span></span>'}
           <a class="btn ghost" href="tel:${esc(String(d.customerPhone).replace(/[^\d+]/g, ''))}">Ligar</a></div>
         <button class="ok" data-done="${d.id}">Entreguei</button></div>`).join('') || '<div class="panel"><p class="empty">Nenhuma entrega com você agora.</p></div>'}
@@ -313,7 +344,11 @@ async function vShop(slug) {
   const [rawP, zones] = await Promise.all([
     q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id).eq('available', true)),
     q(sb.from('zones').select('id, name, fee').eq('tenant_id', S.id).order('name'))]);
-  const products = sortMenu(rawP), OS = openState(S);
+  const products = sortMenu(rawP), OS = openState(S), DIST = S.delivery_mode === 'distance';
+  let geo = null; // { lat, lng, quote: { km, fee, inArea, maxKm } } no modo por distância
+  const zoneTxt = () => !geo?.quote ? '' : geo.quote.inArea
+    ? `Distância aproximada: <b>${kmTxt(geo.quote.km)}</b> · taxa ${geo.quote.fee ? brl(geo.quote.fee) : 'grátis'}`
+    : `<span class="badge b-r">Fora da área de entrega: ${kmTxt(geo.quote.km)} (a loja entrega até ${kmTxt(geo.quote.maxKm)})</span>`;
   setColor(S.color); $('#bName').textContent = S.name; header('', false); document.title = `${S.name} — pedido online`;
   const cartKey = `cart:${slug}`;
   let cart = local.get(cartKey, []).filter(c => products.some(p => p.id === c.productId)), cat = null, coupon = null;
@@ -322,10 +357,10 @@ async function vShop(slug) {
   const unitOf = (p, ids) => p.price + p.groups.flatMap(g => g.options).filter(o => ids.includes(o.id)).reduce((t, o) => t + o.price, 0);
   const totals = () => {
     const sub = cart.reduce((t, c) => t + c.qty * c.unit, 0), pickup = $('#cMode')?.value === 'pickup';
-    const z = zones.find(z => String(z.id) === $('#cZone')?.value) || zones[0];
-    let fee = pickup || !z ? 0 : z.fee, disc = 0;
+    const z = DIST ? null : zones.find(z => String(z.id) === $('#cZone')?.value) || zones[0];
+    let fee = pickup ? 0 : DIST ? (geo?.quote?.fee || 0) : z ? z.fee : 0, disc = 0;
     if (coupon) { if (coupon.percent) disc = Math.round(sub * coupon.percent / 100); if (coupon.freeShipping) fee = 0; }
-    return { sub, fee, disc, total: sub + fee - disc, pickup, zone: z };
+    return { sub, fee, disc, total: sub + fee - disc, pickup, zone: z, feeKnown: pickup || !DIST || !!geo?.quote?.inArea };
   };
   const paint = () => {
     cat = cats.includes(cat) ? cat : cats[0];
@@ -341,16 +376,16 @@ async function vShop(slug) {
     <aside class="cart" aria-label="Carrinho"><h3>Seu pedido</h3>
       ${cart.length ? cart.map((x, i) => `<div class="ci"><div><b>${x.qty}× ${esc(x.name)}</b>${x.optText ? `<br><span class="mut">${esc(x.optText)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}<br><button class="ghost sm" data-dec="${i}" aria-label="Diminuir">−</button> <button class="ghost sm" data-inc="${i}" aria-label="Aumentar">+</button></div><span class="price">${brl(x.qty * x.unit)}</span></div>`).join('') : '<p class="empty">Carrinho vazio.</p>'}
       <label>Como receber<select id="cMode"><option value="delivery">Entrega</option>${S.allow_pickup ? '<option value="pickup">Retirar na loja</option>' : ''}</select></label>
-      <label id="zWrap">Bairro<select id="cZone">${zones.map(z => `<option value="${z.id}">${esc(z.name)} · ${z.fee ? brl(z.fee) : 'grátis'}</option>`).join('')}</select></label>
+      <label id="zWrap" ${DIST ? 'hidden' : ''}>Bairro<select id="cZone">${zones.map(z => `<option value="${z.id}">${esc(z.name)} · ${z.fee ? brl(z.fee) : 'grátis'}</option>`).join('')}</select></label>
       <label>Cupom<span class="row" style="flex-wrap:nowrap"><input id="cCup" placeholder="Ex.: PRIMEIRA10" value="${esc(coupon?.code || '')}"><button class="ghost" id="cupBtn">Aplicar</button></span></label>
       <div id="tots"></div><button class="pri" id="checkout">Finalizar pedido</button></aside></div>
     ${count ? `<button class="pri cartbar" id="toCart">Ver carrinho · ${count} ${count > 1 ? 'itens' : 'item'} · ${brl(cart.reduce((t, c) => t + c.qty * c.unit, 0))}</button>` : ''}`;
     paintTotals();
   };
   const paintTotals = () => {
-    const t = totals(), low = S.min_order && t.sub < S.min_order; $('#zWrap').hidden = t.pickup;
-    $('#tots').innerHTML = `<div class="ci"><span>Subtotal</span><span class="price">${brl(t.sub)}</span></div><div class="ci"><span>Entrega</span><span class="price">${t.fee ? brl(t.fee) : 'Grátis'}</span></div>${t.disc ? `<div class="ci"><span>Desconto</span><span class="price">−${brl(t.disc)}</span></div>` : ''}<div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>${low && cart.length ? `<span class="badge b-a">Faltam ${brl(S.min_order - t.sub)} para o pedido mínimo</span>` : ''}`;
-    $('#checkout').disabled = !cart.length || low || !OS.open || (!t.pickup && !zones.length);
+    const t = totals(), low = S.min_order && t.sub < S.min_order; $('#zWrap').hidden = t.pickup || DIST;
+    $('#tots').innerHTML = `<div class="ci"><span>Subtotal</span><span class="price">${brl(t.sub)}</span></div><div class="ci"><span>Entrega${DIST && geo?.quote && !t.pickup ? ` (${kmTxt(geo.quote.km)})` : ''}</span><span class="price">${!t.feeKnown ? 'pelo endereço' : t.fee ? brl(t.fee) : 'Grátis'}</span></div>${t.disc ? `<div class="ci"><span>Desconto</span><span class="price">−${brl(t.disc)}</span></div>` : ''}<div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>${low && cart.length ? `<span class="badge b-a">Faltam ${brl(S.min_order - t.sub)} para o pedido mínimo</span>` : ''}`;
+    $('#checkout').disabled = !cart.length || low || !OS.open || (!t.pickup && !DIST && !zones.length);
   };
   const addToCart = it => { const ex = cart.find(c => c.productId === it.productId && c.optionIds.join() === it.optionIds.join() && c.notes === it.notes); ex ? ex.qty += it.qty : cart.push(it); saveCart(); toast('Adicionado ao carrinho'); paint(); };
   const builder = p => {
@@ -394,7 +429,8 @@ async function vShop(slug) {
       <div class="two" style="gap:10px"><label>CEP<input id="kCep" inputmode="numeric" autocomplete="postal-code" maxlength="9" placeholder="00000-000" value="${esc(last.cep || '')}"></label><label>Número<input id="kNum" required value="${esc(last.num || '')}" placeholder="123"></label></div>
       <label>Rua<input id="kRua" required minlength="3" autocomplete="address-line1" value="${esc(last.rua || '')}" placeholder="Rua, avenida…"></label>
       <label>Complemento / referência<input id="kComp" value="${esc(last.comp || '')}" placeholder="Apto, bloco, ponto de referência"></label>
-      <p class="mut" id="kZone" style="margin:0">Bairro de entrega: <b>${esc(t.zone.name)}</b> · taxa ${t.fee ? brl(t.fee) : 'grátis'}</p>`}
+      <p class="mut" id="kZone" style="margin:0">${DIST ? (geo?.quote ? zoneTxt() : 'Taxa de entrega: preencha o CEP e o número para calcular.') : `Bairro de entrega: <b>${esc(t.zone.name)}</b> · taxa ${t.fee ? brl(t.fee) : 'grátis'}`}</p>`}
+      ${S.loyalty_enabled ? `<p class="mut" style="margin:0">Fidelidade: a cada ${S.loyalty_every} pedidos entregues, ${S.loyalty_percent}% de desconto no próximo, aplicado automaticamente.</p>` : ''}
       <label>Pagamento<select id="kPay">${S.pix_online ? '<option value="Pix online" selected>Pix agora (QR Code, confirmação automática)</option>' : ''}<option value="Pix">Pix na entrega</option><option>Cartão na entrega</option><option>Dinheiro</option></select></label>
       <label id="kEm" ${S.pix_online ? '' : 'hidden'}>E-mail (para o comprovante do Pix)<input id="kEmail" type="email" autocomplete="email" value="${esc(last.email || '')}" placeholder="voce@email.com"></label>
       <label id="kTr" hidden>Troco para (R$)<input id="kT" inputmode="decimal" placeholder="Ex.: 100"></label>
@@ -403,22 +439,34 @@ async function vShop(slug) {
       <div class="row" style="justify-content:flex-end"><button type="button" class="ghost" id="kX">Voltar</button><button class="pri" id="kGo">Enviar pedido</button></div></form>`);
     $('#kPay').onchange = e => { $('#kTr').hidden = e.target.value !== 'Dinheiro'; $('#kEm').hidden = e.target.value !== 'Pix online'; };
     $('#kX').onclick = closeDlg;
-    // CEP → rua e bairro (ViaCEP). Se o bairro existir na lista de entrega da loja, já seleciona.
+    // CEP → rua e bairro. Modo bairros: seleciona o bairro se existir na lista. Modo distância: localiza e calcula a taxa.
     const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+    let cepInfo = null;
+    const locate = async () => {
+      if (!DIST || t.pickup) return;
+      const pos = await locateAddress({ street: $('#kRua').value.trim() || cepInfo?.street, number: $('#kNum').value.trim(), city: cepInfo?.city, state: cepInfo?.state, cep: $('#kCep').value }, cepInfo);
+      if (!pos) { geo = null; $('#kZone').innerHTML = '<span class="badge b-a">Não encontramos esse endereço no mapa. Confira o CEP.</span>'; return; }
+      const quote = await rpc('delivery_quote', { p_slug: slug, p_lat: pos.lat, p_lng: pos.lng });
+      geo = { ...pos, quote };
+      $('#kZone').innerHTML = zoneTxt(); paintTotals(); dialogTotal();
+    };
     $('#kCep')?.addEventListener('input', async e => {
       const cep = e.target.value.replace(/\D/g, '');
       if (cep.length !== 8) return;
-      try {
-        const r = await (await fetch(`https://viacep.com.br/ws/${cep}/json/`)).json();
-        if (r.erro) return toast('CEP não encontrado');
-        if (r.logradouro) $('#kRua').value = r.logradouro;
-        const z = zones.find(z => norm(z.name) === norm(r.bairro));
+      cepInfo = await lookupCep(cep);
+      if (!cepInfo) return toast('CEP não encontrado');
+      if (cepInfo.street) $('#kRua').value = cepInfo.street;
+      if (!DIST) {
+        const z = zones.find(z => norm(z.name) === norm(cepInfo.district));
         if (z) { $('#cZone').value = z.id; paintTotals(); const t2 = totals(); $('#kZone').innerHTML = `Bairro de entrega: <b>${esc(z.name)}</b> · taxa ${t2.fee ? brl(t2.fee) : 'grátis'}`; dialogTotal(); }
-        else if (r.bairro) toast(`Confira se o bairro ${r.bairro} está na lista de entrega`);
-        $('#kNum').focus();
-      } catch { /* sem internet ou ViaCEP fora: o cliente digita a rua */ }
+        else if (cepInfo.district) toast(`Confira se o bairro ${cepInfo.district} está na lista de entrega`);
+      } else if ($('#kNum').value.trim()) await locate().catch(() => {});
+      $('#kNum').focus();
     });
+    $('#kNum')?.addEventListener('change', () => locate().catch(() => {}));
+    $('#kRua')?.addEventListener('change', () => locate().catch(() => {}));
     const dialogTotal = () => { const el = $('#fCk .tot .price'); if (el) el.textContent = brl(totals().total); };
+    if (DIST && !t.pickup && $('#kCep').value.replace(/\D/g, '').length === 8) lookupCep($('#kCep').value).then(c => { cepInfo = c; if (!geo) return locate(); }).catch(() => {});
     $('#fCk').onsubmit = attempt(async e => {
       e.preventDefault(); $('#kGo').disabled = true;
       try {
@@ -427,8 +475,14 @@ async function vShop(slug) {
         if (pixOnline && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) throw new Error('Informe seu e-mail para gerar o Pix');
         const addr = t.pickup ? '' : `${$('#kRua').value.trim()}, ${$('#kNum').value.trim()}${$('#kComp').value.trim() ? ' - ' + $('#kComp').value.trim() : ''}${$('#kCep').value.trim() ? ' - CEP ' + $('#kCep').value.trim() : ''}`;
         const zoneNow = totals().zone;
+        if (DIST && !t.pickup) {
+          if (!geo) await locate();
+          if (!geo) throw new Error('Não encontramos o endereço no mapa. Confira o CEP e o número.');
+          if (!geo.quote?.inArea) throw new Error(`Endereço fora da área de entrega (${kmTxt(geo.quote?.km ?? '?')}).`);
+        }
         const r = await rpc('place_order', { p_slug: slug, p: {
           customer, fulfillment: t.pickup ? 'pickup' : 'delivery', zoneId: zoneNow?.id, address: addr, payment: $('#kPay').value,
+          ...(DIST && !t.pickup ? { lat: geo.lat, lng: geo.lng } : {}),
           changeFor: $('#kT').value ? toCents($('#kT').value) : undefined, coupon: coupon?.code,
           items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: c.notes })) } });
         local.set('customer', { ...last, ...customer, ...(email ? { email } : {}), ...(t.pickup ? {} : { cep: $('#kCep').value, rua: $('#kRua').value, num: $('#kNum').value, comp: $('#kComp').value }) });
@@ -479,8 +533,11 @@ async function vTrack(code) {
       ${o.courier ? `<p><b>${esc(o.courier)}</b> está a caminho de ${esc(o.address)}, ${esc(o.zone)}.</p>` : ''}
       <table><tbody>${o.items.map(x => `<tr><td>${x.qty}× ${esc(x.product_name)}${x.options_text ? `<br><span class="mut">${esc(x.options_text)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}</td><td class="n price">${brl(x.qty * x.unit_price)}</td></tr>`).join('')}
       <tr><td>${o.fulfillment === 'pickup' ? 'Retirada na loja' : `Entrega (${esc(o.zone)})`}</td><td class="n price">${brl(o.fee)}</td></tr>
-      ${o.discount ? `<tr><td>Desconto ${esc(o.coupon || '')}</td><td class="n price">−${brl(o.discount)}</td></tr>` : ''}
+      ${o.discount ? `<tr><td>Desconto ${o.loyaltyDiscount ? 'de fidelidade' : esc(o.coupon || '')}</td><td class="n price">−${brl(o.discount)}</td></tr>` : ''}
       <tr><td><b>Total · ${esc(o.payment)}</b></td><td class="n price"><b>${brl(o.total)}</b></td></tr></tbody></table>
+      ${o.loyalty ? `<div class="loyal"><b>Cartão fidelidade</b>${o.loyaltyDiscount ? `<span class="badge b-g">Você ganhou ${o.loyalty.percent}% neste pedido!</span>` : ''}
+        <div class="stamps">${Array.from({ length: o.loyalty.every }, (_, i) => `<i class="${i < Math.min(o.loyalty.stamps, o.loyalty.every) ? 'on' : ''}"></i>`).join('')}</div>
+        <span class="mut">${o.loyalty.stamps >= o.loyalty.every ? `Seu próximo pedido tem ${o.loyalty.percent}% de desconto.` : `${o.loyalty.stamps} de ${o.loyalty.every} pedidos entregues. Faltam ${o.loyalty.every - o.loyalty.stamps} para ganhar ${o.loyalty.percent}% de desconto.`}</span></div>` : ''}
       <a class="btn ghost" href="/loja/${esc(S.slug)}" data-link>Voltar à loja</a></div>`;
     return o.status;
   };
@@ -700,7 +757,7 @@ async function pCustomers(S) {
     const box = $('#custList');
     const html = `<div class="scroll"><table class="stack"><thead><tr><th>Cliente</th><th class="n">Pedidos</th><th class="n">Total gasto</th><th>Último pedido</th><th></th></tr></thead><tbody>
       ${list.map(c => `<tr><td data-l="Cliente"><b>${esc(c.name)}</b><br><span class="mut">${esc(c.phone)}${c.address ? ' · ' + esc(c.address) : ''}</span></td>
-        <td data-l="Pedidos" class="n">${c.orders}</td><td data-l="Total gasto" class="n price">${brl(c.spent)}</td>
+        <td data-l="Pedidos" class="n">${c.orders}${S.loyalty_enabled && c.stamps != null ? `<br><span class="mut">${Math.min(c.stamps, S.loyalty_every)}/${S.loyalty_every} selos</span>` : ''}</td><td data-l="Total gasto" class="n price">${brl(c.spent)}</td>
         <td data-l="Último pedido">${new Date(c.lastOrder).toLocaleDateString('pt-BR')}${mins(c.lastOrder) > 30 * 1440 ? ' <span class="badge b-a">sumido</span>' : ''}</td>
         <td data-l=""><span class="row">${waBtn(waLink(c.phone, `Olá, ${c.name.split(' ')[0]}! Aqui é da ${S.name}. Sentimos sua falta! 😊`))}<button class="ghost sm" data-anon="${esc(c.phone)}">Excluir dados</button></span></td></tr>`).join('') || '<tr><td class="mut">Nenhum cliente encontrado.</td></tr>'}</tbody></table></div>`;
     if (box) { box.innerHTML = html; return; }
@@ -775,6 +832,22 @@ async function pConfig(S) {
           <td><span class="row" style="flex-wrap:nowrap"><input type="time" id="h${i}c" value="${r[1]?.[0] || ''}" aria-label="${d} abre 2º turno"><span>às</span><input type="time" id="h${i}d" value="${r[1]?.[1] || ''}" aria-label="${d} fecha 2º turno"></span></td></tr>`; }).join('')}</tbody></table>
       <p class="mut" style="margin:0">Deixe em branco os dias em que não abre. O 2º turno é opcional (ex.: almoço e jantar). Pode fechar depois da meia-noite, como 18:00 às 02:00.</p>
       <span class="row"><button type="button" class="ghost sm" id="copyMon">Copiar segunda para todos os dias</button><button class="pri">Salvar horários</button></span></form>
+    <form class="panel" id="fDeliv"><h3>Taxa de entrega</h3>
+      <label class="chk"><input type="radio" name="dMode" value="zones" ${st.delivery_mode !== 'distance' ? 'checked' : ''}> Por bairro (lista de bairros e taxas)</label>
+      <label class="chk"><input type="radio" name="dMode" value="distance" ${st.delivery_mode === 'distance' ? 'checked' : ''}> Por distância (km a partir da loja)</label>
+      <div class="grid" style="gap:10px">
+        <label>Localização da loja (latitude, longitude)<input id="dCoord" placeholder="-23.5503, -46.6339" value="${st.lat != null ? `${st.lat}, ${st.lng}` : ''}"></label>
+        <div class="row" style="flex-wrap:nowrap"><input id="dCep" inputmode="numeric" maxlength="9" placeholder="CEP da loja" style="width:130px"><input id="dNum" placeholder="Número" style="width:100px"><button type="button" class="ghost" id="dLoc">Localizar</button>
+          ${st.lat != null ? `<a class="btn ghost" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${st.lat},${st.lng}">Ver no mapa</a>` : ''}</div>
+        <p class="mut" style="margin:0">Dica: no Google Maps, clique com o botão direito na porta da loja e clique nas coordenadas para copiar. A distância é calculada em linha reta, então deixe uma folga nas faixas.</p>
+        <table class="tiers"><thead><tr><th>Até (km)</th><th>Taxa (R$)</th></tr></thead><tbody>
+          ${[...(st.distance_tiers || []), ...Array(Math.max(0, 6 - (st.distance_tiers || []).length)).fill(['', null])].slice(0, 6).map(([km, fee], i) => `<tr><td><input id="tk${i}" inputmode="decimal" value="${km === '' ? '' : String(km).replace('.', ',')}" aria-label="Até km"></td><td><input id="tf${i}" inputmode="decimal" value="${fee == null ? '' : fromCents(fee)}" aria-label="Taxa"></td></tr>`).join('')}</tbody></table>
+        <p class="mut" style="margin:0">Acima da maior distância, a loja não entrega. Deixe linhas em branco se não precisar.</p></div>
+      <h3>Programa de fidelidade</h3>
+      <label class="chk"><input type="checkbox" id="lOn" ${st.loyalty_enabled ? 'checked' : ''}> Dar desconto para clientes fiéis</label>
+      <div class="two" style="gap:10px"><label>A cada (pedidos entregues)<input id="lEvery" type="number" min="2" max="50" value="${st.loyalty_every ?? 10}"></label><label>Desconto no pedido seguinte (%)<input id="lPct" type="number" min="1" max="50" value="${st.loyalty_percent ?? 10}"></label></div>
+      <p class="mut" style="margin:0">O cliente é reconhecido pelo telefone. O desconto entra sozinho no pedido seguinte e não soma com cupom (vale o maior). Ele acompanha os selos na página do pedido.</p>
+      <button class="pri">Salvar entrega e fidelidade</button></form>
     <div class="panel"><h3>Bairros e taxas</h3><table><tbody>${zones.map(z => `<tr><td>${esc(z.name)}</td><td class="n" style="width:120px"><input inputmode="decimal" value="${fromCents(z.fee)}" data-zone="${z.id}" aria-label="Taxa ${esc(z.name)}"></td><td class="n"><button class="ghost sm" data-del="zones:${z.id}" aria-label="Remover">×</button></td></tr>`).join('')}</tbody></table>
       <form id="fZone" class="row" style="flex-wrap:nowrap"><input id="zN" placeholder="Bairro" required maxlength="60"><input id="zF" inputmode="decimal" placeholder="Taxa" style="width:100px" required><button class="ghost">Adicionar</button></form></div>
     <div class="panel"><h3>Cupons</h3><table><tbody>${coupons.map(c => `<tr><td><b>${esc(c.code)}</b><br><span class="mut">${[c.percent ? c.percent + '% de desconto' : '', c.free_shipping ? 'frete grátis' : ''].filter(Boolean).join(' + ')}</span></td><td class="n"><button class="sm ${c.active ? 'ok' : 'ghost'}" data-cup="${c.id}" data-on="${c.active ? 1 : 0}">${c.active ? 'Ativo' : 'Pausado'}</button> <button class="ghost sm" data-del="coupons:${c.id}" aria-label="Remover">×</button></td></tr>`).join('')}</tbody></table>
@@ -818,6 +891,13 @@ async function pConfig(S) {
   app.onclick = attempt(async e => {
     // botões de envio de formulário são tratados no onsubmit; os demais (fora de formulários) aqui
     const b = e.target.closest('button'); if (!b || (b.type === 'submit' && b.closest('form'))) return;
+    if (b.id === 'dLoc') {
+      const info = await lookupCep($('#dCep').value);
+      if (!info) throw new Error('CEP não encontrado');
+      const pos = await locateAddress({ street: info.street, number: $('#dNum').value.trim(), city: info.city, state: info.state, cep: $('#dCep').value }, info);
+      if (!pos) throw new Error('Não encontramos no mapa. Cole as coordenadas do Google Maps.');
+      $('#dCoord').value = `${pos.lat.toFixed(6)}, ${pos.lng.toFixed(6)}`; toast('Localização encontrada. Confira em "Ver no mapa" depois de salvar.'); return;
+    }
     if (b.id === 'copyMon') { for (let i = 0; i < 7; i++) for (const k of 'abcd') $(`#h${i}${k}`).value = $(`#h1${k}`).value; return; }
     if (b.id === 'copy') { try { await navigator.clipboard.writeText(`${location.origin}/loja/${S.slug}`); toast('Link copiado'); } catch { toast('Copie o link manualmente'); } return; }
     if (b.id === 'demo') { b.disabled = true; await rpc('generate_demo_orders', { p_tenant: S.id, p_count: 12 }); toast('Pedidos de exemplo criados'); }
@@ -865,6 +945,27 @@ async function pConfig(S) {
       }
       if ($('#hAuto').checked && !Object.keys(hours).length) throw new Error('Preencha pelo menos um dia antes de ligar o horário automático');
       await q(sb.from('tenants').update({ hours, auto_hours: $('#hAuto').checked }).eq('id', S.id));
+    }
+    if (id === 'fDeliv') {
+      const mode = document.querySelector('input[name="dMode"]:checked').value;
+      const m = $('#dCoord').value.trim().match(/^(-?\d{1,2}(?:\.\d+)?)\s*[,; ]\s*(-?\d{1,3}(?:\.\d+)?)$/);
+      if ($('#dCoord').value.trim() && !m) throw new Error('Coordenadas no formato: -23.5503, -46.6339');
+      const tiers = [];
+      for (let i = 0; i < 6; i++) {
+        const km = $(`#tk${i}`).value.trim(), fee = $(`#tf${i}`).value.trim();
+        if (!km && !fee) continue;
+        const k = Number(km.replace(',', '.')), f = toCents(fee || '0');
+        if (!(k > 0 && k <= 100) || !Number.isInteger(f) || f < 0) throw new Error(`Faixa ${i + 1}: confira os km e a taxa`);
+        tiers.push([k, f]);
+      }
+      tiers.sort((a, b) => a[0] - b[0]);
+      if (!tiers.length) throw new Error('Cadastre pelo menos uma faixa de distância');
+      if (mode === 'distance' && !m) throw new Error('Informe a localização da loja para cobrar por distância');
+      const every = +$('#lEvery').value, pct = +$('#lPct').value;
+      if (!(every >= 2 && every <= 50) || !(pct >= 1 && pct <= 50)) throw new Error('Fidelidade: a cada 2 a 50 pedidos, desconto de 1% a 50%');
+      await q(sb.from('tenants').update({ delivery_mode: mode, lat: m ? +m[1] : null, lng: m ? +m[2] : null, distance_tiers: tiers,
+        loyalty_enabled: $('#lOn').checked, loyalty_every: every, loyalty_percent: pct }).eq('id', S.id));
+      await refreshBrand();
     }
     if (id === 'fPix') { await rpc('set_pix_settings', { p_tenant: S.id, p_token: $('#pxTok').value.trim() || null, p_enabled: $('#pxOn').checked }); }
     if (id === 'fZone') { const fee = toCents($('#zF').value); if (!Number.isInteger(fee) || fee < 0) throw new Error('Taxa inválida'); await q(sb.from('zones').insert({ tenant_id: S.id, name: $('#zN').value.trim(), fee })); }
