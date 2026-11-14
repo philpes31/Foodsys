@@ -1,6 +1,6 @@
 // Frontend do Balcão sobre Supabase: loja pública, acompanhamento, cadastro, painel da empresa e painel da plataforma.
 // JavaScript puro, sem build. A segurança está no banco (RLS + funções), não aqui.
-import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
 
 const $ = s => document.querySelector(s);
