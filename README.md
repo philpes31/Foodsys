@@ -14,6 +14,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    1. `20261113000000_balcao.sql` (tabelas, segurança e funções)
    2. `20261114000000_horarios_fotos.sql` (horário automático e fotos dos produtos)
    3. `20261115000000_pix_online.sql` (Pix online pelo Mercado Pago)
+   4. `20261116000000_assinaturas.sql` (assinatura mensal das lojas)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -92,6 +93,28 @@ O Pix online usa uma **Edge Function** do Supabase, a `supabase/functions/pix/in
 
 **Para testar:** as credenciais de teste (`TEST-`) do Mercado Pago geram QR Codes, mas o Pix de teste não pode ser pago de verdade. O jeito mais simples é usar o token de produção com um produto de R$ 1,00 e depois devolver o valor pelo app do Mercado Pago.
 
+### 8. Cobrar a assinatura das lojas (sua receita)
+
+Toda loja nova ganha **14 dias grátis**. Depois disso, a loja paga a mensalidade do plano no cartão, pelo Mercado Pago, e o dinheiro cai na **sua** conta de dono da plataforma.
+- Sem pagamento em dia (há **3 dias de carência**), a loja para de receber pedidos. O painel continua acessível para ela regularizar.
+- Lojas que já existiam ganham 14 dias contados a partir da migração.
+
+1. **Publique a Edge Function `billing`** do mesmo jeito que a `pix`:
+   - copie o conteúdo de `supabase/functions/billing/index.ts`;
+   - desligue **Enforce JWT verification**.
+2. **Cadastre dois segredos** em **Edge Functions → Secrets**:
+   - `MP_PLATFORM_TOKEN`: o **Access Token de produção** da **sua** conta do Mercado Pago, a que vai receber as mensalidades;
+   - `SITE_URL`: o endereço do site, por exemplo `https://foodsys-cdm2.vercel.app`.
+3. **Ligue os avisos do Mercado Pago:**
+   - Em mercadopago.com.br/developers → **Suas integrações** → sua aplicação → **Webhooks**, cadastre a URL `https://SEU-PROJETO.supabase.co/functions/v1/billing?action=webhook`.
+   - Marque os eventos de **Planos e assinaturas**.
+   - Sem os avisos o sistema continua funcionando, porque confere a assinatura quando o dono volta do Mercado Pago e no botão "Atualizar status". Mas com os avisos, as cobranças mensais e os cartões recusados são registrados sozinhos.
+
+**Como funciona:**
+- **Para o dono da loja:** o painel mostra um aviso com os dias de teste restantes. Em **Configurações → Assinatura do Balcão**, ele clica em **Assinar com cartão** e paga no Mercado Pago. Se assinar durante o teste, a 1ª cobrança só acontece quando o teste termina. Trocar de plano ajusta o valor da mensalidade sozinho.
+- **Para você, em `/plataforma`:** aparecem quantas lojas estão pagando e quantas estão em teste, a receita mensal real e a potencial, e o status de cada loja. Os botões **+30 dias**, **+7 dias teste** e **Grátis** servem para quem paga por fora (Pix, boleto) ou para parceiros.
+- O cliente da loja bloqueada vê "Temporariamente indisponível", e o banco recusa pedidos novos.
+
 ## Dicas de uso
 
 - **Impressão da comanda:** na tela de preparo, o botão **Imprimir** abre a impressão do navegador já no formato 80 mm. Escolha a impressora térmica e, nas configurações de impressão, desmarque "Cabeçalhos e rodapés". Marque **Imprimir comanda ao aceitar** para imprimir automaticamente ao aceitar o pedido. No Chrome, dá para pular a janela de impressão abrindo o navegador com `--kiosk-printing`.
@@ -100,13 +123,14 @@ O Pix online usa uma **Edge Function** do Supabase, a `supabase/functions/pix/in
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 26 testes (banco e Edge Function do Pix com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 36 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;
 - fluxo de status, limites do plano, editor de produto e relatórios;
 - horário automático (inclusive passando da meia-noite) e permissões das fotos no Storage;
-- Pix online: token protegido, valor conferido, webhook reconferido na API, expiração e pagamento atrasado.
+- Pix online: token protegido, valor conferido, webhook reconferido na API, expiração e pagamento atrasado;
+- assinatura: teste grátis, carência, bloqueio de pedidos, só o dono assina, avisos reconferidos na API.
 
 ```bash
 PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test
@@ -116,7 +140,8 @@ PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test
 
 ```
 supabase/migrations/   esquema, RLS, funções e modelos por segmento (rodar em ordem)
-supabase/functions/pix Edge Function do Pix (Mercado Pago)
+supabase/functions/pix      Edge Function do Pix dos pedidos (conta de cada loja)
+supabase/functions/billing  Edge Function da assinatura das lojas (sua conta)
 public/                site estático: index.html, style.css, app.js, config.js
 scripts/serve.js       servidor local de desenvolvimento
 test/                  testes do banco e simulação do auth do Supabase
@@ -128,6 +153,5 @@ Valores em dinheiro são inteiros em **centavos**.
 ## Próximos passos sugeridos
 
 - **Cartão de crédito online** (Checkout do Mercado Pago) usando a mesma função de pagamentos.
-- **Cobrança automática da assinatura** das empresas no mesmo gateway.
 - **WhatsApp a cada mudança de status:** um Database Webhook ou uma Edge Function chamando a API do WhatsApp.
 - **Taxa de entrega por distância** e página do entregador no celular.

@@ -29,7 +29,7 @@ before(() => {
   psql(['-d', 'postgres', '-c', `drop database if exists ${DB}`]);
   psql(['-d', 'postgres', '-c', `create database ${DB}`]);
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -156,7 +156,9 @@ test('plataforma: visão geral, troca de plano e suspensão', () => {
   fails(`select platform_overview()`, U.pizza, /Sem permissão/);
   const o = json('platform_overview()', U.admin);
   assert.equal(o.tenants.length, 2);
-  assert.equal(o.mrr, 34900 + 14900);
+  assert.equal(o.mrr, 0);                         // ninguém pagando ainda: as duas estão no teste grátis
+  assert.equal(o.potentialMrr, 34900 + 14900);
+  assert.equal(o.trials, 2);
   sql(`select platform_update_tenant('${burgerId}', null, false)`, U.admin);
   assert.equal(sql(`select count(*) from tenants where slug = 'brasa'`, null), '0');
   assert.equal(sql(`select count(*) from products where tenant_id = '${burgerId}'`, null), '0');
@@ -263,4 +265,49 @@ test('relatório ignora pedidos aguardando pagamento', () => {
   const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
   order('forno-da-vila', { customer, fulfillment: 'pickup', payment: 'Pix online', items: [{ productId: p.id, qty: 1 }] });
   assert.equal(json(`store_report('${pizzaId}', 7)`, U.pizza).orders, before);
+});
+
+test('assinatura: teste grátis, vencimento, carência e bloqueio de pedidos', () => {
+  const info = json(`billing_info('${pizzaId}')`, U.pizza);
+  assert.equal(info.status, 'trial'); assert.equal(info.ok, true); assert.ok(info.daysLeft >= 13);
+  fails(`select billing_info('${pizzaId}')`, U.staff, /Sem permissão/);
+  fails(`update tenants set billing_status = 'free' where id = '${pizzaId}'`, U.pizza, /permission denied/);
+  const ok = (iso) => sql(`select billing_ok(t, '${iso}'::timestamptz) from tenants t where id = '${pizzaId}'`);
+  sql(`update tenants set billing_status = 'active', paid_until = '2026-12-01T00:00:00Z' where id = '${pizzaId}'`);
+  assert.equal(ok('2026-12-03T00:00:00Z'), 't');   // dentro da carência de 3 dias
+  assert.equal(ok('2026-12-04T01:00:00Z'), 'f');
+  sql(`update tenants set billing_status = 'trial', trial_ends_at = now() - interval '1 hour' where id = '${pizzaId}'`);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  assert.throws(() => order('forno-da-vila', { customer, fulfillment: 'pickup', payment: 'Pix', items: [{ productId: p.id, qty: 1 }] }), /indisponível/);
+  // a loja continua visível e o dono continua acessando o painel
+  assert.equal(sql(`select count(*) from tenants where slug = 'forno-da-vila'`, null), '1');
+  assert.equal(json(`billing_info('${pizzaId}')`, U.pizza).ok, false);
+});
+
+test('assinatura: confirmação do Mercado Pago libera e cancelamento bloqueia', () => {
+  fails(`select billing_apply('${pizzaId}', 'PRE-1', 'authorized', now() + interval '30 days')`, U.pizza, /permission denied/);
+  assert.equal(sql(`select billing_apply('${pizzaId}', 'PRE-1', 'authorized', now() + interval '30 days')`, 'service'), 'active');
+  assert.equal(json(`billing_info('${pizzaId}')`, U.pizza).ok, true);
+  // aviso atrasado de uma assinatura antiga cancelada não derruba a nova
+  assert.equal(sql(`select billing_apply('${pizzaId}', 'PRE-ANTIGA', 'cancelled', null)`, 'service'), 'active');
+  assert.equal(sql(`select billing_apply('${pizzaId}', 'PRE-1', 'paused', null)`, 'service'), 'past_due');
+  assert.equal(json(`billing_info('${pizzaId}')`, U.pizza).ok, true);   // ainda pago até a data
+  assert.equal(sql(`select billing_apply('${pizzaId}', 'PRE-1', 'cancelled', null)`, 'service'), 'canceled');
+  sql(`update tenants set paid_until = now() - interval '5 days' where id = '${pizzaId}'`);
+  assert.equal(json(`billing_info('${pizzaId}')`, U.pizza).ok, false);
+  const t = json(`billing_tenant('${pizzaId}')`, 'service');
+  assert.equal(t.owners[0].email, 'dono@pizza.test');
+  assert.equal(t.price, 34900);
+});
+
+test('assinatura: plataforma libera grátis ou dá dias', () => {
+  fails(`select platform_set_billing('${pizzaId}', 'free')`, U.pizza, /Sem permissão/);
+  sql(`select platform_set_billing('${pizzaId}', 'active', 30)`, U.admin);
+  const i = json(`billing_info('${pizzaId}')`, U.pizza);
+  assert.equal(i.status, 'active'); assert.ok(i.daysLeft >= 29 && i.daysLeft <= 30);
+  sql(`select platform_set_billing('${pizzaId}', 'free')`, U.admin);
+  assert.equal(sql(`select billing_apply('${pizzaId}', 'PRE-1', 'cancelled', null)`, 'service'), 'free');
+  const o = json('platform_overview()', U.admin);
+  assert.equal(typeof o.paying, 'number'); assert.ok('trials' in o);
+  assert.equal(o.tenants.find(x => x.id === pizzaId).canSell, true);
 });

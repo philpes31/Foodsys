@@ -125,3 +125,7 @@ td.n,th.n{text-align:right}
 .pix .qr{width:240px;height:240px;margin:0 auto;image-rendering:pixelated;background:#fff;padding:8px;border-radius:12px}
 .pix textarea{width:100%;font:13px/1.4 monospace;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--soft);resize:none;word-break:break-all}
 details summary{cursor:pointer}details ol{margin:8px 0 0;padding-left:20px}
+#banner:empty{display:none}
+.banner{background:var(--soft);border-bottom:1px solid var(--line);padding:10px max(4vw,16px);font-size:15px;text-align:center}
+.banner.warn{background:#e9a23b33}.banner.bad{background:#d6282826;font-weight:500}
+.banner a{font-weight:700}

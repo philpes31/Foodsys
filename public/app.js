@@ -27,6 +27,20 @@ const TR = [[/Invalid login credentials/i, 'E-mail ou senha incorretos'], [/Emai
 const tr = m => (TR.find(([re]) => re.test(m)) || [0, m])[1];
 async function q(promise) { const { data, error } = await promise; if (error) throw new Error(tr(error.message || 'Erro')); return data; }
 const rpc = (fn, args) => q(sb.rpc(fn, args));
+// Edge Function de assinatura da plataforma (Mercado Pago)
+async function billingCall(body) {
+  const { data, error } = await sb.functions.invoke('billing', { body });
+  if (error) { let m = error.message; try { m = (await error.context.json()).error || m; } catch {} throw new Error(/Failed to send|fetch/i.test(m) ? 'Não foi possível falar com o serviço de assinatura. Tente de novo.' : m); }
+  return data;
+}
+// Mesmo cálculo do banco (billing_ok): teste grátis válido, assinatura em dia (+3 dias de carência) ou liberada.
+function billingOk(t) {
+  if (!t.billing_status) return true; // migração de assinatura ainda não aplicada
+  if (t.billing_status === 'free') return true;
+  if (t.billing_status === 'trial') return new Date(t.trial_ends_at) > Date.now();
+  return new Date(t.paid_until || t.trial_ends_at).getTime() + 3 * 864e5 > Date.now();
+}
+const daysUntil = d => Math.max(0, Math.ceil((new Date(d) - Date.now()) / 864e5));
 // Edge Function do Pix (Mercado Pago)
 async function pixCall(body) {
   const { data, error } = await sb.functions.invoke('pix', { body });
@@ -82,6 +96,7 @@ function localNow(tz) {
 }
 // Mesmo cálculo do banco (store_open_at), só para mostrar "Aberto" / "Abre às…". Quem decide de verdade é o banco.
 function openState(t) {
+  if (!billingOk(t)) return { open: false, label: 'Temporariamente indisponível' };
   if (!t.is_open) return { open: false, label: 'Pausada no momento' };
   if (!t.auto_hours) return { open: true, label: '' };
   const { dow, min } = localNow(t.timezone), H = t.hours || {};
@@ -163,7 +178,7 @@ function header(nav = '', who = true) {
 }
 
 async function render() {
-  cleanup?.(); cleanup = null; closeDlg(); window.scrollTo(0, 0);
+  cleanup?.(); cleanup = null; closeDlg(); window.scrollTo(0, 0); $('#banner').innerHTML = '';
   if (!configured) return vSetup();
   const p = location.pathname.split('/').filter(Boolean).map(decodeURIComponent);
   try {
@@ -455,8 +470,18 @@ async function vPanel(tab) {
   setColor(S.color); $('#bName').textContent = S.name;
   const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ['cardapio', 'Cardápio'], ...(owner ? [['relatorios', 'Relatórios'], ['config', 'Configurações']] : [])];
   if (!tabs.some(t => t[0] === tab)) tab = 'pedidos';
+  $('#banner').innerHTML = billingBanner(S, owner);
   header(tabs.map(([k, n]) => `<a href="/painel/${k}" data-link class="${k === tab ? 'on' : ''}">${esc(n)}</a>`).join('') + `<a href="/loja/${S.slug}" target="_blank" rel="noopener">Ver loja ↗</a>` + (ME.isAdmin ? '<a href="/plataforma" data-link>Plataforma</a>' : ''));
   await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, relatorios: pReports, config: pConfig })[tab](S, owner);
+}
+
+function billingBanner(t, owner) {
+  if (!t.billing_status || t.billing_status === 'free') return '';
+  const link = owner ? ' <a href="/painel/config#assinatura" data-link>Ver assinatura</a>' : ' Avise o dono da loja.';
+  if (!billingOk(t)) return `<div class="banner bad">Sua loja <b>não está recebendo pedidos</b>: a assinatura está pendente.${link}</div>`;
+  if (t.billing_status === 'trial') { const d = daysUntil(t.trial_ends_at); return `<div class="banner ${d <= 3 ? 'warn' : ''}">Teste grátis: ${d === 0 ? 'termina hoje' : `faltam <b>${d} dia${d > 1 ? 's' : ''}</b>`}.${owner ? ' <a href="/painel/config#assinatura" data-link>Assinar agora</a>' : ''}</div>`; }
+  if (t.billing_status === 'past_due' || t.billing_status === 'canceled') return `<div class="banner warn">${t.billing_status === 'canceled' ? 'Assinatura cancelada' : 'Pagamento da assinatura com problema'}: a loja para de receber pedidos em ${daysUntil(new Date(t.paid_until || t.trial_ends_at).getTime() + 3 * 864e5)} dia(s).${link}</div>`;
+  return '';
 }
 
 const ORDER_COLS = '*, items:order_items(product_name, options_text, qty, unit_price, notes), courier:couriers(name)';
@@ -644,11 +669,11 @@ async function pReports(S) {
 async function pConfig(S) {
   const plans = await q(sb.from('plans').select('*').order('sort'));
   const draw = async () => {
-    const [st, zones, coupons, couriers, team, nOrders, pix] = await Promise.all([
+    const [st, zones, coupons, couriers, team, nOrders, pix, bill] = await Promise.all([
       q(sb.from('tenants').select('*').eq('id', S.id).single()), q(sb.from('zones').select('*').eq('tenant_id', S.id).order('id')),
       q(sb.from('coupons').select('*').eq('tenant_id', S.id).order('id')), q(sb.from('couriers').select('*').eq('tenant_id', S.id).order('id')),
       rpc('list_team', { p_tenant: S.id }), sb.from('orders').select('id', { count: 'exact', head: true }).eq('tenant_id', S.id).then(r => r.count || 0),
-      rpc('pix_settings', { p_tenant: S.id }).catch(() => null)]);
+      rpc('pix_settings', { p_tenant: S.id }).catch(() => null), rpc('billing_info', { p_tenant: S.id }).catch(() => null)]);
     const link = `${location.origin}/loja/${st.slug}`;
     app.innerHTML = `<h2>Configurações</h2><p class="lead">Endereço da sua loja: <a href="${link}" target="_blank" rel="noopener">${esc(link)}</a> <button class="ghost sm" id="copy">Copiar</button></p>
     ${nOrders ? '' : '<div class="panel" style="margin-bottom:20px"><h3>Quer ver o sistema funcionando?</h3><p class="mut" style="margin:0">Gere pedidos de exemplo para testar a fila, as entregas e os relatórios.</p><button class="ok" id="demo">Gerar 12 pedidos de exemplo</button></div>'}
@@ -688,7 +713,19 @@ async function pConfig(S) {
       <label>Access Token<input id="pxTok" type="password" autocomplete="off" placeholder="${pix?.configured ? 'Deixe em branco para manter o atual' : 'APP_USR-...'}"></label>
       <label class="chk"><input type="checkbox" id="pxOn" ${pix?.enabled ? 'checked' : ''}> Oferecer "Pix agora" na loja</label>
       <button class="pri" ${pix ? '' : 'disabled'}>Salvar Pix</button></form>
-    <div class="panel"><h3>Assinatura</h3><div class="plans">${plans.map(p => `<div class="plan ${st.plan === p.name ? 'on' : ''}"><b>${esc(p.name)}</b><span class="price"><b>${brl(p.price)}</b>/mês</span><span class="mut">${esc(p.features)}</span>${st.plan === p.name ? '<span class="badge b-g">Plano atual</span>' : `<button class="ghost sm" data-plan="${esc(p.name)}">Mudar</button>`}</div>`).join('')}</div></div></div>`;
+    <div class="panel" id="assinatura"><h3>Assinatura do Balcão</h3>
+      ${bill ? `<p style="margin:0">${{ trial: `<span class="badge">Teste grátis</span> termina em ${new Date(bill.trialEndsAt).toLocaleDateString('pt-BR')} (${bill.daysLeft} dia${bill.daysLeft === 1 ? '' : 's'})`,
+        active: `<span class="badge b-g">Ativa</span> próxima cobrança em ${bill.paidUntil ? new Date(bill.paidUntil).toLocaleDateString('pt-BR') : '—'}`,
+        past_due: '<span class="badge b-a">Pagamento com problema</span> atualize o cartão para não perder a loja',
+        canceled: '<span class="badge b-r">Cancelada</span>', free: '<span class="badge b-g">Liberada pela plataforma</span>' }[bill.status] || ''}
+        ${bill.ok ? '' : ' · <b>a loja não está recebendo pedidos</b>'}</p>` : '<p class="mut" style="margin:0">Rode a migração de assinaturas no Supabase para ver este quadro.</p>'}
+      <div class="plans">${plans.map(p => `<div class="plan ${st.plan === p.name ? 'on' : ''}"><b>${esc(p.name)}</b><span class="price"><b>${brl(p.price)}</b>/mês</span><span class="mut">${esc(p.features)}</span>${st.plan === p.name ? '<span class="badge b-g">Plano atual</span>' : `<button class="ghost sm" data-plan="${esc(p.name)}">Mudar</button>`}</div>`).join('')}</div>
+      ${bill && bill.status !== 'free' ? `<span class="row">
+        ${bill.status === 'active' ? '' : `<button class="pri" id="subNow">${bill.hasSubscription ? 'Assinar de novo / trocar cartão' : 'Assinar com cartão'}</button>`}
+        ${bill.status === 'active' ? '<button class="ghost" id="subNow">Trocar cartão</button>' : ''}
+        ${bill.hasSubscription ? '<button class="ghost" id="subSync">Atualizar status</button>' : ''}
+        ${bill.hasSubscription && bill.status !== 'canceled' ? '<button class="ghost" id="subCancel">Cancelar assinatura</button>' : ''}</span>
+      <p class="mut" style="margin:0">Pagamento mensal no cartão pelo Mercado Pago. ${bill.status === 'trial' ? 'Assinando agora, a primeira cobrança só acontece quando o teste grátis terminar.' : ''}</p>` : ''}</div></div>`;
   };
   const refreshBrand = async () => { await loadMe(); setColor(ME.tenant.color); $('#bName').textContent = ME.tenant.name; };
   app.onclick = attempt(async e => {
@@ -699,7 +736,14 @@ async function pConfig(S) {
     if (b.dataset.del) { if (!sure(b)) return; const [t, id] = b.dataset.del.split(':'); await q(sb.from(t).delete().eq('id', +id)); }
     if (b.dataset.staff) { if (!sure(b)) return; await rpc('remove_staff', { p_tenant: S.id, p_user: b.dataset.staff }); }
     if (b.dataset.cup) await q(sb.from('coupons').update({ active: b.dataset.on !== '1' }).eq('id', +b.dataset.cup));
-    if (b.dataset.plan) { await rpc('change_plan', { p_tenant: S.id, p_plan: b.dataset.plan }); toast('Plano alterado'); }
+    if (b.dataset.plan) {
+      await rpc('change_plan', { p_tenant: S.id, p_plan: b.dataset.plan });
+      try { const r = await billingCall({ action: 'update_amount', tenant: S.id }); toast(r?.updated ? 'Plano alterado. A mensalidade foi atualizada.' : 'Plano alterado'); } catch { toast('Plano alterado'); }
+    }
+    if (b.id === 'subNow') { b.disabled = true; b.textContent = 'Abrindo o Mercado Pago…'; const r = await billingCall({ action: 'subscribe', tenant: S.id }); location.href = r.url; return; }
+    if (b.id === 'subSync') { const r = await billingCall({ action: 'sync', tenant: S.id }); toast(`Status: ${{ trial: 'teste grátis', active: 'ativa', past_due: 'pagamento com problema', canceled: 'cancelada', free: 'liberada' }[r.status] || r.status}`); }
+    if (b.id === 'subCancel') { if (!sure(b)) return; await billingCall({ action: 'cancel', tenant: S.id }); toast('Assinatura cancelada'); }
+    if (['subSync', 'subCancel'].includes(b.id)) { await loadMe(); $('#banner').innerHTML = billingBanner(ME.tenant, true); }
     await draw();
   });
   app.onchange = attempt(async e => {
@@ -732,10 +776,22 @@ async function pConfig(S) {
     toast('Salvo'); await draw();
   });
   cleanup = () => { app.onclick = app.onchange = app.onsubmit = null; };
+  // voltando do Mercado Pago: confere a assinatura na hora (o aviso automático pode demorar)
+  if (new URLSearchParams(location.search).get('assinatura') === 'retorno') {
+    history.replaceState(null, '', '/painel/config#assinatura');
+    try { await billingCall({ action: 'sync', tenant: S.id }); await loadMe(); $('#banner').innerHTML = billingBanner(ME.tenant, true); toast('Assinatura atualizada'); } catch (e) { toast(e.message); }
+  }
   await draw();
+  if (location.hash === '#assinatura') $('#assinatura')?.scrollIntoView({ behavior: 'smooth' });
 }
 
 /* ================= PLATAFORMA ================= */
+function billLabel(t) {
+  if (!t.billingStatus) return '—';
+  const d = x => x ? new Date(x).toLocaleDateString('pt-BR') : '—';
+  const lbl = { trial: `Teste até ${d(t.trialEndsAt)}`, active: `Ativa até ${d(t.paidUntil)}`, past_due: 'Pagamento com problema', canceled: 'Cancelada', free: 'Grátis' }[t.billingStatus];
+  return `<span class="badge ${t.canSell ? (t.billingStatus === 'trial' ? '' : 'b-g') : 'b-r'}">${lbl}${t.canSell ? '' : ' · bloqueada'}</span>`;
+}
 async function vPlatform() {
   setColor('#1d1716'); $('#bName').textContent = 'Balcão';
   header('<a class="on" href="/plataforma" data-link>Plataforma</a>' + (ME.tenant ? '<a href="/painel" data-link>Minha loja</a>' : ''));
@@ -743,14 +799,17 @@ async function vPlatform() {
   const draw = async () => {
     const o = await rpc('platform_overview');
     app.innerHTML = `<h2>Plataforma</h2><p class="lead">Todas as empresas assinantes. Novas empresas se cadastram sozinhas em <a href="/entrar/cadastro" data-link>/entrar/cadastro</a>.</p>
-    <div class="kpis"><div class="kpi"><span class="mut">Empresas</span><b>${o.tenants.length}</b><span class="mut">${o.tenants.filter(t => !t.active).length} suspensa(s)</span></div><div class="kpi"><span class="mut">Receita mensal (MRR)</span><b class="price">${brl(o.mrr)}</b></div>
+    <div class="kpis"><div class="kpi"><span class="mut">Empresas</span><b>${o.tenants.length}</b><span class="mut">${o.paying ?? 0} pagando · ${o.trials ?? 0} em teste</span></div><div class="kpi"><span class="mut">Receita mensal (MRR)</span><b class="price">${brl(o.mrr)}</b><span class="mut">+ ${brl(o.potentialMrr || 0)} se os testes virarem assinatura</span></div>
       <div class="kpi"><span class="mut">Vendido pelas lojas</span><b class="price">${brl(o.gmv)}</b></div><div class="kpi"><span class="mut">Pedidos</span><b>${o.orders}</b></div></div>
-    <div class="panel"><h3>Empresas</h3><div class="scroll"><table class="stack"><thead><tr><th>Empresa</th><th>Segmento</th><th>Dono</th><th>Plano</th><th class="n">Pedidos</th><th class="n">Vendas</th><th></th></tr></thead><tbody>
+    <div class="panel"><h3>Empresas</h3><div class="scroll"><table class="stack"><thead><tr><th>Empresa</th><th>Segmento</th><th>Dono</th><th>Plano</th><th>Assinatura</th><th class="n">Pedidos</th><th class="n">Vendas</th><th></th></tr></thead><tbody>
       ${o.tenants.map(t => `<tr><td data-l="Empresa"><span class="dot" style="background:${esc(t.color)}"></span><a href="/loja/${esc(t.slug)}" target="_blank" rel="noopener">${esc(t.name)}</a> ${t.active ? '' : '<span class="badge b-r">Suspensa</span>'}</td><td data-l="Segmento">${esc(t.segmentName)}</td><td data-l="Dono"><span class="mut">${esc(t.ownerEmail || '—')}</span></td>
         <td data-l="Plano"><select data-plan="${t.id}" aria-label="Plano">${plans.map(p => `<option ${p.name === t.plan ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></td>
+        <td data-l="Assinatura">${billLabel(t)}<span class="row" style="margin-top:4px"><button class="ghost sm" data-bill="${t.id}" data-st="active" data-days="30">+30 dias</button><button class="ghost sm" data-bill="${t.id}" data-st="trial" data-days="7">+7 dias teste</button>${t.billingStatus === 'free' ? '' : `<button class="ghost sm" data-bill="${t.id}" data-st="free">Grátis</button>`}</span></td>
         <td data-l="Pedidos" class="n">${t.orders}</td><td data-l="Vendas" class="n price">${brl(t.revenue)}</td><td data-l=""><button class="ghost sm" data-act="${t.id}" data-on="${t.active ? 1 : 0}">${t.active ? 'Suspender' : 'Reativar'}</button></td></tr>`).join('') || '<tr><td class="mut">Nenhuma empresa ainda.</td></tr>'}</tbody></table></div></div>`;
   };
   app.onclick = attempt(async e => {
+    const bb = e.target.closest('button[data-bill]');
+    if (bb) { await rpc('platform_set_billing', { p_tenant: bb.dataset.bill, p_status: bb.dataset.st, p_add_days: bb.dataset.days ? +bb.dataset.days : null }); toast('Assinatura atualizada'); return draw(); }
     const b = e.target.closest('button[data-act]'); if (!b) return;
     if (b.dataset.on === '1' && !sure(b)) return;
     await rpc('platform_update_tenant', { p_tenant: b.dataset.act, p_plan: null, p_active: b.dataset.on !== '1' }); await draw();
