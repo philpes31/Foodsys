@@ -20,6 +20,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    7. `20261119000000_balcao_mesa_caixa.sql` (pedido no balcão/telefone, mesa por QR Code e fechamento de caixa)
    8. `20261120000000_cupons_avaliacoes_estoque.sql` (cupons com regras, avaliações e estoque)
    9. `20261121000000_agendamento_vitrine.sql` (pedido agendado e vitrine da loja)
+   10. `20261122000000_promocoes.sql` (promoções automáticas e frete grátis acima de um valor)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -184,12 +185,25 @@ O que já está pronto:
   - O banco confere antecedência, limite de dias e horário de funcionamento.
 - **Vitrine da loja:** em **Configurações → Vitrine da loja**, envie um **banner** (foto larga, reduzida automaticamente) e preencha descrição, endereço e Instagram.
   - Tudo aparece no topo da loja, junto com a nota das avaliações, o link do WhatsApp, o endereço no mapa e o quadro de horários.
+- **App instalável (PWA):** o site funciona como aplicativo.
+  - No Android/Chrome, aparece o botão **"Instalar app no celular"** no rodapé.
+  - No iPhone: Compartilhar → "Adicionar à Tela de Início".
+  - Instalado a partir da página de uma loja, o app abre direto nela, com o nome da loja. Instalado a partir do painel, abre no painel.
+  - O app abre mesmo com internet instável (as telas ficam guardadas), mas pedidos e dados sempre vêm do servidor.
+- **Tela da cozinha (KDS):** no preparo, clique em **Tela da cozinha**. É o modo para TV ou tablet: fundo escuro, letras grandes, cronômetro e cores por atraso (verde, amarelo a partir de 10 min e vermelho a partir de 20 min).
+  - Um toque avança o pedido (Começar → Pronto → Servido/Retirado).
+  - Tem aviso sonoro, botão de tela cheia e mantém a tela acesa nos aparelhos que permitem.
+- **Promoções automáticas:** em **Configurações → Promoções automáticas**, crie "leve X, pague Y" ou "% de desconto" para a loja toda, uma categoria ou um produto.
+  - Pode limitar a dias da semana e a um horário (happy hour, inclusive passando da meia-noite).
+  - A loja mostra as promoções no topo e o selo "Em promoção" nos produtos. O carrinho já calcula o desconto.
+  - O banco recalcula tudo no pedido. Promoções somam com cupom e fidelidade.
+- **Frete grátis acima de um valor:** em **Configurações → Taxa de entrega**. O carrinho mostra "Faltam R$ X para o frete grátis".
 - **WhatsApp:** os botões abrem o WhatsApp Web ou o app com a mensagem pronta (aceito, pronto, saiu para entrega...) e o link de acompanhamento. Basta tocar em enviar.
 - **Horário:** com "Abrir e fechar sozinha" ligado, a loja só aceita pedidos dentro dos horários. O banco confere isso, não só a tela. O checkbox "Receber pedidos" pausa a loja na hora, mesmo dentro do horário.
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 49 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 50 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;
@@ -201,7 +215,8 @@ O que já está pronto:
 - taxa por distância (faixas, fora da área, coordenadas inválidas) e fidelidade (selos, resgate, cancelamento, cupom maior);
 - pedido na mesa, pedido lançado pela equipe (permissões, canal, telefone opcional) e fechamento de caixa;
 - regras de cupom, estoque (baixa, saldo insuficiente, devolução) e avaliações (prazo, uma por pedido, resposta);
-- pedido agendado (antecedência, limite de dias, horário de funcionamento, loja fechada e pausada) e campos da vitrine.
+- pedido agendado (antecedência, limite de dias, horário de funcionamento, loja fechada e pausada) e campos da vitrine;
+- promoções (leve X pague Y, % por categoria, dia e horário), frete grátis acima de valor e permissões.
 
 ```bash
 PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test

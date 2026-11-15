@@ -59,7 +59,26 @@ function dialog(html, wide = false) { $('#dlg').classList.toggle('wide', wide); 
 function closeDlg() { $('#dlg').classList.remove('open'); $('#dlgBody').onclick = $('#dlgBody').onchange = $('#dlgBody').onsubmit = null; }
 $('#dlg').addEventListener('click', e => { if (e.target.id === 'dlg') closeDlg(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDlg(); });
-const setColor = c => document.documentElement.style.setProperty('--red', c || '#d62828');
+const setColor = c => { document.documentElement.style.setProperty('--red', c || '#d62828'); document.querySelector('meta[name="theme-color"]')?.setAttribute('content', c || '#d62828'); };
+
+/* ---------- app instalável (PWA) ---------- */
+// Na página de uma loja, o app instalado abre direto nela, com o nome e a cor da loja.
+function setManifest(store) {
+  const link = $('#manifest'); if (!link) return;
+  if (!store) { link.href = '/manifest.webmanifest'; return; }
+  const abs = p => new URL(p, location.origin).href;
+  const m = { name: store.name, short_name: store.name.slice(0, 12), lang: 'pt-BR', start_url: abs(`/loja/${store.slug}`), scope: abs('/'), display: 'standalone',
+    background_color: '#ffffff', theme_color: store.color || '#d62828',
+    icons: [{ src: abs('/icons/icon-192.png'), sizes: '192x192', type: 'image/png' }, { src: abs('/icons/icon-512.png'), sizes: '512x512', type: 'image/png' },
+      { src: abs('/icons/maskable-512.png'), sizes: '512x512', type: 'image/png', purpose: 'maskable' }] };
+  link.href = 'data:application/manifest+json,' + encodeURIComponent(JSON.stringify(m));
+}
+let installEvt = null;
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; $('#installBtn').hidden = false; });
+addEventListener('appinstalled', () => { installEvt = null; $('#installBtn').hidden = true; toast('App instalado!'); });
+$('#installBtn')?.addEventListener('click', async () => { if (!installEvt) return; installEvt.prompt(); await installEvt.userChoice.catch(() => {}); installEvt = null; $('#installBtn').hidden = true; });
+{ const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) && !navigator.standalone; if ($('#iosHint')) $('#iosHint').hidden = !ios; }
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
 const attempt = fn => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message); } };
 const sure = b => { if (b.dataset.sure) return true; b.dataset.sure = 1; b.textContent = 'Confirmar?'; return false; };
 
@@ -142,6 +161,39 @@ function scheduleSlots(S) {
   return out;
 }
 
+/* ---------- promoções (mesma regra do banco; o valor final é sempre o calculado no banco) ---------- */
+function localParts(tz, at = new Date()) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz || 'America/Sao_Paulo', weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(at).map(x => [x.type, x.value]));
+  return { dow: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(p.weekday), min: (+p.hour % 24) * 60 + +p.minute };
+}
+function promoActive(pm, tz, at) {
+  if (!pm.active) return false;
+  const { dow, min } = localParts(tz, at);
+  if (pm.days?.length && !pm.days.includes(dow)) return false;
+  if (!pm.start_time) return true;
+  const a = toMin(pm.start_time.slice(0, 5)), b = toMin(pm.end_time.slice(0, 5));
+  return a < b ? min >= a && min < b : min >= a || min < b;
+}
+const promoMatches = (pm, prod) => (!pm.product_id || pm.product_id === prod.id) && (!pm.category || pm.category === prod.category);
+function promoDiscount(promos, lines, byId, tz, at) {
+  let total = 0; const names = [];
+  for (const pm of promos.filter(x => promoActive(x, tz, at))) {
+    const units = lines.filter(l => byId[l.productId] && promoMatches(pm, byId[l.productId])).flatMap(l => Array(l.qty).fill(l.unit));
+    let d = 0;
+    if (pm.kind === 'percent') d = Math.round(units.reduce((a, u) => a + u, 0) * pm.percent / 100);
+    else { const free = Math.floor(units.length / pm.buy_qty) * (pm.buy_qty - pm.pay_qty); d = units.sort((a, b) => a - b).slice(0, free).reduce((a, u) => a + u, 0); }
+    if (d > 0) { total += d; names.push(pm.name); }
+  }
+  return { total, names };
+}
+function promoLabel(pm, byId) {
+  const what = pm.product_id ? byId[pm.product_id]?.name || 'produto' : pm.category || 'toda a loja';
+  const deal = pm.kind === 'percent' ? `${pm.percent}% off em ${what}` : `Leve ${pm.buy_qty}, pague ${pm.pay_qty} em ${what}`;
+  const days = pm.days?.length && pm.days.length < 7 ? ' · ' + pm.days.slice().sort().map(d => DAYS[d].slice(0, 3).toLowerCase()).join(', ') : '';
+  const hrs = pm.start_time ? ` · ${pm.start_time.slice(0, 5)}–${pm.end_time.slice(0, 5)}` : '';
+  return `${deal}${days}${hrs}`;
+}
+
 /* ---------- WhatsApp ---------- */
 const waNumber = phone => { const d = String(phone || '').replace(/\D/g, ''); return d.length >= 12 && d.startsWith('55') ? d : d.length >= 10 ? '55' + d : ''; };
 const waLink = (phone, text) => { const n = waNumber(phone); return n ? `https://wa.me/${n}?text=${encodeURIComponent(text)}` : ''; };
@@ -213,7 +265,7 @@ function printTicket(o, storeName) {
     <div>${o.fulfillment === 'table' ? `<b class="big">MESA ${esc(o.table_label)}</b>` : o.fulfillment === 'pickup' ? `<b>RETIRADA${o.channel === 'balcao' ? ' · BALCÃO' : ' NA LOJA'}</b>` : `<b>ENTREGA</b> · ${esc(o.address)} — ${esc(o.zone_name)}`}</div><hr>
     ${o.items.map(x => `<div class="li"><b>${x.qty}x ${esc(x.product_name)}</b><span>${brl(x.qty * x.unit_price)}</span></div>${x.options_text ? `<div class="sub">${esc(x.options_text)}</div>` : ''}${x.notes ? `<div class="sub">OBS: ${esc(x.notes)}</div>` : ''}`).join('')}<hr>
     <div class="li"><span>Subtotal</span><span>${brl(o.subtotal)}</span></div>
-    ${o.fee ? `<div class="li"><span>Entrega</span><span>${brl(o.fee)}</span></div>` : ''}${o.discount ? `<div class="li"><span>Desconto</span><span>-${brl(o.discount)}</span></div>` : ''}
+    ${o.fee ? `<div class="li"><span>Entrega</span><span>${brl(o.fee)}</span></div>` : ''}${o.promo_discount ? `<div class="li"><span>Promoção</span><span>-${brl(o.promo_discount)}</span></div>` : ''}${o.discount ? `<div class="li"><span>Desconto</span><span>-${brl(o.discount)}</span></div>` : ''}
     <div class="li big"><b>TOTAL</b><b>${brl(o.total)}</b></div>
     <div>Pagamento: ${esc(o.payment)}${o.change_for ? ` · troco p/ ${brl(o.change_for)}` : ''}${o.payment_status === 'paid' ? ' · <b>PAGO</b>' : ''}</div></div>`;
   window.print();
@@ -252,7 +304,7 @@ function header(nav = '', who = true) {
 }
 
 async function render() {
-  cleanup?.(); cleanup = null; closeDlg(); window.scrollTo(0, 0); $('#banner').innerHTML = '';
+  cleanup?.(); cleanup = null; closeDlg(); window.scrollTo(0, 0); $('#banner').innerHTML = ''; setManifest(null);
   if (!configured) return vSetup();
   const p = location.pathname.split('/').filter(Boolean).map(decodeURIComponent);
   try {
@@ -422,6 +474,8 @@ async function vShop(slug) {
     q(sb.from('zones').select('id, name, fee').eq('tenant_id', S.id).order('name'))]);
   const products = sortMenu(rawP), OS = openState(S), DIST = S.delivery_mode === 'distance';
   const RV = await rpc('store_reviews', { p_slug: slug, p_limit: 10 }).catch(() => null);
+  const PROMOS = await q(sb.from('promotions').select('*').eq('tenant_id', S.id).eq('active', true)).catch(() => []);
+  const byId = Object.fromEntries(products.map(p => [p.id, p]));
   // Pedido na mesa: o QR Code da mesa abre /loja/<loja>?mesa=7
   const mesaParam = (new URLSearchParams(location.search).get('mesa') || '').toUpperCase().trim();
   const TABLE = S.allow_tables && /^[A-Z0-9][A-Z0-9 -]{0,9}$/.test(mesaParam) ? mesaParam : null;
@@ -431,7 +485,7 @@ async function vShop(slug) {
   const zoneTxt = () => !geo?.quote ? '' : geo.quote.inArea
     ? `Distância aproximada: <b>${kmTxt(geo.quote.km)}</b> · taxa ${geo.quote.fee ? brl(geo.quote.fee) : 'grátis'}`
     : `<span class="badge b-r">Fora da área de entrega: ${kmTxt(geo.quote.km)} (a loja entrega até ${kmTxt(geo.quote.maxKm)})</span>`;
-  setColor(S.color); $('#bName').textContent = S.name; header('', false); document.title = `${S.name} — pedido online`;
+  setColor(S.color); $('#bName').textContent = S.name; header('', false); document.title = `${S.name} — pedido online`; setManifest(S);
   const cartKey = `cart:${slug}`;
   let cart = local.get(cartKey, []).filter(c => products.some(p => p.id === c.productId)), cat = null, coupon = null;
   const cats = [...new Set(products.map(p => p.category))];
@@ -441,8 +495,12 @@ async function vShop(slug) {
     const sub = cart.reduce((t, c) => t + c.qty * c.unit, 0), pickup = !!TABLE || $('#cMode')?.value === 'pickup';
     const z = DIST ? null : zones.find(z => String(z.id) === $('#cZone')?.value) || zones[0];
     let fee = pickup ? 0 : DIST ? (geo?.quote?.fee || 0) : z ? z.fee : 0, disc = 0;
+    const freeShip = !pickup && S.free_delivery_above && sub >= S.free_delivery_above;
+    if (freeShip) fee = 0;
     if (coupon) { if (coupon.percent) disc = Math.round(sub * coupon.percent / 100); if (coupon.freeShipping) fee = 0; }
-    return { sub, fee, disc, total: sub + fee - disc, pickup, zone: z, feeKnown: pickup || !DIST || !!geo?.quote?.inArea };
+    const when = $('#kWhen')?.value ? new Date($('#kWhen').value) : new Date();
+    const pr = promoDiscount(PROMOS, cart, byId, S.timezone, when), promo = Math.min(pr.total, sub);
+    return { sub, fee, disc, promo, promoNames: pr.names, total: Math.max(0, sub + fee - disc - promo), pickup, zone: z, freeShip, feeKnown: pickup || freeShip || !DIST || !!geo?.quote?.inArea };
   };
   const paint = () => {
     cat = cats.includes(cat) ? cat : cats[0];
@@ -454,9 +512,10 @@ async function vShop(slug) {
       ${S.instagram ? ` · <a href="https://instagram.com/${esc(S.instagram)}" target="_blank" rel="noopener">@${esc(S.instagram)}</a>` : ''}
       ${S.address ? `<br><a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(S.address)}" target="_blank" rel="noopener">${esc(S.address)}</a>` : ''}</p>
     ${S.auto_hours && Object.keys(S.hours || {}).length ? `<details class="hours-pub"><summary class="mut">Horário de funcionamento</summary><table>${DAYS.map((d, i) => `<tr><td>${d}</td><td>${((S.hours || {})[i] || []).map(r => r.join(' às ')).join(' · ') || 'Fechado'}</td></tr>`).join('')}</table></details>` : ''}
+    ${PROMOS.length || S.free_delivery_above ? `<div class="promos">${S.free_delivery_above ? `<span class="promo">Frete grátis acima de ${brl(S.free_delivery_above)}</span>` : ''}${PROMOS.map(pm => `<span class="promo ${promoActive(pm, S.timezone) ? '' : 'off'}">${esc(promoLabel(pm, byId))}${promoActive(pm, S.timezone) ? '' : ' (fora do horário)'}</span>`).join('')}</div>` : ''}
     <div class="shop"><section>
       <div class="cats">${cats.map(c => `<button class="${c === cat ? 'on' : ''}" data-cat="${esc(c)}">${esc(c)}</button>`).join('')}</div>
-      <div class="menu">${list.map(p => `<article class="item">${picture(p, S.color)}<div class="b"><h3>${esc(p.name)}</h3><span class="mut">${esc(p.description)}</span>
+      <div class="menu">${list.map(p => `<article class="item">${picture(p, S.color)}<div class="b">${PROMOS.some(pm => promoActive(pm, S.timezone) && promoMatches(pm, p)) ? '<span class="badge b-g">Em promoção</span>' : ''}<h3>${esc(p.name)}</h3><span class="mut">${esc(p.description)}</span>
         <div class="foot"><span class="price">${p.groups.some(g => g.min_sel && g.options.some(o => o.price)) ? '<span class="mut">a partir de </span>' : ''}<b>${brl(p.price)}</b></span>
         ${p.stock === 0 ? '<span class="badge b-r">Esgotado</span>' : `<button class="pri sm" data-add="${p.id}" ${CAN_ORDER ? '' : 'disabled'}>Adicionar</button>`}</div>${p.stock > 0 && p.stock <= 5 ? `<span class="badge b-a">Últimas ${p.stock} unidade${p.stock > 1 ? 's' : ''}</span>` : ''}</div></article>`).join('') || '<p class="empty">Cardápio vazio.</p>'}</div>
     </section>
@@ -471,7 +530,7 @@ async function vShop(slug) {
   };
   const paintTotals = () => {
     const t = totals(), low = !t.pickup && S.min_order && t.sub < S.min_order; $('#zWrap').hidden = t.pickup || DIST;
-    $('#tots').innerHTML = `<div class="ci"><span>Subtotal</span><span class="price">${brl(t.sub)}</span></div>${TABLE ? '' : `<div class="ci"><span>Entrega${DIST && geo?.quote && !t.pickup ? ` (${kmTxt(geo.quote.km)})` : ''}</span><span class="price">${!t.feeKnown ? 'pelo endereço' : t.fee ? brl(t.fee) : 'Grátis'}</span></div>`}${t.disc ? `<div class="ci"><span>Desconto</span><span class="price">−${brl(t.disc)}</span></div>` : ''}<div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>${low && cart.length ? `<span class="badge b-a">Faltam ${brl(S.min_order - t.sub)} para o pedido mínimo</span>` : ''}`;
+    $('#tots').innerHTML = `<div class="ci"><span>Subtotal</span><span class="price">${brl(t.sub)}</span></div>${TABLE ? '' : `<div class="ci"><span>Entrega${DIST && geo?.quote && !t.pickup ? ` (${kmTxt(geo.quote.km)})` : ''}</span><span class="price">${!t.feeKnown ? 'pelo endereço' : t.fee ? brl(t.fee) : 'Grátis'}</span></div>`}${t.disc ? `<div class="ci"><span>Desconto</span><span class="price">−${brl(t.disc)}</span></div>` : ''}${t.promo ? `<div class="ci"><span>Promoção <span class="mut">(${esc(t.promoNames.join(', '))})</span></span><span class="price">−${brl(t.promo)}</span></div>` : ''}<div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>${low && cart.length ? `<span class="badge b-a">Faltam ${brl(S.min_order - t.sub)} para o pedido mínimo</span>` : ''}${!TABLE && !t.pickup && S.free_delivery_above && cart.length && !t.freeShip ? `<span class="badge b-g">Faltam ${brl(S.free_delivery_above - t.sub)} para o frete grátis</span>` : ''}`;
     $('#checkout').disabled = !cart.length || low || !CAN_ORDER || (!t.pickup && !DIST && !zones.length);
   };
   const addToCart = it => { const ex = cart.find(c => c.productId === it.productId && c.optionIds.join() === it.optionIds.join() && c.notes === it.notes); ex ? ex.qty += it.qty : cart.push(it); saveCart(); toast('Adicionado ao carrinho'); paint(); };
@@ -603,6 +662,7 @@ async function vTrack(code) {
       <table><tbody>${o.items.map(x => `<tr><td>${x.qty}× ${esc(x.product_name)}${x.options_text ? `<br><span class="mut">${esc(x.options_text)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}</td><td class="n price">${brl(x.qty * x.unit_price)}</td></tr>`).join('')}
       <tr><td>${o.fulfillment === 'pickup' ? 'Retirada na loja' : o.fulfillment === 'table' ? esc(o.zone) : `Entrega (${esc(o.zone)})`}</td><td class="n price">${brl(o.fee)}</td></tr>
       ${o.discount ? `<tr><td>Desconto ${o.loyaltyDiscount ? 'de fidelidade' : esc(o.coupon || '')}</td><td class="n price">−${brl(o.discount)}</td></tr>` : ''}
+      ${o.promoDiscount ? `<tr><td>Promoção (${esc(o.promoNames || '')})</td><td class="n price">−${brl(o.promoDiscount)}</td></tr>` : ''}
       <tr><td><b>Total · ${esc(o.payment)}</b></td><td class="n price"><b>${brl(o.total)}</b></td></tr></tbody></table>
       ${o.loyalty ? `<div class="loyal"><b>Cartão fidelidade</b>${o.loyaltyDiscount ? `<span class="badge b-g">Você ganhou ${o.loyalty.percent}% neste pedido!</span>` : ''}
         <div class="stamps">${Array.from({ length: o.loyalty.every }, (_, i) => `<i class="${i < Math.min(o.loyalty.stamps, o.loyalty.every) ? 'on' : ''}"></i>`).join('')}</div>
@@ -648,6 +708,7 @@ async function vPanel(tab) {
   const S = ME.tenant, owner = ME.role === 'owner';
   setColor(S.color); $('#bName').textContent = S.name;
   const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ['cardapio', 'Cardápio'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['config', 'Configurações']] : [])];
+  if (tab === 'kds') return pKitchenScreen(S);
   if (!tabs.some(t => t[0] === tab) && tab !== 'novo') tab = 'pedidos';
   $('#banner').innerHTML = billingBanner(S, owner);
   header(tabs.map(([k, n]) => `<a href="/painel/${k}" data-link class="${k === tab ? 'on' : ''}">${esc(n)}</a>`).join('') + `<a href="/loja/${S.slug}" target="_blank" rel="noopener">Ver loja ↗</a>` + (ME.isAdmin ? '<a href="/plataforma" data-link>Plataforma</a>' : ''));
@@ -684,7 +745,7 @@ async function pOrders(S) {
     const isLater = o => o.scheduled_for && o.status === 'novo' && new Date(o.scheduled_for) - Date.now() > 60 * 60000;
     const later = orders.filter(isLater).sort((a, b) => new Date(a.scheduled_for) - new Date(b.scheduled_for)), soon = orders.filter(o => !isLater(o));
     app.innerHTML = `<div class="row between"><div><h2>${esc(S.seg?.prep || 'Preparo')}</h2><p class="lead">Pedidos chegam aqui na hora, com aviso sonoro. Tickets com mais de 25 min ficam em alerta.</p></div>
-      <span class="row"><label class="chk"><input type="checkbox" id="autoPrint" ${local.get('autoPrint', false) ? 'checked' : ''}> Imprimir comanda ao aceitar</label><a class="btn pri" href="/painel/novo" data-link>+ Novo pedido</a></span></div>
+      <span class="row"><label class="chk"><input type="checkbox" id="autoPrint" ${local.get('autoPrint', false) ? 'checked' : ''}> Imprimir comanda ao aceitar</label><a class="btn ghost" href="/painel/kds" data-link>Tela da cozinha</a><a class="btn pri" href="/painel/novo" data-link>+ Novo pedido</a></span></div>
     ${later.length ? `<div class="panel sched"><h3>Agendados para mais tarde (${later.length})</h3><div class="row">${later.map(o => `<span class="badge b-a" title="${esc(o.customer_name)}">${esc(fmtWhen(o.scheduled_for, S.timezone))} · #${o.number} · ${esc(where(o))}</span>`).join('')}</div>
       <p class="mut" style="margin:0">Eles entram nas colunas 1 hora antes do horário marcado.</p></div>` : ''}
     <div class="board">${cols.map(([k, t, a, next]) => { const os = soon.filter(o => o.status === k).sort((x, y) => new Date(x.scheduled_for || x.created_at) - new Date(y.scheduled_for || y.created_at));
@@ -835,6 +896,40 @@ async function pMenu(S, owner) {
   await load();
 }
 
+/* ---------- tela da cozinha (KDS): TV ou tablet, tela cheia ---------- */
+async function pKitchenScreen(S) {
+  document.body.classList.add('kds-on'); setColor(S.color);
+  let orders = [], sound = local.get('kdsSound', true);
+  const age = o => mins(o.scheduled_for && new Date(o.scheduled_for) < new Date() ? o.scheduled_for : o.created_at);
+  const tone = (o, k) => k === 'pronto' ? 'ok' : age(o) >= 20 ? 'bad' : age(o) >= 10 ? 'warn' : 'ok';
+  const load = async () => { orders = await fetchOrders(S.id, ['novo', 'preparo', 'pronto']); draw(); };
+  const draw = () => {
+    const later = o => o.scheduled_for && o.status === 'novo' && new Date(o.scheduled_for) - Date.now() > 60 * 60000;
+    const cols = [['novo', 'Novos'], ['preparo', 'Em preparo'], ['pronto', 'Prontos']];
+    const act = (o, k) => k === 'novo' ? ['preparo', 'Começar'] : k === 'preparo' ? ['pronto', 'Pronto'] : o.fulfillment === 'delivery' ? null : ['entregue', o.fulfillment === 'table' ? 'Servido' : 'Retirado'];
+    app.innerHTML = `<div class="kds"><div class="kbar"><b>${esc(S.name)}</b><span class="kclock">${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
+      <span class="row"><button id="kSound">${sound ? 'Som ligado' : 'Som desligado'}</button><button id="kFull">Tela cheia</button><a class="btn" href="/painel" data-link>Sair</a></span></div>
+      <div class="kcols">${cols.map(([k, t]) => { const os = orders.filter(o => o.status === k && !later(o)).sort((a, b) => new Date(a.scheduled_for || a.created_at) - new Date(b.scheduled_for || b.created_at));
+        return `<section><h2>${t} <span>${os.length}</span></h2>${os.map(o => { const a = act(o, k); return `<article class="kt ${tone(o, k)}">
+          <header><b>#${o.number}</b><span>${o.scheduled_for ? '⏰ ' + hhmmTz(o.scheduled_for, S.timezone) : age(o) + ' min'}</span></header>
+          <div class="kwhere">${o.fulfillment === 'table' ? `MESA ${esc(o.table_label)}` : o.fulfillment === 'pickup' ? 'RETIRADA' : 'ENTREGA'} · ${esc(o.customer_name)}</div>
+          <ul>${o.items.map(x => `<li><b>${x.qty}×</b> ${esc(x.product_name)}${x.options_text ? `<small>${esc(x.options_text)}</small>` : ''}${x.notes ? `<em>${esc(x.notes)}</em>` : ''}</li>`).join('')}</ul>
+          ${a ? `<button data-st="${a[0]}" data-id="${o.id}">${a[1]}</button>` : '<div class="kwait">Aguardando entregador</div>'}</article>`; }).join('') || '<p class="kempty">—</p>'}</section>`; }).join('')}</div></div>`;
+  };
+  app.onclick = attempt(async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.id === 'kFull') { try { document.fullscreenElement ? await document.exitFullscreen() : await document.documentElement.requestFullscreen(); } catch { toast('Tela cheia indisponível neste aparelho'); } return; }
+    if (b.id === 'kSound') { sound = !sound; local.set('kdsSound', sound); if (sound) beep(); return draw(); }
+    if (b.dataset.st) { b.disabled = true; await setStatus(+b.dataset.id, b.dataset.st); if (b.dataset.st === 'preparo' && local.get('autoPrint', false)) printTicket(orders.find(o => o.id === +b.dataset.id), S.name); await load(); }
+  });
+  const stop = live(S.id, p => { if (p?.new?.status === 'novo' && !orders.some(o => o.id === p.new.id) && sound) beep(); load().catch(() => {}); });
+  const tick = setInterval(draw, 20000);
+  // mantém a tela acesa em tablets/TVs que suportam
+  let lock = null; try { lock = await navigator.wakeLock?.request('screen'); } catch {}
+  cleanup = () => { stop(); clearInterval(tick); app.onclick = null; document.body.classList.remove('kds-on'); lock?.release?.().catch(() => {}); if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); };
+  await load();
+}
+
 /* ---------- lançar pedido (balcão, telefone, mesa) ---------- */
 async function pNewOrder(S) {
   const [rawP, zones] = await Promise.all([
@@ -869,7 +964,7 @@ async function pNewOrder(S) {
       ${st.pay === 'Dinheiro' ? `<label>Troco para (R$)<input id="n_change" inputmode="decimal" value="${esc(st.change)}"></label>` : ''}
       <div class="ci"><span>Subtotal</span><span class="price">${brl(sub())}</span></div>${fee() ? `<div class="ci"><span>Entrega</span><span class="price">${brl(fee())}</span></div>` : ''}
       <div class="tot"><span>Total</span><span class="price">${brl(sub() + fee())}</span></div>
-      <p class="mut" style="margin:0;font-size:13px">Cupons e fidelidade são aplicados pelo sistema ao lançar.</p>
+      <p class="mut" style="margin:0;font-size:13px">Cupons, fidelidade, promoções e frete grátis são aplicados pelo sistema ao lançar.</p>
       <button class="pri" id="n_go" ${cart.length ? '' : 'disabled'}>Lançar pedido</button></aside></div>`;
   };
   const locate = async () => {
@@ -1015,12 +1110,14 @@ async function pConfig(S) {
   const plans = await q(sb.from('plans').select('*').order('sort'));
   let couriers = [], st0 = null;
   const draw = async () => {
-    let st, zones, coupons, team, nOrders, pix, bill, usage;
-    [st, zones, coupons, couriers, team, nOrders, pix, bill, usage] = await Promise.all([
+    let st, zones, coupons, team, nOrders, pix, bill, usage, promos, prodList;
+    [st, zones, coupons, couriers, team, nOrders, pix, bill, usage, promos, prodList] = await Promise.all([
       q(sb.from('tenants').select('*').eq('id', S.id).single()), q(sb.from('zones').select('*').eq('tenant_id', S.id).order('id')),
       q(sb.from('coupons').select('*').eq('tenant_id', S.id).order('id')), q(sb.from('couriers').select('id, tenant_id, name, phone, active').eq('tenant_id', S.id).order('id')),
       rpc('list_team', { p_tenant: S.id }), sb.from('orders').select('id', { count: 'exact', head: true }).eq('tenant_id', S.id).then(r => r.count || 0),
-      rpc('pix_settings', { p_tenant: S.id }).catch(() => null), rpc('billing_info', { p_tenant: S.id }).catch(() => null), rpc('coupon_usage', { p_tenant: S.id }).catch(() => ({}))]);
+      rpc('pix_settings', { p_tenant: S.id }).catch(() => null), rpc('billing_info', { p_tenant: S.id }).catch(() => null), rpc('coupon_usage', { p_tenant: S.id }).catch(() => ({})),
+      q(sb.from('promotions').select('*').eq('tenant_id', S.id).order('id')).catch(() => []), q(sb.from('products').select('id, name, category').eq('tenant_id', S.id).order('sort'))]);
+    const prodById = Object.fromEntries(prodList.map(p => [p.id, p]));
     st0 = st;
     const link = `${location.origin}/loja/${st.slug}`;
     app.innerHTML = `<h2>Configurações</h2><p class="lead">Endereço da sua loja: <a href="${link}" target="_blank" rel="noopener">${esc(link)}</a> <button class="ghost sm" id="copy">Copiar</button></p>
@@ -1052,7 +1149,22 @@ async function pConfig(S) {
         <label>Intervalo dos horários<select id="scSlot">${[15, 20, 30, 60].map(m => `<option value="${m}" ${(st.schedule_slot_minutes ?? 30) === m ? 'selected' : ''}>${m} min</option>`).join('')}</select></label></div>
       <p class="mut" style="margin:0">Os horários oferecidos seguem o horário de funcionamento (se estiver ligado). Com a loja fechada, o cliente ainda pode agendar para quando ela abrir. Pedidos agendados aparecem no preparo 1 hora antes.</p>
       <button class="pri">Salvar vitrine e agendamento</button></form>
+    <form class="panel" id="fPromo"><h3>Promoções automáticas</h3>
+      ${promos.map(pm => `<div class="row between promo-row"><span><b>${esc(pm.name)}</b><br><span class="mut">${esc(promoLabel(pm, prodById))}</span></span>
+        <span class="row"><button type="button" class="sm ${pm.active ? 'ok' : 'ghost'}" data-ptog="${pm.id}" data-on="${pm.active ? 1 : 0}">${pm.active ? 'Ativa' : 'Pausada'}</button><button type="button" class="ghost sm" data-del="promotions:${pm.id}" aria-label="Remover">×</button></span></div>`).join('') || '<p class="mut" style="margin:0">Nenhuma promoção ainda.</p>'}
+      <div class="grid" style="gap:8px">
+        <div class="two" style="gap:8px"><label>Nome<input id="pmName" maxlength="60" placeholder="Ex.: Happy hour de bebidas"></label>
+          <label>Tipo<select id="pmKind"><option value="buy_x_pay_y">Leve X, pague Y</option><option value="percent">% de desconto</option></select></label></div>
+        <div class="two" style="gap:8px"><label>Vale para<select id="pmScope"><option value="">Toda a loja</option>
+          <optgroup label="Categoria">${[...new Set(prodList.map(p => p.category))].map(c => `<option value="c:${esc(c)}">${esc(c)}</option>`).join('')}</optgroup>
+          <optgroup label="Produto">${prodList.map(p => `<option value="p:${p.id}">${esc(p.name)}</option>`).join('')}</optgroup></select></label>
+          <span class="row" style="flex-wrap:nowrap"><label class="pmBP">Leve<input id="pmBuy" type="number" min="2" max="20" value="3"></label><label class="pmBP">Pague<input id="pmPay" type="number" min="1" max="19" value="2"></label><label id="pmPctL" hidden>% off<input id="pmPct" type="number" min="1" max="90" value="20"></label></span></div>
+        <div class="row">${DAYS.map((d, i) => `<label class="chk"><input type="checkbox" class="pmDay" value="${i}"> ${d.slice(0, 3)}</label>`).join('')}</div>
+        <div class="row" style="flex-wrap:nowrap"><label>Das<input id="pmFrom" type="time"></label><label>Até<input id="pmTo" type="time"></label></div>
+        <p class="mut" style="margin:0">Sem dias marcados = todos os dias. Sem horário = o dia todo (pode passar da meia-noite, ex.: 22:00 às 02:00). No "leve X, pague Y", saem de graça as unidades mais baratas entre as participantes. As promoções somam com cupom e fidelidade.</p>
+        <button class="pri">Criar promoção</button></div></form>
     <form class="panel" id="fDeliv"><h3>Taxa de entrega</h3>
+      <label>Frete grátis para pedidos a partir de (R$)<input id="fdAbove" inputmode="decimal" placeholder="em branco = sem frete grátis" value="${st.free_delivery_above ? fromCents(st.free_delivery_above) : ''}"></label>
       <label class="chk"><input type="radio" name="dMode" value="zones" ${st.delivery_mode !== 'distance' ? 'checked' : ''}> Por bairro (lista de bairros e taxas)</label>
       <label class="chk"><input type="radio" name="dMode" value="distance" ${st.delivery_mode === 'distance' ? 'checked' : ''}> Por distância (km a partir da loja)</label>
       <div class="grid" style="gap:10px">
@@ -1147,6 +1259,7 @@ async function pConfig(S) {
       if (b.dataset.clink) return;
     }
     if (b.dataset.staff) { if (!sure(b)) return; await rpc('remove_staff', { p_tenant: S.id, p_user: b.dataset.staff }); }
+    if (b.dataset.ptog) await q(sb.from('promotions').update({ active: b.dataset.on !== '1' }).eq('id', +b.dataset.ptog));
     if (b.dataset.cup) await q(sb.from('coupons').update({ active: b.dataset.on !== '1' }).eq('id', +b.dataset.cup));
     if (b.dataset.plan) {
       await rpc('change_plan', { p_tenant: S.id, p_plan: b.dataset.plan });
@@ -1159,6 +1272,7 @@ async function pConfig(S) {
     await draw();
   });
   app.onchange = attempt(async e => {
+    if (e.target.id === 'pmKind') { const pct = e.target.value === 'percent'; document.querySelectorAll('.pmBP').forEach(x => x.hidden = pct); $('#pmPctL').hidden = !pct; return; }
     if (e.target.id === 'shBanner' && e.target.files[0]) {
       toast('Enviando banner…');
       const blob = await shrinkImage(e.target.files[0], 1600);
@@ -1189,6 +1303,19 @@ async function pConfig(S) {
       if ($('#hAuto').checked && !Object.keys(hours).length) throw new Error('Preencha pelo menos um dia antes de ligar o horário automático');
       await q(sb.from('tenants').update({ hours, auto_hours: $('#hAuto').checked }).eq('id', S.id));
     }
+    if (id === 'fPromo') {
+      const kind = $('#pmKind').value, scope = $('#pmScope').value, from = $('#pmFrom').value, to = $('#pmTo').value;
+      const name = $('#pmName').value.trim(); if (!name) throw new Error('Dê um nome para a promoção');
+      if ((from && !to) || (!from && to) || (from && from === to)) throw new Error('Horário: preencha início e fim diferentes, ou deixe os dois em branco');
+      const buy = +$('#pmBuy').value, pay = +$('#pmPay').value, pct = +$('#pmPct').value;
+      if (kind === 'buy_x_pay_y' && !(buy >= 2 && buy <= 20 && pay >= 1 && pay < buy)) throw new Error('Leve X, pague Y: o "pague" precisa ser menor que o "leve"');
+      if (kind === 'percent' && !(pct >= 1 && pct <= 90)) throw new Error('Desconto de 1% a 90%');
+      const days = [...document.querySelectorAll('.pmDay:checked')].map(x => +x.value);
+      await q(sb.from('promotions').insert({ tenant_id: S.id, name, kind,
+        product_id: scope.startsWith('p:') ? +scope.slice(2) : null, category: scope.startsWith('c:') ? scope.slice(2) : null,
+        buy_qty: kind === 'buy_x_pay_y' ? buy : null, pay_qty: kind === 'buy_x_pay_y' ? pay : null, percent: kind === 'percent' ? pct : null,
+        days: days.length && days.length < 7 ? days : null, start_time: from || null, end_time: to || null }));
+    }
     if (id === 'fShow') {
       const days = +$('#scDays').value, lead = +$('#scLead').value;
       if (!(days >= 1 && days <= 30) || !(lead >= 15 && lead <= 1440)) throw new Error('Agendamento: até 1 a 30 dias, antecedência de 15 a 1440 minutos');
@@ -1211,12 +1338,14 @@ async function pConfig(S) {
         tiers.push([k, f]);
       }
       tiers.sort((a, b) => a[0] - b[0]);
+      const above = $('#fdAbove').value.trim() ? toCents($('#fdAbove').value) : null;
+      if (above !== null && !(Number.isInteger(above) && above > 0)) throw new Error('Frete grátis: informe um valor válido');
       if (!tiers.length) throw new Error('Cadastre pelo menos uma faixa de distância');
       if (mode === 'distance' && !m) throw new Error('Informe a localização da loja para cobrar por distância');
       const every = +$('#lEvery').value, pct = +$('#lPct').value;
       if (!(every >= 2 && every <= 50) || !(pct >= 1 && pct <= 50)) throw new Error('Fidelidade: a cada 2 a 50 pedidos, desconto de 1% a 50%');
       await q(sb.from('tenants').update({ delivery_mode: mode, lat: m ? +m[1] : null, lng: m ? +m[2] : null, distance_tiers: tiers,
-        loyalty_enabled: $('#lOn').checked, loyalty_every: every, loyalty_percent: pct,
+        free_delivery_above: above, loyalty_enabled: $('#lOn').checked, loyalty_every: every, loyalty_percent: pct,
         allow_tables: $('#mOn').checked, tables_count: Math.max(1, Math.min(200, +$('#mCount').value || 10)) }).eq('id', S.id));
       await refreshBrand();
     }

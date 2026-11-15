@@ -29,7 +29,7 @@ before(() => {
   psql(['-d', 'postgres', '-c', `drop database if exists ${DB}`]);
   psql(['-d', 'postgres', '-c', `create database ${DB}`]);
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -571,4 +571,44 @@ test('vitrine: descrição, endereço, Instagram e banner só da própria pasta'
   sql(`update tenants set banner_path = '${pizzaId}/banner.jpg' where id = '${pizzaId}'`, U.pizza);
   fails(`update tenants set banner_path = '00000000-0000-0000-0000-000000000000/x.jpg' where id = '${pizzaId}'`, U.pizza, /check constraint/);
   assert.equal(sql(`update tenants set description = 'hack' where id = '${pizzaId}' returning id`, U.staff), '');
+});
+
+test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis acima de valor', () => {
+  const m = menu('forno-da-vila'), agua = m.find(x => x.name === 'Água sem gás'), refri = m.find(x => x.name === 'Refrigerante 2L');
+  const coke = refri.groups[0].options[0].id;
+  const mk = (items, extra = {}) => order('forno-da-vila', { customer: { name: 'Promo', phone: '31977770000' }, fulfillment: 'pickup', payment: 'Pix', items, ...extra });
+  sql(`insert into promotions (tenant_id, name, kind, product_id, buy_qty, pay_qty) values ('${pizzaId}', 'Leve 3 pague 2 água', 'buy_x_pay_y', ${agua.id}, 3, 2)`, U.pizza);
+  let r = mk([{ productId: agua.id, qty: 7 }]);                 // 7 águas: 2 grátis
+  assert.equal(r.total, agua.price * 5);
+  assert.equal(json(`track_order('${r.code}')`, null).order.promoNames, 'Leve 3 pague 2 água');
+  // % na categoria Bebidas, só num horário que não é agora -> não aplica
+  const nowH = +sql(`select extract(hour from now() at time zone 'America/Sao_Paulo')`);
+  const off = (nowH + 3) % 24, offEnd = (nowH + 4) % 24;
+  sql(`insert into promotions (tenant_id, name, kind, category, percent, start_time, end_time) values ('${pizzaId}', 'Happy hour', 'percent', 'Bebidas', 50, '${off}:00', '${offEnd}:00')`, U.pizza);
+  r = mk([{ productId: refri.id, qty: 1, optionIds: [coke] }]);
+  assert.equal(r.total, refri.price);
+  // agora dentro do horário (faixa que passa da meia-noite também funciona)
+  sql(`update promotions set start_time = '${(nowH + 23) % 24}:00', end_time = '${(nowH + 1) % 24}:59' where name = 'Happy hour'`);
+  r = mk([{ productId: refri.id, qty: 1, optionIds: [coke] }]);
+  assert.equal(r.total, Math.round(refri.price / 2));
+  // dia da semana diferente de hoje -> não aplica
+  const dow = +sql(`select extract(dow from now() at time zone 'America/Sao_Paulo')`);
+  sql(`update promotions set days = array[${(dow + 1) % 7}] where name = 'Happy hour'`);
+  assert.equal(mk([{ productId: refri.id, qty: 1, optionIds: [coke] }]).total, refri.price);
+  // frete grátis acima de R$ 30
+  sql(`update tenants set free_delivery_above = 3000 where id = '${pizzaId}'`, U.pizza);
+  const z = zones('forno-da-vila')[0];
+  const deliv = (qty) => mk([{ productId: refri.id, qty, optionIds: [coke] }], { fulfillment: 'delivery', zoneId: z.id, address: 'Rua P, 1' });
+  assert.equal(deliv(1).total, refri.price + z.fee);
+  assert.equal(deliv(3).total, refri.price * 3);
+  // segurança: loja não cria promoção com produto de outra loja; anônimo só lê
+  fails(`insert into promotions (tenant_id, name, kind, product_id, percent) values ('${pizzaId}', 'x', 'percent', 999999, 10)`, U.pizza, /row-level security/);
+  fails(`insert into promotions (tenant_id, name, kind, percent) values ('${pizzaId}', 'x', 'percent', 10)`, U.staff, /row-level security/);
+  fails(`insert into promotions (tenant_id, name, kind, buy_qty, pay_qty) values ('${pizzaId}', 'x', 'buy_x_pay_y', 2, 2)`, U.pizza, /check constraint/);
+  assert.ok(+sql(`select count(*) from promotions`, null) >= 2);
+  // fechamento de caixa soma o desconto das promoções
+  const c = json(`cash_report('${pizzaId}')`, U.pizza);
+  assert.equal(c.total, c.subtotal + c.fees - c.discounts);
+  sql(`update tenants set free_delivery_above = null where id = '${pizzaId}'`, U.pizza);
+  sql(`update promotions set active = false where tenant_id = '${pizzaId}'`, U.pizza);
 });

@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Balcão — Delivery para qualquer negócio</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30'%3E%3Crect x='3' y='9' width='24' height='17' rx='3' fill='%23d62828'/%3E%3Cpath d='M9 9V6a6 6 0 0 1 12 0v3' fill='none' stroke='%23d62828' stroke-width='2.5'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#d62828">
+<link rel="manifest" id="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bowlby+One&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/style.css">
@@ -17,7 +23,7 @@
 </header>
 <div id="banner"></div>
 <main id="app"><p class="empty">Carregando…</p></main>
-<footer id="foot"><a href="/termos" data-link>Termos de Uso</a> · <a href="/privacidade" data-link>Política de Privacidade</a></footer>
+<footer id="foot"><button id="installBtn" class="ghost sm" hidden>Instalar app no celular</button><span id="iosHint" hidden>No iPhone: toque em Compartilhar e depois em "Adicionar à Tela de Início".<br></span><a href="/termos" data-link>Termos de Uso</a> · <a href="/privacidade" data-link>Política de Privacidade</a></footer>
 <div class="dlg" id="dlg" role="dialog" aria-modal="true"><div id="dlgBody"></div></div>
 <div id="toast" role="status" aria-live="polite"></div>
 <div id="print" aria-hidden="true"></div>
