@@ -13,6 +13,9 @@ const toCents = v => { const n = Number(String(v).trim().replace(/\./g, '').repl
 const fromCents = c => ((c || 0) / 100).toFixed(2).replace('.', ',');
 const mins = t => Math.max(0, Math.floor((Date.now() - new Date(t).getTime()) / 60000));
 const hhmm = t => new Date(t).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+const CHANNEL = { online: 'Site', balcao: 'Balcão', telefone: 'Telefone', mesa: 'Mesa' };
+const FUL = { delivery: 'Entrega', pickup: 'Retirada', table: 'Mesa' };
+const where = o => o.fulfillment === 'table' ? `Mesa ${o.table_label || ''}` : o.fulfillment === 'pickup' ? 'Retirada' : `Entrega · ${o.zone_name}`;
 const SLABEL = { novo: 'Recebido', preparo: 'Em preparo', pronto: 'Pronto', rota: 'Saiu para entrega', entregue: 'Entregue', cancelado: 'Cancelado' };
 const local = {
   get: (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
@@ -122,7 +125,7 @@ function customerMsg(o, storeName) {
   const m = {
     novo: `Olá, ${n}! Recebemos seu pedido #${o.number} na ${storeName}.`,
     preparo: `Olá, ${n}! Seu pedido #${o.number} na ${storeName} foi aceito e já está sendo preparado.`,
-    pronto: o.fulfillment === 'pickup' ? `Olá, ${n}! Seu pedido #${o.number} está pronto para retirada na ${storeName}.` : `Olá, ${n}! Seu pedido #${o.number} está pronto e logo sai para entrega.`,
+    pronto: o.fulfillment === 'table' ? `Olá, ${n}! Seu pedido #${o.number} está pronto e já vai para a sua mesa.` : o.fulfillment === 'pickup' ? `Olá, ${n}! Seu pedido #${o.number} está pronto para retirada na ${storeName}.` : `Olá, ${n}! Seu pedido #${o.number} está pronto e logo sai para entrega.`,
     rota: `Olá, ${n}! Seu pedido #${o.number} saiu para entrega${o.courier?.name ? ` com ${o.courier.name}` : ''}.`,
     entregue: `Obrigado pelo pedido, ${n}! Esperamos que tenha gostado. 😊`,
     cancelado: `Olá, ${n}. Infelizmente seu pedido #${o.number} na ${storeName} foi cancelado. Fale com a gente se tiver dúvidas.`
@@ -164,12 +167,23 @@ async function locateAddress({ street, number, city, state, cep }, cepInfo) {
 const kmTxt = km => `${String(km).replace('.', ',')} km`;
 
 /* ---------- comanda (impressora térmica 80 mm) ---------- */
+// Folha A4 com os QR Codes das mesas (imagem gerada pelo serviço público goqr.me/api.qrserver.com)
+async function printTableQrs(slug, count, storeName) {
+  const url = n => `${location.origin}/loja/${slug}?mesa=${n}`;
+  $('#print').innerHTML = `<div class="qrsheet">${Array.from({ length: count }, (_, i) => `<div class="qrcard"><b>${esc(storeName)}</b>
+    <img src="https://api.qrserver.com/v1/create-qr-code/?size=360x360&margin=8&data=${encodeURIComponent(url(i + 1))}" alt="QR Code da mesa ${i + 1}">
+    <span class="big">Mesa ${i + 1}</span><span>Aponte a câmera para pedir</span></div>`).join('')}</div>`;
+  toast('Preparando os QR Codes…');
+  await Promise.all([...$('#print').querySelectorAll('img')].map(img => img.complete ? 0 : new Promise(ok => { img.onload = img.onerror = ok; })));
+  window.print();
+}
+
 function printTicket(o, storeName) {
   const box = $('#print');
   box.innerHTML = `<div class="tkt"><b class="big">${esc(storeName)}</b><div>Pedido <b class="big">#${o.number}</b></div>
     <div>${new Date(o.created_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</div><hr>
     <div><b>${esc(o.customer_name)}</b> · ${esc(o.customer_phone)}</div>
-    <div>${o.fulfillment === 'pickup' ? '<b>RETIRADA NA LOJA</b>' : `<b>ENTREGA</b> · ${esc(o.address)} — ${esc(o.zone_name)}`}</div><hr>
+    <div>${o.fulfillment === 'table' ? `<b class="big">MESA ${esc(o.table_label)}</b>` : o.fulfillment === 'pickup' ? `<b>RETIRADA${o.channel === 'balcao' ? ' · BALCÃO' : ' NA LOJA'}</b>` : `<b>ENTREGA</b> · ${esc(o.address)} — ${esc(o.zone_name)}`}</div><hr>
     ${o.items.map(x => `<div class="li"><b>${x.qty}x ${esc(x.product_name)}</b><span>${brl(x.qty * x.unit_price)}</span></div>${x.options_text ? `<div class="sub">${esc(x.options_text)}</div>` : ''}${x.notes ? `<div class="sub">OBS: ${esc(x.notes)}</div>` : ''}`).join('')}<hr>
     <div class="li"><span>Subtotal</span><span>${brl(o.subtotal)}</span></div>
     ${o.fee ? `<div class="li"><span>Entrega</span><span>${brl(o.fee)}</span></div>` : ''}${o.discount ? `<div class="li"><span>Desconto</span><span>-${brl(o.discount)}</span></div>` : ''}
@@ -338,6 +352,41 @@ const sortMenu = prods => prods.sort(bySort).map(p => ({ ...p,
   groups: (p.option_groups || []).sort(bySort).map(g => ({ ...g, options: (g.options || []).sort(bySort) })) }));
 const MENU_COLS = 'id, category, name, description, price, icon, image_path, available, sort, option_groups(id, name, min_sel, max_sel, sort, options(id, name, price, sort))';
 
+// Montador de produto com grupos de opções (usado na loja e no lançamento de pedidos do painel)
+const unitOfP = (p, ids) => p.price + p.groups.flatMap(g => g.options).filter(o => ids.includes(o.id)).reduce((t, o) => t + o.price, 0);
+function openBuilder(p, onAdd) {
+  if (!p.groups.length) return onAdd({ productId: p.id, name: p.name, optionIds: [], optText: '', unit: p.price, qty: 1, notes: '' });
+  const sel = p.groups.map(g => g.options.slice(0, g.min_sel).map(o => o.id));
+  let qty = 1, notes = '';
+  const draw = () => {
+    dialog(`<h2>${esc(p.name)}</h2><span class="mut">${esc(p.description)}</span>
+    ${p.groups.map((g, i) => `<div class="grp"><h3><span>${esc(g.name)}</span><span class="badge ${g.min_sel ? 'b-a' : ''}">${g.min_sel ? (g.min_sel === g.max_sel ? `Escolha ${g.min_sel}` : `Mín. ${g.min_sel}, máx. ${g.max_sel}`) : g.max_sel > 1 ? `Até ${g.max_sel}` : 'Opcional'}</span></h3>
+      <div class="opts">${g.options.map(o => `<button data-g="${i}" data-o="${o.id}" class="${sel[i].includes(o.id) ? 'on' : ''}" aria-pressed="${sel[i].includes(o.id)}">${esc(o.name)}${o.price ? ' +' + brl(o.price) : ''}</button>`).join('')}</div></div>`).join('')}
+    <label>Observação<input id="bObs" value="${esc(notes)}" maxlength="140" placeholder="Ex.: sem cebola"></label>
+    <div class="row between"><span class="row"><button class="ghost sm" data-q="-1" aria-label="Menos">−</button><b>${qty}</b><button class="ghost sm" data-q="1" aria-label="Mais">+</button></span><span class="tot price">${brl(unitOfP(p, sel.flat()) * qty)}</span></div>
+    <div class="row" style="justify-content:flex-end"><button class="ghost" id="bX">Cancelar</button><button class="pri" id="bOk">Adicionar</button></div>`);
+    $('#dlgBody').onclick = e => {
+      const b = e.target.closest('button'); if (!b) return; notes = $('#bObs').value;
+      if (b.dataset.g) {
+        const i = +b.dataset.g, id = +b.dataset.o, g = p.groups[i], a = sel[i];
+        if (a.includes(id)) { if (g.max_sel === 1 && g.min_sel === 1) return; a.splice(a.indexOf(id), 1); }
+        else if (g.max_sel === 1) sel[i] = [id];
+        else if (a.length < g.max_sel) a.push(id);
+        else return toast(`Máximo de ${g.max_sel} em ${g.name}`);
+        draw();
+      } else if (b.dataset.q) { qty = Math.max(1, Math.min(99, qty + +b.dataset.q)); draw(); }
+      else if (b.id === 'bX') closeDlg();
+      else if (b.id === 'bOk') {
+        const bad = p.groups.findIndex((g, i) => sel[i].length < g.min_sel);
+        if (bad >= 0) return toast(`Escolha ${p.groups[bad].min_sel} em ${p.groups[bad].name}`);
+        const ids = sel.flat().sort((a, b) => a - b), names = p.groups.flatMap(g => g.options).filter(o => ids.includes(o.id)).map(o => o.name);
+        closeDlg(); onAdd({ productId: p.id, name: p.name, optionIds: ids, optText: names.join(', '), unit: unitOfP(p, ids), qty, notes: notes.trim() });
+      }
+    };
+  };
+  draw();
+}
+
 async function vShop(slug) {
   const S = (await q(sb.from('tenants').select('*, seg:segment_templates(name)').eq('slug', slug).limit(1)))[0];
   if (!S) throw new Error('Loja não encontrada');
@@ -345,6 +394,9 @@ async function vShop(slug) {
     q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id).eq('available', true)),
     q(sb.from('zones').select('id, name, fee').eq('tenant_id', S.id).order('name'))]);
   const products = sortMenu(rawP), OS = openState(S), DIST = S.delivery_mode === 'distance';
+  // Pedido na mesa: o QR Code da mesa abre /loja/<loja>?mesa=7
+  const mesaParam = (new URLSearchParams(location.search).get('mesa') || '').toUpperCase().trim();
+  const TABLE = S.allow_tables && /^[A-Z0-9][A-Z0-9 -]{0,9}$/.test(mesaParam) ? mesaParam : null;
   let geo = null; // { lat, lng, quote: { km, fee, inArea, maxKm } } no modo por distância
   const zoneTxt = () => !geo?.quote ? '' : geo.quote.inArea
     ? `Distância aproximada: <b>${kmTxt(geo.quote.km)}</b> · taxa ${geo.quote.fee ? brl(geo.quote.fee) : 'grátis'}`
@@ -356,7 +408,7 @@ async function vShop(slug) {
   const saveCart = () => local.set(cartKey, cart);
   const unitOf = (p, ids) => p.price + p.groups.flatMap(g => g.options).filter(o => ids.includes(o.id)).reduce((t, o) => t + o.price, 0);
   const totals = () => {
-    const sub = cart.reduce((t, c) => t + c.qty * c.unit, 0), pickup = $('#cMode')?.value === 'pickup';
+    const sub = cart.reduce((t, c) => t + c.qty * c.unit, 0), pickup = !!TABLE || $('#cMode')?.value === 'pickup';
     const z = DIST ? null : zones.find(z => String(z.id) === $('#cZone')?.value) || zones[0];
     let fee = pickup ? 0 : DIST ? (geo?.quote?.fee || 0) : z ? z.fee : 0, disc = 0;
     if (coupon) { if (coupon.percent) disc = Math.round(sub * coupon.percent / 100); if (coupon.freeShipping) fee = 0; }
@@ -365,7 +417,7 @@ async function vShop(slug) {
   const paint = () => {
     cat = cats.includes(cat) ? cat : cats[0];
     const list = products.filter(p => p.category === cat), count = cart.reduce((t, c) => t + c.qty, 0);
-    app.innerHTML = `<h2>${esc(S.name)}</h2><p class="lead">${esc(S.seg?.name)} · ${OS.open ? `<span class="badge b-g">Aberto${OS.label ? ' ' + OS.label : ' agora'}</span>` : `<span class="badge b-r">${esc(OS.label || 'Fechado')}</span>`} · entrega em ${esc(S.eta_text)}${S.min_order ? ` · pedido mínimo ${brl(S.min_order)}` : ''}${S.phone ? ` · ${esc(S.phone)}` : ''}
+    app.innerHTML = `${TABLE ? `<div class="banner" style="margin:-24px calc(-1 * max(4vw,16px)) 16px">Você está pedindo para a <b>Mesa ${esc(TABLE)}</b>. O pedido vai direto para a cozinha.</div>` : ''}<h2>${esc(S.name)}</h2><p class="lead">${esc(S.seg?.name)} · ${OS.open ? `<span class="badge b-g">Aberto${OS.label ? ' ' + OS.label : ' agora'}</span>` : `<span class="badge b-r">${esc(OS.label || 'Fechado')}</span>`} · entrega em ${esc(S.eta_text)}${S.min_order ? ` · pedido mínimo ${brl(S.min_order)}` : ''}${S.phone ? ` · ${esc(S.phone)}` : ''}
       ${waLink(S.phone, `Olá, ${S.name}!`) ? ` · <a href="${esc(waLink(S.phone, `Olá, ${S.name}!`))}" target="_blank" rel="noopener">Falar no WhatsApp</a>` : ''}</p>
     <div class="shop"><section>
       <div class="cats">${cats.map(c => `<button class="${c === cat ? 'on' : ''}" data-cat="${esc(c)}">${esc(c)}</button>`).join('')}</div>
@@ -375,69 +427,39 @@ async function vShop(slug) {
     </section>
     <aside class="cart" aria-label="Carrinho"><h3>Seu pedido</h3>
       ${cart.length ? cart.map((x, i) => `<div class="ci"><div><b>${x.qty}× ${esc(x.name)}</b>${x.optText ? `<br><span class="mut">${esc(x.optText)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}<br><button class="ghost sm" data-dec="${i}" aria-label="Diminuir">−</button> <button class="ghost sm" data-inc="${i}" aria-label="Aumentar">+</button></div><span class="price">${brl(x.qty * x.unit)}</span></div>`).join('') : '<p class="empty">Carrinho vazio.</p>'}
-      <label>Como receber<select id="cMode"><option value="delivery">Entrega</option>${S.allow_pickup ? '<option value="pickup">Retirar na loja</option>' : ''}</select></label>
-      <label id="zWrap" ${DIST ? 'hidden' : ''}>Bairro<select id="cZone">${zones.map(z => `<option value="${z.id}">${esc(z.name)} · ${z.fee ? brl(z.fee) : 'grátis'}</option>`).join('')}</select></label>
+      ${TABLE ? `<p style="margin:0">Pedido para a <b>Mesa ${esc(TABLE)}</b></p>` : `<label>Como receber<select id="cMode"><option value="delivery">Entrega</option>${S.allow_pickup ? '<option value="pickup">Retirar na loja</option>' : ''}</select></label>`}
+      <label id="zWrap" ${DIST || TABLE ? 'hidden' : ''}>Bairro<select id="cZone">${zones.map(z => `<option value="${z.id}">${esc(z.name)} · ${z.fee ? brl(z.fee) : 'grátis'}</option>`).join('')}</select></label>
       <label>Cupom<span class="row" style="flex-wrap:nowrap"><input id="cCup" placeholder="Ex.: PRIMEIRA10" value="${esc(coupon?.code || '')}"><button class="ghost" id="cupBtn">Aplicar</button></span></label>
       <div id="tots"></div><button class="pri" id="checkout">Finalizar pedido</button></aside></div>
     ${count ? `<button class="pri cartbar" id="toCart">Ver carrinho · ${count} ${count > 1 ? 'itens' : 'item'} · ${brl(cart.reduce((t, c) => t + c.qty * c.unit, 0))}</button>` : ''}`;
     paintTotals();
   };
   const paintTotals = () => {
-    const t = totals(), low = S.min_order && t.sub < S.min_order; $('#zWrap').hidden = t.pickup || DIST;
-    $('#tots').innerHTML = `<div class="ci"><span>Subtotal</span><span class="price">${brl(t.sub)}</span></div><div class="ci"><span>Entrega${DIST && geo?.quote && !t.pickup ? ` (${kmTxt(geo.quote.km)})` : ''}</span><span class="price">${!t.feeKnown ? 'pelo endereço' : t.fee ? brl(t.fee) : 'Grátis'}</span></div>${t.disc ? `<div class="ci"><span>Desconto</span><span class="price">−${brl(t.disc)}</span></div>` : ''}<div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>${low && cart.length ? `<span class="badge b-a">Faltam ${brl(S.min_order - t.sub)} para o pedido mínimo</span>` : ''}`;
+    const t = totals(), low = !t.pickup && S.min_order && t.sub < S.min_order; $('#zWrap').hidden = t.pickup || DIST;
+    $('#tots').innerHTML = `<div class="ci"><span>Subtotal</span><span class="price">${brl(t.sub)}</span></div>${TABLE ? '' : `<div class="ci"><span>Entrega${DIST && geo?.quote && !t.pickup ? ` (${kmTxt(geo.quote.km)})` : ''}</span><span class="price">${!t.feeKnown ? 'pelo endereço' : t.fee ? brl(t.fee) : 'Grátis'}</span></div>`}${t.disc ? `<div class="ci"><span>Desconto</span><span class="price">−${brl(t.disc)}</span></div>` : ''}<div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>${low && cart.length ? `<span class="badge b-a">Faltam ${brl(S.min_order - t.sub)} para o pedido mínimo</span>` : ''}`;
     $('#checkout').disabled = !cart.length || low || !OS.open || (!t.pickup && !DIST && !zones.length);
   };
   const addToCart = it => { const ex = cart.find(c => c.productId === it.productId && c.optionIds.join() === it.optionIds.join() && c.notes === it.notes); ex ? ex.qty += it.qty : cart.push(it); saveCart(); toast('Adicionado ao carrinho'); paint(); };
-  const builder = p => {
-    if (!p.groups.length) return addToCart({ productId: p.id, name: p.name, optionIds: [], optText: '', unit: p.price, qty: 1, notes: '' });
-    const sel = p.groups.map(g => g.options.slice(0, g.min_sel).map(o => o.id));
-    let qty = 1, notes = '';
-    const draw = () => {
-      dialog(`<h2>${esc(p.name)}</h2><span class="mut">${esc(p.description)}</span>
-      ${p.groups.map((g, i) => `<div class="grp"><h3><span>${esc(g.name)}</span><span class="badge ${g.min_sel ? 'b-a' : ''}">${g.min_sel ? (g.min_sel === g.max_sel ? `Escolha ${g.min_sel}` : `Mín. ${g.min_sel}, máx. ${g.max_sel}`) : g.max_sel > 1 ? `Até ${g.max_sel}` : 'Opcional'}</span></h3>
-        <div class="opts">${g.options.map(o => `<button data-g="${i}" data-o="${o.id}" class="${sel[i].includes(o.id) ? 'on' : ''}" aria-pressed="${sel[i].includes(o.id)}">${esc(o.name)}${o.price ? ' +' + brl(o.price) : ''}</button>`).join('')}</div></div>`).join('')}
-      <label>Observação<input id="bObs" value="${esc(notes)}" maxlength="140" placeholder="Ex.: sem cebola"></label>
-      <div class="row between"><span class="row"><button class="ghost sm" data-q="-1" aria-label="Menos">−</button><b>${qty}</b><button class="ghost sm" data-q="1" aria-label="Mais">+</button></span><span class="tot price">${brl(unitOf(p, sel.flat()) * qty)}</span></div>
-      <div class="row" style="justify-content:flex-end"><button class="ghost" id="bX">Cancelar</button><button class="pri" id="bOk">Adicionar</button></div>`);
-      $('#dlgBody').onclick = e => {
-        const b = e.target.closest('button'); if (!b) return; notes = $('#bObs').value;
-        if (b.dataset.g) {
-          const i = +b.dataset.g, id = +b.dataset.o, g = p.groups[i], a = sel[i];
-          if (a.includes(id)) { if (g.max_sel === 1 && g.min_sel === 1) return; a.splice(a.indexOf(id), 1); }
-          else if (g.max_sel === 1) sel[i] = [id];
-          else if (a.length < g.max_sel) a.push(id);
-          else return toast(`Máximo de ${g.max_sel} em ${g.name}`);
-          draw();
-        } else if (b.dataset.q) { qty = Math.max(1, Math.min(99, qty + +b.dataset.q)); draw(); }
-        else if (b.id === 'bX') closeDlg();
-        else if (b.id === 'bOk') {
-          const bad = p.groups.findIndex((g, i) => sel[i].length < g.min_sel);
-          if (bad >= 0) return toast(`Escolha ${p.groups[bad].min_sel} em ${p.groups[bad].name}`);
-          const ids = sel.flat().sort((a, b) => a - b), names = p.groups.flatMap(g => g.options).filter(o => ids.includes(o.id)).map(o => o.name);
-          closeDlg(); addToCart({ productId: p.id, name: p.name, optionIds: ids, optText: names.join(', '), unit: unitOf(p, ids), qty, notes: notes.trim() });
-        }
-      };
-    };
-    draw();
-  };
+  const builder = p => openBuilder(p, addToCart);
   const checkout = () => {
     const t = totals(), last = local.get('customer', {});
     dialog(`<h2>Finalizar pedido</h2><form id="fCk" class="grid">
       <label>Nome<input id="kN" required autocomplete="name" value="${esc(last.name || '')}"></label>
-      <label>Telefone / WhatsApp<input id="kP" required inputmode="tel" autocomplete="tel" value="${esc(last.phone || '')}" placeholder="(11) 90000-0000"></label>
-      ${t.pickup ? '<p class="mut">Retirada na loja — sem taxa de entrega.</p>' : `
+      <label>Telefone / WhatsApp${TABLE ? ' (opcional, para acompanhar e somar selos)' : ''}<input id="kP" ${TABLE ? '' : 'required'} inputmode="tel" autocomplete="tel" value="${esc(last.phone || '')}" placeholder="(11) 90000-0000"></label>
+      ${TABLE ? `<p class="mut" style="margin:0">Pedido para a <b>Mesa ${esc(TABLE)}</b>. A gente leva até você.</p>` : t.pickup ? '<p class="mut">Retirada na loja — sem taxa de entrega.</p>' : `
       <div class="two" style="gap:10px"><label>CEP<input id="kCep" inputmode="numeric" autocomplete="postal-code" maxlength="9" placeholder="00000-000" value="${esc(last.cep || '')}"></label><label>Número<input id="kNum" required value="${esc(last.num || '')}" placeholder="123"></label></div>
       <label>Rua<input id="kRua" required minlength="3" autocomplete="address-line1" value="${esc(last.rua || '')}" placeholder="Rua, avenida…"></label>
       <label>Complemento / referência<input id="kComp" value="${esc(last.comp || '')}" placeholder="Apto, bloco, ponto de referência"></label>
       <p class="mut" id="kZone" style="margin:0">${DIST ? (geo?.quote ? zoneTxt() : 'Taxa de entrega: preencha o CEP e o número para calcular.') : `Bairro de entrega: <b>${esc(t.zone.name)}</b> · taxa ${t.fee ? brl(t.fee) : 'grátis'}`}</p>`}
       ${S.loyalty_enabled ? `<p class="mut" style="margin:0">Fidelidade: a cada ${S.loyalty_every} pedidos entregues, ${S.loyalty_percent}% de desconto no próximo, aplicado automaticamente.</p>` : ''}
-      <label>Pagamento<select id="kPay">${S.pix_online ? '<option value="Pix online" selected>Pix agora (QR Code, confirmação automática)</option>' : ''}<option value="Pix">Pix na entrega</option><option>Cartão na entrega</option><option>Dinheiro</option></select></label>
+      <label>Pagamento<select id="kPay">${TABLE ? '<option value="Pagar no caixa" selected>Pagar no caixa / na mesa</option>' : ''}${S.pix_online ? `<option value="Pix online" ${TABLE ? '' : 'selected'}>Pix agora (QR Code, confirmação automática)</option>` : ''}${TABLE ? '' : '<option value="Pix">Pix na entrega</option><option>Cartão na entrega</option><option>Dinheiro</option>'}</select></label>
       <label id="kEm" ${S.pix_online ? '' : 'hidden'}>E-mail (para o comprovante do Pix)<input id="kEmail" type="email" autocomplete="email" value="${esc(last.email || '')}" placeholder="voce@email.com"></label>
       <label id="kTr" hidden>Troco para (R$)<input id="kT" inputmode="decimal" placeholder="Ex.: 100"></label>
       <div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>
       <p class="mut" style="margin:0;font-size:13px">Seus dados são usados só para preparar e entregar este pedido. <a href="/privacidade" target="_blank">Política de Privacidade</a>.</p>
       <div class="row" style="justify-content:flex-end"><button type="button" class="ghost" id="kX">Voltar</button><button class="pri" id="kGo">Enviar pedido</button></div></form>`);
     $('#kPay').onchange = e => { $('#kTr').hidden = e.target.value !== 'Dinheiro'; $('#kEm').hidden = e.target.value !== 'Pix online'; };
+    $('#kEm').hidden = $('#kPay').value !== 'Pix online';
     $('#kX').onclick = closeDlg;
     // CEP → rua e bairro. Modo bairros: seleciona o bairro se existir na lista. Modo distância: localiza e calcula a taxa.
     const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
@@ -473,7 +495,7 @@ async function vShop(slug) {
         const customer = { name: $('#kN').value, phone: $('#kP').value };
         const pixOnline = $('#kPay').value === 'Pix online', email = $('#kEmail').value.trim();
         if (pixOnline && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) throw new Error('Informe seu e-mail para gerar o Pix');
-        const addr = t.pickup ? '' : `${$('#kRua').value.trim()}, ${$('#kNum').value.trim()}${$('#kComp').value.trim() ? ' - ' + $('#kComp').value.trim() : ''}${$('#kCep').value.trim() ? ' - CEP ' + $('#kCep').value.trim() : ''}`;
+        const addr = t.pickup || TABLE ? '' : `${$('#kRua').value.trim()}, ${$('#kNum').value.trim()}${$('#kComp').value.trim() ? ' - ' + $('#kComp').value.trim() : ''}${$('#kCep').value.trim() ? ' - CEP ' + $('#kCep').value.trim() : ''}`;
         const zoneNow = totals().zone;
         if (DIST && !t.pickup) {
           if (!geo) await locate();
@@ -481,11 +503,11 @@ async function vShop(slug) {
           if (!geo.quote?.inArea) throw new Error(`Endereço fora da área de entrega (${kmTxt(geo.quote?.km ?? '?')}).`);
         }
         const r = await rpc('place_order', { p_slug: slug, p: {
-          customer, fulfillment: t.pickup ? 'pickup' : 'delivery', zoneId: zoneNow?.id, address: addr, payment: $('#kPay').value,
+          customer, fulfillment: TABLE ? 'table' : t.pickup ? 'pickup' : 'delivery', ...(TABLE ? { table: TABLE } : {}), zoneId: zoneNow?.id, address: addr, payment: $('#kPay').value,
           ...(DIST && !t.pickup ? { lat: geo.lat, lng: geo.lng } : {}),
           changeFor: $('#kT').value ? toCents($('#kT').value) : undefined, coupon: coupon?.code,
           items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: c.notes })) } });
-        local.set('customer', { ...last, ...customer, ...(email ? { email } : {}), ...(t.pickup ? {} : { cep: $('#kCep').value, rua: $('#kRua').value, num: $('#kNum').value, comp: $('#kComp').value }) });
+        local.set('customer', { ...last, ...customer, ...(email ? { email } : {}), ...(t.pickup || TABLE ? {} : { cep: $('#kCep').value, rua: $('#kRua').value, num: $('#kNum').value, comp: $('#kComp').value }) });
         cart = []; saveCart();
         if (r.pix) { $('#kGo').textContent = 'Gerando Pix…'; try { await pixCall({ action: 'create', code: r.code, email }); } catch (err) { toast(err.message); } }
         closeDlg(); go(`/pedido/${r.code}`);
@@ -523,16 +545,16 @@ async function vTrack(code) {
     lastSig = sig;
     if (o.status === 'pagamento') { drawPix(S, o); return o.status; }
     setColor(S.color); $('#bName').textContent = S.name; header('', false);
-    const flow = o.fulfillment === 'pickup' ? ['novo', 'preparo', 'pronto', 'entregue'] : ['novo', 'preparo', 'pronto', 'rota', 'entregue'];
+    const flow = o.fulfillment !== 'delivery' ? ['novo', 'preparo', 'pronto', 'entregue'] : ['novo', 'preparo', 'pronto', 'rota', 'entregue'];
     const idx = flow.indexOf(o.status), at = Object.fromEntries(o.events.map(e => [e.status, e.at]));
     app.innerHTML = `<h2>Pedido #${o.number}</h2><p class="lead">Olá, ${esc(o.customerName)}! Esta página atualiza sozinha.</p>
     <div class="panel" style="max-width:760px">
       ${o.paymentStatus === 'paid' ? '<span class="badge b-g">Pagamento confirmado</span>' : ''}
       ${o.status === 'cancelado' ? `<span class="badge b-r">${o.paymentStatus === 'expired' ? 'Pedido cancelado: o Pix não foi pago dentro do prazo.' : 'Pedido cancelado pela loja.'}${S.phone ? ' Contato: ' + esc(S.phone) : ''}</span>` :
-      `<div class="steps">${flow.map((s, i) => `<span class="${i <= idx ? 'on' : ''}">${s === 'pronto' && o.fulfillment === 'pickup' ? 'Pronto p/ retirar' : SLABEL[s]}${at[s] ? `<br><small>${hhmm(at[s])}</small>` : ''}</span>`).join('')}</div>`}
+      `<div class="steps">${flow.map((s, i) => `<span class="${i <= idx ? 'on' : ''}">${s === 'pronto' && o.fulfillment === 'pickup' ? 'Pronto p/ retirar' : s === 'entregue' && o.fulfillment === 'table' ? 'Servido' : SLABEL[s]}${at[s] ? `<br><small>${hhmm(at[s])}</small>` : ''}</span>`).join('')}</div>`}
       ${o.courier ? `<p><b>${esc(o.courier)}</b> está a caminho de ${esc(o.address)}, ${esc(o.zone)}.</p>` : ''}
       <table><tbody>${o.items.map(x => `<tr><td>${x.qty}× ${esc(x.product_name)}${x.options_text ? `<br><span class="mut">${esc(x.options_text)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}</td><td class="n price">${brl(x.qty * x.unit_price)}</td></tr>`).join('')}
-      <tr><td>${o.fulfillment === 'pickup' ? 'Retirada na loja' : `Entrega (${esc(o.zone)})`}</td><td class="n price">${brl(o.fee)}</td></tr>
+      <tr><td>${o.fulfillment === 'pickup' ? 'Retirada na loja' : o.fulfillment === 'table' ? esc(o.zone) : `Entrega (${esc(o.zone)})`}</td><td class="n price">${brl(o.fee)}</td></tr>
       ${o.discount ? `<tr><td>Desconto ${o.loyaltyDiscount ? 'de fidelidade' : esc(o.coupon || '')}</td><td class="n price">−${brl(o.discount)}</td></tr>` : ''}
       <tr><td><b>Total · ${esc(o.payment)}</b></td><td class="n price"><b>${brl(o.total)}</b></td></tr></tbody></table>
       ${o.loyalty ? `<div class="loyal"><b>Cartão fidelidade</b>${o.loyaltyDiscount ? `<span class="badge b-g">Você ganhou ${o.loyalty.percent}% neste pedido!</span>` : ''}
@@ -573,11 +595,11 @@ async function vTrack(code) {
 async function vPanel(tab) {
   const S = ME.tenant, owner = ME.role === 'owner';
   setColor(S.color); $('#bName').textContent = S.name;
-  const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ['cardapio', 'Cardápio'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['config', 'Configurações']] : [])];
-  if (!tabs.some(t => t[0] === tab)) tab = 'pedidos';
+  const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ['cardapio', 'Cardápio'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['config', 'Configurações']] : [])];
+  if (!tabs.some(t => t[0] === tab) && tab !== 'novo') tab = 'pedidos';
   $('#banner').innerHTML = billingBanner(S, owner);
   header(tabs.map(([k, n]) => `<a href="/painel/${k}" data-link class="${k === tab ? 'on' : ''}">${esc(n)}</a>`).join('') + `<a href="/loja/${S.slug}" target="_blank" rel="noopener">Ver loja ↗</a>` + (ME.isAdmin ? '<a href="/plataforma" data-link>Plataforma</a>' : ''));
-  await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, clientes: pCustomers, relatorios: pReports, config: pConfig })[tab](S, owner);
+  await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, caixa: pCash, novo: pNewOrder, clientes: pCustomers, relatorios: pReports, config: pConfig })[tab](S, owner);
 }
 
 function billingBanner(t, owner) {
@@ -608,14 +630,14 @@ async function pOrders(S) {
   const draw = () => {
     const cols = [['novo', 'Novos', 'Aceitar', 'preparo'], ['preparo', 'Em preparo', 'Marcar pronto', 'pronto'], ['pronto', 'Prontos', '', '']];
     app.innerHTML = `<div class="row between"><div><h2>${esc(S.seg?.prep || 'Preparo')}</h2><p class="lead">Pedidos chegam aqui na hora, com aviso sonoro. Tickets com mais de 25 min ficam em alerta.</p></div>
-      <label class="chk"><input type="checkbox" id="autoPrint" ${local.get('autoPrint', false) ? 'checked' : ''}> Imprimir comanda ao aceitar</label></div>
+      <span class="row"><label class="chk"><input type="checkbox" id="autoPrint" ${local.get('autoPrint', false) ? 'checked' : ''}> Imprimir comanda ao aceitar</label><a class="btn pri" href="/painel/novo" data-link>+ Novo pedido</a></span></div>
     <div class="board">${cols.map(([k, t, a, next]) => { const os = orders.filter(o => o.status === k);
       return `<div class="col"><h3>${t}<span class="badge">${os.length}</span></h3>${os.map(o => `<div class="tk ${mins(o.created_at) > 25 ? 'late' : ''}">
         <div class="top"><span>#${o.number}</span><span class="price">${mins(o.created_at)} min</span></div>
-        <span class="mut">${esc(o.customer_name)} · ${o.fulfillment === 'pickup' ? 'Retirada' : 'Entrega · ' + esc(o.zone_name)} · ${esc(o.payment)}${o.change_for ? ` (troco p/ ${brl(o.change_for)})` : ''}</span>
+        <span class="mut">${o.fulfillment === 'table' ? `<span class="badge b-a">MESA ${esc(o.table_label)}</span> ` : ''}${o.channel && o.channel !== 'online' && o.channel !== 'mesa' ? `<span class="badge">${CHANNEL[o.channel]}</span> ` : ''}${esc(o.customer_name)} · ${esc(where(o))} · ${esc(o.payment)}${o.change_for ? ` (troco p/ ${brl(o.change_for)})` : ''}</span>
         ${o.payment_status === 'paid' ? '<span><span class="badge b-g">PAGO ONLINE</span></span>' : ''}
         ${itemsList(o)}<b class="price">${brl(o.total)}</b>
-        <div class="row">${a ? `<button class="ok sm" data-st="${next}" data-id="${o.id}">${a}</button>` : `<span class="badge b-g">Aguardando ${o.fulfillment === 'pickup' ? 'cliente' : 'entregador'}</span>`}
+        <div class="row">${a ? `<button class="ok sm" data-st="${next}" data-id="${o.id}">${a}</button>` : o.fulfillment === 'delivery' ? '<span class="badge b-g">Aguardando entregador</span>' : `<button class="ok sm" data-st="entregue" data-id="${o.id}">${o.fulfillment === 'table' ? 'Servido' : 'Cliente retirou'}</button>`}
         ${k !== 'pronto' ? `<button class="ghost sm" data-st="cancelado" data-id="${o.id}">${k === 'novo' ? 'Recusar' : 'Cancelar'}</button>` : ''}
         <button class="ghost sm" data-print="${o.id}">Imprimir</button>${waBtn(waLink(o.customer_phone, customerMsg(o, S.name)))}</div></div>`).join('') || '<p class="empty">Nada aqui</p>'}</div>`; }).join('')}</div>`;
   };
@@ -648,8 +670,8 @@ async function pDelivery(S) {
     app.innerHTML = `<h2>Entregas</h2><p class="lead">Despache os pedidos prontos e confirme quando forem entregues.</p>
     <div class="two"><div class="panel"><h3>Prontos (${ready.length})</h3>
       ${ready.map(o => `<div class="tk"><div class="top"><span>#${o.number} · ${esc(o.customer_name)}</span><span class="price">${brl(o.total)}</span></div>
-        <span class="mut">${o.fulfillment === 'pickup' ? 'Retirada na loja' : `${esc(o.address)} — ${esc(o.zone_name)}`} · ${esc(o.payment)}${o.change_for ? ` (troco p/ ${brl(o.change_for)})` : ''} · ${esc(o.customer_phone)}</span>
-        ${o.fulfillment === 'pickup' ? `<button class="ok sm" data-st="entregue" data-id="${o.id}">Cliente retirou</button>` : free.length ? `<span class="row" style="flex-wrap:nowrap"><select id="c${o.id}" aria-label="Entregador">${free.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><button class="pri sm" data-st="rota" data-id="${o.id}">Despachar</button></span>` : '<span class="badge b-a">Cadastre ou ative um entregador</span>'}
+        <span class="mut">${o.fulfillment === 'pickup' ? 'Retirada na loja' : o.fulfillment === 'table' ? `Mesa ${esc(o.table_label)}` : `${esc(o.address)} — ${esc(o.zone_name)}`} · ${esc(o.payment)}${o.change_for ? ` (troco p/ ${brl(o.change_for)})` : ''} · ${esc(o.customer_phone)}</span>
+        ${o.fulfillment !== 'delivery' ? `<button class="ok sm" data-st="entregue" data-id="${o.id}">${o.fulfillment === 'table' ? 'Servido na mesa' : 'Cliente retirou'}</button>` : free.length ? `<span class="row" style="flex-wrap:nowrap"><select id="c${o.id}" aria-label="Entregador">${free.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><button class="pri sm" data-st="rota" data-id="${o.id}">Despachar</button></span>` : '<span class="badge b-a">Cadastre ou ative um entregador</span>'}
         <span class="row">${waBtn(waLink(o.customer_phone, customerMsg(o, S.name)), 'Avisar cliente')}${o.fulfillment === 'delivery' ? `<a class="btn ghost sm" href="${esc(mapsUrl(o))}" target="_blank" rel="noopener">Mapa</a>` : ''}</span></div>`).join('') || '<p class="empty">Nenhum pedido pronto</p>'}
     </div><div class="panel"><h3>Em rota (${route.length})</h3>
       ${route.map(o => `<div class="tk go"><div class="top"><span>#${o.number} · ${esc(o.courier?.name || '—')}</span><span class="price">${mins(o.updated_at)} min</span></div><span class="mut">${esc(o.address)} — ${esc(o.zone_name)} · ${esc(o.payment)}</span>
@@ -749,6 +771,120 @@ async function pMenu(S, owner) {
   await load();
 }
 
+/* ---------- lançar pedido (balcão, telefone, mesa) ---------- */
+async function pNewOrder(S) {
+  const [rawP, zones] = await Promise.all([
+    q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id).eq('available', true)),
+    q(sb.from('zones').select('id, name, fee').eq('tenant_id', S.id).order('name'))]);
+  const products = sortMenu(rawP), DIST = S.delivery_mode === 'distance';
+  let cart = [], st = { channel: 'balcao', ful: 'pickup', table: '1', name: '', phone: '', zone: zones[0]?.id || null, cep: '', rua: '', num: '', comp: '', pay: 'Pagar no caixa', change: '', term: '' }, geo = null, cepInfo = null;
+  const sub = () => cart.reduce((t, c) => t + c.qty * c.unit, 0);
+  const fee = () => st.ful !== 'delivery' ? 0 : DIST ? (geo?.quote?.fee || 0) : (zones.find(z => z.id === +st.zone)?.fee || 0);
+  const read = () => { for (const k of ['name', 'phone', 'table', 'zone', 'cep', 'rua', 'num', 'comp', 'pay', 'change', 'term']) { const el = $('#n_' + k); if (el) st[k] = el.value; } };
+  const draw = () => {
+    const list = products.filter(p => !st.term || (p.name + ' ' + p.category).toLowerCase().includes(st.term.toLowerCase()));
+    const cats = [...new Set(list.map(p => p.category))];
+    app.innerHTML = `<div class="row between"><div><h2>Novo pedido</h2><p class="lead">Lance pedidos do balcão, do telefone ou da mesa. Eles entram direto em preparo.</p></div><a class="btn ghost" href="/painel" data-link>Voltar</a></div>
+    <div class="shop"><section class="panel">
+      <input id="n_term" type="search" placeholder="Buscar produto" value="${esc(st.term)}">
+      ${cats.map(c => `<h3>${esc(c)}</h3><div class="plist">${list.filter(p => p.category === c).map(p => `<button class="pbtn" data-p="${p.id}"><span>${esc(p.name)}</span><span class="price">${brl(p.price)}${p.groups.length ? ' +' : ''}</span></button>`).join('')}</div>`).join('') || '<p class="empty">Nenhum produto.</p>'}
+    </section>
+    <aside class="cart"><h3>Pedido</h3>
+      <div class="segs" style="grid-template-columns:repeat(3,minmax(0,1fr))">${['balcao', 'telefone', ...(S.allow_tables ? ['mesa'] : [])].map(c => `<button type="button" data-ch="${c}" class="${st.channel === c ? 'on' : ''}" style="min-height:44px">${CHANNEL[c]}</button>`).join('')}</div>
+      ${st.channel === 'mesa' ? `<label>Mesa<select id="n_table">${Array.from({ length: S.tables_count || 10 }, (_, i) => `<option ${String(i + 1) === st.table ? 'selected' : ''}>${i + 1}</option>`).join('')}</select></label>` : ''}
+      ${st.channel === 'telefone' ? `<label>Como receber<select id="n_ful"><option value="delivery" ${st.ful === 'delivery' ? 'selected' : ''}>Entrega</option><option value="pickup" ${st.ful === 'pickup' ? 'selected' : ''}>Retirada</option></select></label>` : ''}
+      <label>Nome do cliente${st.channel === 'balcao' ? ' (opcional)' : ''}<input id="n_name" value="${esc(st.name)}"></label>
+      <label>Telefone${st.channel === 'telefone' ? '' : ' (opcional)'}<input id="n_phone" inputmode="tel" value="${esc(st.phone)}"></label>
+      ${st.ful === 'delivery' ? (DIST ? `<div class="two" style="gap:8px"><label>CEP<input id="n_cep" inputmode="numeric" maxlength="9" value="${esc(st.cep)}"></label><label>Número<input id="n_num" value="${esc(st.num)}"></label></div>
+          <label>Rua<input id="n_rua" value="${esc(st.rua)}"></label><label>Complemento<input id="n_comp" value="${esc(st.comp)}"></label>
+          <p class="mut" style="margin:0" id="n_q">${geo?.quote ? (geo.quote.inArea ? `${kmTxt(geo.quote.km)} · taxa ${brl(geo.quote.fee)}` : `<span class="badge b-r">Fora da área (${kmTxt(geo.quote.km)})</span>`) : 'Preencha CEP e número para calcular a taxa.'}</p>`
+        : `<label>Bairro<select id="n_zone">${zones.map(z => `<option value="${z.id}" ${+st.zone === z.id ? 'selected' : ''}>${esc(z.name)} · ${brl(z.fee)}</option>`).join('')}</select></label>
+          <label>Endereço<input id="n_rua" value="${esc(st.rua)}" placeholder="Rua, número, complemento"></label>`) : ''}
+      ${cart.map((x, i) => `<div class="ci"><div><b>${x.qty}× ${esc(x.name)}</b>${x.optText ? `<br><span class="mut">${esc(x.optText)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}<br><button class="ghost sm" data-dec="${i}">−</button> <button class="ghost sm" data-inc="${i}">+</button></div><span class="price">${brl(x.qty * x.unit)}</span></div>`).join('') || '<p class="empty">Toque nos produtos para adicionar.</p>'}
+      <label>Pagamento<select id="n_pay">${['Pagar no caixa', 'Dinheiro', 'Cartão na entrega', 'Pix'].map(v => `<option value="${v}" ${st.pay === v ? 'selected' : ''}>${v === 'Cartão na entrega' ? 'Cartão' : v}</option>`).join('')}</select></label>
+      ${st.pay === 'Dinheiro' ? `<label>Troco para (R$)<input id="n_change" inputmode="decimal" value="${esc(st.change)}"></label>` : ''}
+      <div class="ci"><span>Subtotal</span><span class="price">${brl(sub())}</span></div>${fee() ? `<div class="ci"><span>Entrega</span><span class="price">${brl(fee())}</span></div>` : ''}
+      <div class="tot"><span>Total</span><span class="price">${brl(sub() + fee())}</span></div>
+      <p class="mut" style="margin:0;font-size:13px">Cupons e fidelidade são aplicados pelo sistema ao lançar.</p>
+      <button class="pri" id="n_go" ${cart.length ? '' : 'disabled'}>Lançar pedido</button></aside></div>`;
+  };
+  const locate = async () => {
+    read(); if (!DIST || st.ful !== 'delivery') return;
+    if (String(st.cep).replace(/\D/g, '').length === 8 && (!cepInfo || cepInfo._cep !== st.cep)) { cepInfo = await lookupCep(st.cep); if (cepInfo) { cepInfo._cep = st.cep; if (!st.rua) st.rua = cepInfo.street; } }
+    const pos = await locateAddress({ street: st.rua || cepInfo?.street, number: st.num, city: cepInfo?.city, state: cepInfo?.state, cep: st.cep }, cepInfo);
+    geo = pos ? { ...pos, quote: await rpc('delivery_quote', { p_slug: S.slug, p_lat: pos.lat, p_lng: pos.lng }) } : null;
+    draw();
+  };
+  app.onclick = attempt(async e => {
+    const b = e.target.closest('button'); if (!b) return; read();
+    if (b.dataset.p) { openBuilder(products.find(p => p.id === +b.dataset.p), it => { const ex = cart.find(c => c.productId === it.productId && c.optionIds.join() === it.optionIds.join() && c.notes === it.notes); ex ? ex.qty += it.qty : cart.push(it); draw(); }); }
+    else if (b.dataset.ch) { st.channel = b.dataset.ch; st.ful = st.channel === 'telefone' ? 'delivery' : st.channel === 'mesa' ? 'table' : 'pickup'; draw(); }
+    else if (b.dataset.inc) { cart[b.dataset.inc].qty++; draw(); }
+    else if (b.dataset.dec) { if (!--cart[b.dataset.dec].qty) cart.splice(b.dataset.dec, 1); draw(); }
+    else if (b.id === 'n_go') {
+      if (st.ful === 'delivery' && DIST) { if (!geo) await locate(); if (!geo?.quote?.inArea) throw new Error('Endereço não localizado ou fora da área de entrega'); }
+      const addr = st.ful !== 'delivery' ? '' : DIST ? `${st.rua}, ${st.num}${st.comp ? ' - ' + st.comp : ''}${st.cep ? ' - CEP ' + st.cep : ''}` : st.rua;
+      b.disabled = true;
+      try {
+        const r = await rpc('staff_place_order', { p_tenant: S.id, p: {
+          channel: st.channel, fulfillment: st.ful, table: st.channel === 'mesa' ? st.table : undefined,
+          customer: { name: st.name.trim(), phone: st.phone.trim() }, zoneId: st.ful === 'delivery' && !DIST ? +st.zone : undefined, address: addr,
+          ...(st.ful === 'delivery' && DIST ? { lat: geo.lat, lng: geo.lng } : {}),
+          payment: st.pay, changeFor: st.pay === 'Dinheiro' && st.change ? toCents(st.change) : undefined,
+          items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: c.notes })) } });
+        toast(`Pedido #${r.number} lançado · ${brl(r.total)}`);
+        if (local.get('autoPrint', false)) { const o = (await q(sb.from('orders').select(ORDER_COLS).eq('id', r.id)))[0]; if (o) printTicket(o, S.name); }
+        cart = []; st = { ...st, name: '', phone: '', rua: '', num: '', comp: '', cep: '', change: '' }; geo = null; draw();
+      } finally { const x = $('#n_go'); if (x) x.disabled = !cart.length; }
+    }
+  });
+  app.onchange = e => {
+    read();
+    if (e.target.id === 'n_ful') { st.ful = e.target.value; draw(); }
+    if (['n_pay', 'n_zone'].includes(e.target.id)) draw();
+    if (['n_cep', 'n_num', 'n_rua'].includes(e.target.id) && DIST) locate().catch(err => toast(err.message));
+  };
+  let tmr; app.oninput = e => { if (e.target.id !== 'n_term') return; clearTimeout(tmr); tmr = setTimeout(() => { read(); draw(); const el = $('#n_term'); el.focus(); el.setSelectionRange(el.value.length, el.value.length); }, 250); };
+  cleanup = () => { app.onclick = app.onchange = app.oninput = null; clearTimeout(tmr); };
+  draw();
+}
+
+/* ---------- fechamento de caixa ---------- */
+async function pCash(S) {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: S.timezone || 'America/Sao_Paulo' });
+  let day = today, r = null;
+  const rows = (arr, label) => arr.map(x => `<tr><td>${esc(label(x))}</td><td class="n">${x.count}</td><td class="n price">${brl(x.total)}</td></tr>`).join('') || '<tr><td class="mut" colspan="3">Sem vendas</td></tr>';
+  const draw = async () => {
+    r = await rpc('cash_report', { p_tenant: S.id, p_day: day });
+    app.innerHTML = `<div class="row between"><div><h2>Caixa</h2><p class="lead">Fechamento do dia: confira os valores por forma de pagamento com a maquininha e a gaveta.</p></div>
+      <span class="row"><input type="date" id="cDay" value="${day}" max="${today}" style="width:auto"><button class="pri" id="cPrint">Imprimir fechamento</button></span></div>
+    <div class="kpis"><div class="kpi"><span class="mut">Total do dia</span><b class="price">${brl(r.total)}</b><span class="mut">${r.orders} pedido(s)</span></div>
+      <div class="kpi"><span class="mut">Taxas de entrega</span><b class="price">${brl(r.fees)}</b></div>
+      <div class="kpi"><span class="mut">Descontos</span><b class="price">${brl(r.discounts)}</b></div>
+      <div class="kpi"><span class="mut">Cancelados</span><b>${r.cancelled.count}</b><span class="mut">${brl(r.cancelled.total)}</span></div></div>
+    ${r.open ? `<p class="banner warn" style="margin:0 0 16px">${r.open} pedido(s) do dia ainda não foram finalizados (entregues, retirados ou servidos).</p>` : ''}
+    <div class="two"><div class="panel"><h3>Por forma de pagamento</h3><table><thead><tr><th>Forma</th><th class="n">Pedidos</th><th class="n">Valor</th></tr></thead><tbody>${rows(r.byPayment, x => x.payment)}</tbody></table>
+      ${r.paidOnline ? `<p class="mut" style="margin:0">Já recebido online (Pix): <b>${brl(r.paidOnline)}</b>, cai direto na conta do Mercado Pago.</p>` : ''}
+      ${r.cashChange ? `<p class="mut" style="margin:0">Troco devolvido em dinheiro: <b>${brl(r.cashChange)}</b>.</p>` : ''}</div>
+    <div class="panel"><h3>Por canal</h3><table><thead><tr><th>Canal</th><th class="n">Pedidos</th><th class="n">Valor</th></tr></thead><tbody>${rows(r.byChannel, x => CHANNEL[x.channel] || x.channel)}</tbody></table>
+      <h3>Por tipo</h3><table><tbody>${rows(r.byFulfillment, x => FUL[x.fulfillment] || x.fulfillment)}</tbody></table></div></div>`;
+  };
+  const printCash = () => {
+    $('#print').innerHTML = `<div class="tkt"><b class="big">${esc(S.name)}</b><div>FECHAMENTO DE CAIXA</div><div>${day.split('-').reverse().join('/')} · impresso ${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</div><hr>
+      ${r.byPayment.map(x => `<div class="li"><span>${esc(x.payment)} (${x.count})</span><span>${brl(x.total)}</span></div>`).join('')}<hr>
+      <div class="li"><span>Subtotal</span><span>${brl(r.subtotal)}</span></div><div class="li"><span>Taxas de entrega</span><span>${brl(r.fees)}</span></div>
+      <div class="li"><span>Descontos</span><span>-${brl(r.discounts)}</span></div><div class="li big"><b>TOTAL (${r.orders})</b><b>${brl(r.total)}</b></div><hr>
+      ${r.byChannel.map(x => `<div class="li"><span>${CHANNEL[x.channel] || x.channel} (${x.count})</span><span>${brl(x.total)}</span></div>`).join('')}
+      <div class="li"><span>Cancelados (${r.cancelled.count})</span><span>${brl(r.cancelled.total)}</span></div>
+      ${r.paidOnline ? `<div class="li"><span>Recebido online</span><span>${brl(r.paidOnline)}</span></div>` : ''}<hr><div>Conferido por: ____________________</div></div>`;
+    window.print();
+  };
+  app.onclick = attempt(async e => { if (e.target.closest('#cPrint')) printCash(); });
+  app.onchange = attempt(async e => { if (e.target.id === 'cDay' && e.target.value) { day = e.target.value; await draw(); } });
+  cleanup = () => { app.onclick = app.onchange = null; };
+  await draw();
+}
+
 /* ---------- clientes ---------- */
 async function pCustomers(S) {
   let list = [], term = '';
@@ -843,6 +979,10 @@ async function pConfig(S) {
         <table class="tiers"><thead><tr><th>Até (km)</th><th>Taxa (R$)</th></tr></thead><tbody>
           ${[...(st.distance_tiers || []), ...Array(Math.max(0, 6 - (st.distance_tiers || []).length)).fill(['', null])].slice(0, 6).map(([km, fee], i) => `<tr><td><input id="tk${i}" inputmode="decimal" value="${km === '' ? '' : String(km).replace('.', ',')}" aria-label="Até km"></td><td><input id="tf${i}" inputmode="decimal" value="${fee == null ? '' : fromCents(fee)}" aria-label="Taxa"></td></tr>`).join('')}</tbody></table>
         <p class="mut" style="margin:0">Acima da maior distância, a loja não entrega. Deixe linhas em branco se não precisar.</p></div>
+      <h3>Pedidos na mesa (QR Code)</h3>
+      <label class="chk"><input type="checkbox" id="mOn" ${st.allow_tables ? 'checked' : ''}> Aceitar pedidos na mesa pelo QR Code</label>
+      <span class="row"><label>Quantidade de mesas<input id="mCount" type="number" min="1" max="200" value="${st.tables_count ?? 10}" style="width:120px"></label><button type="button" class="ghost" id="mPrint" ${st.allow_tables ? '' : 'disabled'}>Imprimir QR Codes das mesas</button></span>
+      <p class="mut" style="margin:0">Cada mesa recebe um QR Code. O cliente escaneia, faz o pedido pelo celular e paga no caixa (ou por Pix, se ativo). O pedido chega na cozinha marcado com o número da mesa.</p>
       <h3>Programa de fidelidade</h3>
       <label class="chk"><input type="checkbox" id="lOn" ${st.loyalty_enabled ? 'checked' : ''}> Dar desconto para clientes fiéis</label>
       <div class="two" style="gap:10px"><label>A cada (pedidos entregues)<input id="lEvery" type="number" min="2" max="50" value="${st.loyalty_every ?? 10}"></label><label>Desconto no pedido seguinte (%)<input id="lPct" type="number" min="1" max="50" value="${st.loyalty_percent ?? 10}"></label></div>
@@ -891,6 +1031,7 @@ async function pConfig(S) {
   app.onclick = attempt(async e => {
     // botões de envio de formulário são tratados no onsubmit; os demais (fora de formulários) aqui
     const b = e.target.closest('button'); if (!b || (b.type === 'submit' && b.closest('form'))) return;
+    if (b.id === 'mPrint') { await printTableQrs(S.slug, Math.max(1, Math.min(200, +$('#mCount').value || 10)), S.name); return; }
     if (b.id === 'dLoc') {
       const info = await lookupCep($('#dCep').value);
       if (!info) throw new Error('CEP não encontrado');
@@ -964,7 +1105,8 @@ async function pConfig(S) {
       const every = +$('#lEvery').value, pct = +$('#lPct').value;
       if (!(every >= 2 && every <= 50) || !(pct >= 1 && pct <= 50)) throw new Error('Fidelidade: a cada 2 a 50 pedidos, desconto de 1% a 50%');
       await q(sb.from('tenants').update({ delivery_mode: mode, lat: m ? +m[1] : null, lng: m ? +m[2] : null, distance_tiers: tiers,
-        loyalty_enabled: $('#lOn').checked, loyalty_every: every, loyalty_percent: pct }).eq('id', S.id));
+        loyalty_enabled: $('#lOn').checked, loyalty_every: every, loyalty_percent: pct,
+        allow_tables: $('#mOn').checked, tables_count: Math.max(1, Math.min(200, +$('#mCount').value || 10)) }).eq('id', S.id));
       await refreshBrand();
     }
     if (id === 'fPix') { await rpc('set_pix_settings', { p_tenant: S.id, p_token: $('#pxTok').value.trim() || null, p_enabled: $('#pxOn').checked }); }

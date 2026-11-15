@@ -144,3 +144,12 @@ details summary{cursor:pointer}details ol{margin:8px 0 0;padding-left:20px}
 .loyal{display:grid;gap:8px;padding:12px;border-radius:12px;background:var(--soft)}
 .stamps{display:flex;flex-wrap:wrap;gap:6px}.stamps i{width:22px;height:22px;border-radius:50%;border:2px solid var(--red)}.stamps i.on{background:var(--red)}
 input[type=radio]{width:20px;min-height:20px;accent-color:var(--red);flex:none}
+.plist{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
+.pbtn{display:flex;justify-content:space-between;gap:8px;text-align:left;background:var(--card);border:1px solid var(--line);min-height:52px;font-weight:600}
+.pbtn:hover{border-color:var(--red)}
+@media print{
+  @page qr{size:A4;margin:10mm}
+  .qrsheet{page:qr;display:grid;grid-template-columns:repeat(2,1fr);gap:8mm}
+  .qrcard{break-inside:avoid;border:1px dashed #999;border-radius:4mm;padding:6mm;display:grid;justify-items:center;gap:2mm;font:14px Inter,sans-serif;color:#000}
+  .qrcard img{width:60mm;height:60mm}.qrcard .big{font-size:26px;font-weight:800}
+}

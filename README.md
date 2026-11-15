@@ -17,6 +17,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    4. `20261116000000_assinaturas.sql` (assinatura mensal das lojas)
    5. `20261117000000_entregador_clientes_lgpd.sql` (página do entregador, clientes e LGPD)
    6. `20261118000000_distancia_fidelidade.sql` (taxa por distância e programa de fidelidade)
+   7. `20261119000000_balcao_mesa_caixa.sql` (pedido no balcão/telefone, mesa por QR Code e fechamento de caixa)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -147,12 +148,24 @@ O que já está pronto:
   - O cliente é reconhecido pelo telefone e o desconto entra sozinho no pedido seguinte. Não soma com cupom: vale o maior.
   - Se o pedido premiado for cancelado, o prêmio volta.
   - O cliente vê o cartão de selos na página do pedido, e a loja vê os selos de cada cliente na aba **Clientes**.
+- **Pedido no balcão ou por telefone:** na tela de preparo, use **+ Novo pedido**. Escolha Balcão, Telefone ou Mesa, toque nos produtos (as opções abrem como na loja), informe o pagamento e lance.
+  - O pedido entra direto em **preparo**, sem depender do horário do site, e imprime a comanda se a impressão automática estiver ligada.
+  - No balcão, nome e telefone são opcionais.
+  - Cupom e fidelidade são aplicados sozinhos quando há telefone.
+- **Mesa por QR Code:** em **Configurações → Pedidos na mesa**, ligue a opção, informe a quantidade de mesas e clique em **Imprimir QR Codes das mesas**. Sai uma folha A4 com um cartão por mesa.
+  - O cliente escaneia, pede pelo celular e paga no caixa (ou por Pix online, se ativo).
+  - O pedido chega na cozinha com **MESA 7** em destaque.
+  - Quando ficar pronto, o botão **Servido** finaliza o pedido.
+  - O pedido mínimo e a taxa de entrega não valem para a mesa.
+  - Os QR Codes são gerados pelo serviço público api.qrserver.com, que só recebe o link da mesa.
+- **Fechamento de caixa:** a aba **Caixa** (dono e atendentes) mostra o total do dia, os valores por forma de pagamento (para conferir com a maquininha e a gaveta), por canal e por tipo, além de cancelados, valor recebido online e troco devolvido.
+  - **Imprimir fechamento** sai na impressora de 80 mm, com linha de "Conferido por".
 - **WhatsApp:** os botões abrem o WhatsApp Web ou o app com a mensagem pronta (aceito, pronto, saiu para entrega...) e o link de acompanhamento. Basta tocar em enviar.
 - **Horário:** com "Abrir e fechar sozinha" ligado, a loja só aceita pedidos dentro dos horários. O banco confere isso, não só a tela. O checkbox "Receber pedidos" pausa a loja na hora, mesmo dentro do horário.
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 41 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 44 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;
@@ -161,7 +174,8 @@ O que já está pronto:
 - Pix online: token protegido, valor conferido, webhook reconferido na API, expiração e pagamento atrasado;
 - assinatura: teste grátis, carência, bloqueio de pedidos, só o dono assina, avisos reconferidos na API;
 - link do entregador, lista de clientes, exclusão de dados (LGPD), retenção e exclusão da loja;
-- taxa por distância (faixas, fora da área, coordenadas inválidas) e fidelidade (selos, resgate, cancelamento, cupom maior).
+- taxa por distância (faixas, fora da área, coordenadas inválidas) e fidelidade (selos, resgate, cancelamento, cupom maior);
+- pedido na mesa, pedido lançado pela equipe (permissões, canal, telefone opcional) e fechamento de caixa.
 
 ```bash
 PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test
