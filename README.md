@@ -18,6 +18,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    5. `20261117000000_entregador_clientes_lgpd.sql` (página do entregador, clientes e LGPD)
    6. `20261118000000_distancia_fidelidade.sql` (taxa por distância e programa de fidelidade)
    7. `20261119000000_balcao_mesa_caixa.sql` (pedido no balcão/telefone, mesa por QR Code e fechamento de caixa)
+   8. `20261120000000_cupons_avaliacoes_estoque.sql` (cupons com regras, avaliações e estoque)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -160,12 +161,26 @@ O que já está pronto:
   - Os QR Codes são gerados pelo serviço público api.qrserver.com, que só recebe o link da mesa.
 - **Fechamento de caixa:** a aba **Caixa** (dono e atendentes) mostra o total do dia, os valores por forma de pagamento (para conferir com a maquininha e a gaveta), por canal e por tipo, além de cancelados, valor recebido online e troco devolvido.
   - **Imprimir fechamento** sai na impressora de 80 mm, com linha de "Conferido por".
+- **Cupons com regras:** ao criar um cupom em **Configurações → Cupons**, abra "Regras opcionais" para definir:
+  - pedido mínimo e data de validade;
+  - limite total de usos e de usos por cliente (pelo telefone);
+  - uso só na primeira compra.
+
+  A lista mostra quantas vezes cada cupom já foi usado. Todas as regras são conferidas pelo banco no momento do pedido.
+- **Avaliações:** depois que o pedido é entregue, a página de acompanhamento pede uma nota de 1 a 5 estrelas e um comentário, por até 7 dias.
+  - A nota média aparece no topo da loja ("★ 4,7 (23 avaliações)") e abre os comentários.
+  - Em **Relatórios → Avaliações dos clientes**, o dono lê e responde. A resposta aparece para todos na loja.
+  - Na loja só aparece o primeiro nome do cliente.
+- **Estoque:** na aba **Cardápio**, a coluna Estoque aceita um número. Em branco, o produto não tem controle de estoque.
+  - Com número, cada pedido dá baixa e o cancelamento devolve, inclusive o Pix não pago.
+  - Com 5 ou menos unidades, a loja mostra "Últimas N unidades".
+  - Ao chegar a zero, o produto aparece como **Esgotado** e o banco recusa pedidos acima do saldo.
 - **WhatsApp:** os botões abrem o WhatsApp Web ou o app com a mensagem pronta (aceito, pronto, saiu para entrega...) e o link de acompanhamento. Basta tocar em enviar.
 - **Horário:** com "Abrir e fechar sozinha" ligado, a loja só aceita pedidos dentro dos horários. O banco confere isso, não só a tela. O checkbox "Receber pedidos" pausa a loja na hora, mesmo dentro do horário.
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 44 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 47 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;
@@ -175,7 +190,8 @@ O que já está pronto:
 - assinatura: teste grátis, carência, bloqueio de pedidos, só o dono assina, avisos reconferidos na API;
 - link do entregador, lista de clientes, exclusão de dados (LGPD), retenção e exclusão da loja;
 - taxa por distância (faixas, fora da área, coordenadas inválidas) e fidelidade (selos, resgate, cancelamento, cupom maior);
-- pedido na mesa, pedido lançado pela equipe (permissões, canal, telefone opcional) e fechamento de caixa.
+- pedido na mesa, pedido lançado pela equipe (permissões, canal, telefone opcional) e fechamento de caixa;
+- regras de cupom, estoque (baixa, saldo insuficiente, devolução) e avaliações (prazo, uma por pedido, resposta).
 
 ```bash
 PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test

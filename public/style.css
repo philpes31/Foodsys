@@ -153,3 +153,9 @@ input[type=radio]{width:20px;min-height:20px;accent-color:var(--red);flex:none}
   .qrcard{break-inside:avoid;border:1px dashed #999;border-radius:4mm;padding:6mm;display:grid;justify-items:center;gap:2mm;font:14px Inter,sans-serif;color:#000}
   .qrcard img{width:60mm;height:60mm}.qrcard .big{font-size:26px;font-weight:800}
 }
+.rating{white-space:nowrap;display:inline-flex;min-height:auto;padding:2px 8px;background:transparent;border:1px solid var(--line);font-weight:700;color:#b7791f}
+.rv{display:grid;gap:4px;padding:10px 0;border-bottom:1px solid var(--line)}
+.stars{color:#e9a23b;letter-spacing:2px;white-space:nowrap}
+.starpick{display:flex;gap:4px}.starpick button{font-size:30px;min-height:48px;width:48px;padding:0;background:transparent;color:#e9a23b}
+.loyal textarea{width:100%;font:inherit;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+.stockin{width:110px;min-height:36px}

@@ -29,7 +29,7 @@ before(() => {
   psql(['-d', 'postgres', '-c', `drop database if exists ${DB}`]);
   psql(['-d', 'postgres', '-c', `create database ${DB}`]);
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -472,4 +472,70 @@ test('fechamento de caixa do dia', () => {
   assert.ok(r.cashChange >= 5000 - 500 - 1);
   assert.equal(json(`cash_report('${pizzaId}', '2020-01-01')`, U.pizza).orders, 0);
   fails(`select cash_report('${pizzaId}')`, U.burger, /Sem permissão/);
+});
+
+test('cupons: mínimo, validade, limite total, por cliente e 1ª compra', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const mk = (code, phone = '31988887777', qty = 2) => order('forno-da-vila', { customer: { name: 'Cupom', phone }, fulfillment: 'pickup', payment: 'Pix', coupon: code, items: [{ productId: p.id, qty }] });
+  sql(`insert into coupons (tenant_id, code, percent, min_subtotal) values ('${pizzaId}', 'MIN50', 10, 5000)`, U.pizza);
+  assert.throws(() => mk('MIN50'), /a partir de R\$ 50,00/);
+  sql(`insert into coupons (tenant_id, code, percent, valid_until) values ('${pizzaId}', 'VELHO', 10, now() - interval '1 day')`, U.pizza);
+  assert.throws(() => mk('VELHO'), /expirou/);
+  assert.equal(sql(`select check_coupon('forno-da-vila', 'velho')`, null), '');
+  sql(`insert into coupons (tenant_id, code, percent, max_uses) values ('${pizzaId}', 'DOIS', 10, 2)`, U.pizza);
+  mk('DOIS', '31911110001'); mk('DOIS', '31911110002');
+  assert.throws(() => mk('DOIS', '31911110003'), /limite de usos/);
+  assert.equal(json(`check_coupon('forno-da-vila', 'dois')`, null).soldOut, true);
+  sql(`insert into coupons (tenant_id, code, percent, max_per_customer) values ('${pizzaId}', 'UMPOR', 10, 1)`, U.pizza);
+  mk('UMPOR', '31922220001');
+  assert.throws(() => mk('UMPOR', '(31) 92222-0001'), /máximo de vezes/);
+  assert.ok(mk('UMPOR', '31922220002').code);
+  sql(`insert into coupons (tenant_id, code, percent, first_order_only) values ('${pizzaId}', 'BEMVINDO', 15, true)`, U.pizza);
+  assert.ok(mk('BEMVINDO', '31933330001').code);
+  assert.throws(() => mk('BEMVINDO', '31933330001'), /primeira compra/);
+  assert.equal(json(`coupon_usage('${pizzaId}')`, U.pizza).DOIS, 2);
+  fails(`select coupon_usage('${pizzaId}')`, U.staff, /Sem permissão/);
+});
+
+test('estoque: baixa no pedido, bloqueia sem saldo e devolve no cancelamento', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  fails(`select set_stock(${p.id}, 3)`, U.burger, /Sem permissão/);
+  sql(`select set_stock(${p.id}, 3)`, U.staff);
+  const mk = qty => order('forno-da-vila', { customer: { name: 'E', phone: '31944440000' }, fulfillment: 'pickup', payment: 'Pix', items: [{ productId: p.id, qty }] });
+  const r = mk(2);
+  assert.equal(sql(`select stock from products where id = ${p.id}`), '1');
+  assert.throws(() => mk(2), /Só restam 1 unidade\(s\) de Água sem gás/);
+  assert.equal(sql(`select stock from products where id = ${p.id}`), '1');   // pedido recusado não mexe no estoque
+  sql(`select change_order_status((select id from orders where public_code = '${r.code}'), 'cancelado')`, U.pizza);
+  assert.equal(sql(`select stock from products where id = ${p.id}`), '3');
+  assert.equal(json(`(select jsonb_agg(stock) from products where id = ${p.id})`, null)[0], 3);   // visível na loja
+  sql(`select set_stock(${p.id}, null)`, U.pizza);
+});
+
+test('avaliações: só após entregue, uma por pedido, nota pública e resposta da loja', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const r = order('forno-da-vila', { customer: { name: 'Carla Dias', phone: '31955550000' }, fulfillment: 'pickup', payment: 'Pix', items: [{ productId: p.id, qty: 1 }] });
+  fails(`select review_order('${r.code}', 5, 'Ótimo')`, null, /depois que o pedido for entregue/);
+  const id = sql(`select id from orders where public_code = '${r.code}'`);
+  sql(`select change_order_status(${id}, 'preparo'); select change_order_status(${id}, 'pronto'); select change_order_status(${id}, 'entregue')`, U.pizza);
+  assert.equal(json(`track_order('${r.code}')`, null).order.canReview, true);
+  fails(`select review_order('${r.code}', 9, '')`, null, /1 a 5/);
+  sql(`select review_order('${r.code}', 5, 'Chegou quentinha!')`, null);
+  fails(`select review_order('${r.code}', 4, '')`, null, /já foi avaliado/);
+  const t = json(`track_order('${r.code}')`, null).order;
+  assert.deepEqual([t.canReview, t.review.rating], [false, 5]);
+  fails(`select reply_review(${id}, 'Valeu!')`, U.staff, /Sem permissão/);
+  sql(`select reply_review(${id}, 'Obrigado, Carla!')`, U.pizza);
+  const pub = json(`store_reviews('forno-da-vila')`, null);
+  assert.equal(pub.count, 1); assert.equal(+pub.avg, 5);
+  assert.deepEqual([pub.recent[0].name, pub.recent[0].reply], ['Carla', 'Obrigado, Carla!']);
+  assert.equal(JSON.stringify(pub).includes('31955550000'), false);
+  fails(`select * from order_reviews`, null, /permission denied/);
+  assert.equal(sql(`select count(*) from order_reviews`, U.burger), '0');
+  // prazo de 7 dias
+  const r2 = order('forno-da-vila', { customer: { name: 'X', phone: '31955550001' }, fulfillment: 'pickup', payment: 'Pix', items: [{ productId: p.id, qty: 1 }] });
+  const id2 = sql(`select id from orders where public_code = '${r2.code}'`);
+  sql(`select change_order_status(${id2}, 'preparo'); select change_order_status(${id2}, 'pronto'); select change_order_status(${id2}, 'entregue')`, U.pizza);
+  sql(`update orders set updated_at = now() - interval '8 days' where id = ${id2}`);
+  fails(`select review_order('${r2.code}', 3, '')`, null, /prazo/);
 });

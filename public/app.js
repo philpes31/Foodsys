@@ -350,7 +350,7 @@ async function vStart() {
 const bySort = (a, b) => a.sort - b.sort || a.id - b.id;
 const sortMenu = prods => prods.sort(bySort).map(p => ({ ...p,
   groups: (p.option_groups || []).sort(bySort).map(g => ({ ...g, options: (g.options || []).sort(bySort) })) }));
-const MENU_COLS = 'id, category, name, description, price, icon, image_path, available, sort, option_groups(id, name, min_sel, max_sel, sort, options(id, name, price, sort))';
+const MENU_COLS = 'id, category, name, description, price, icon, image_path, available, stock, sort, option_groups(id, name, min_sel, max_sel, sort, options(id, name, price, sort))';
 
 // Montador de produto com grupos de opções (usado na loja e no lançamento de pedidos do painel)
 const unitOfP = (p, ids) => p.price + p.groups.flatMap(g => g.options).filter(o => ids.includes(o.id)).reduce((t, o) => t + o.price, 0);
@@ -394,6 +394,7 @@ async function vShop(slug) {
     q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id).eq('available', true)),
     q(sb.from('zones').select('id, name, fee').eq('tenant_id', S.id).order('name'))]);
   const products = sortMenu(rawP), OS = openState(S), DIST = S.delivery_mode === 'distance';
+  const RV = await rpc('store_reviews', { p_slug: slug, p_limit: 10 }).catch(() => null);
   // Pedido na mesa: o QR Code da mesa abre /loja/<loja>?mesa=7
   const mesaParam = (new URLSearchParams(location.search).get('mesa') || '').toUpperCase().trim();
   const TABLE = S.allow_tables && /^[A-Z0-9][A-Z0-9 -]{0,9}$/.test(mesaParam) ? mesaParam : null;
@@ -417,13 +418,13 @@ async function vShop(slug) {
   const paint = () => {
     cat = cats.includes(cat) ? cat : cats[0];
     const list = products.filter(p => p.category === cat), count = cart.reduce((t, c) => t + c.qty, 0);
-    app.innerHTML = `${TABLE ? `<div class="banner" style="margin:-24px calc(-1 * max(4vw,16px)) 16px">Você está pedindo para a <b>Mesa ${esc(TABLE)}</b>. O pedido vai direto para a cozinha.</div>` : ''}<h2>${esc(S.name)}</h2><p class="lead">${esc(S.seg?.name)} · ${OS.open ? `<span class="badge b-g">Aberto${OS.label ? ' ' + OS.label : ' agora'}</span>` : `<span class="badge b-r">${esc(OS.label || 'Fechado')}</span>`} · entrega em ${esc(S.eta_text)}${S.min_order ? ` · pedido mínimo ${brl(S.min_order)}` : ''}${S.phone ? ` · ${esc(S.phone)}` : ''}
+    app.innerHTML = `${TABLE ? `<div class="banner" style="margin:-24px calc(-1 * max(4vw,16px)) 16px">Você está pedindo para a <b>Mesa ${esc(TABLE)}</b>. O pedido vai direto para a cozinha.</div>` : ''}<h2>${esc(S.name)}</h2><p class="lead">${RV?.count ? `<button class="rating" id="seeReviews">★ ${String(RV.avg).replace('.', ',')} <span class="mut">(${RV.count} avaliaç${RV.count > 1 ? 'ões' : 'ão'})</span></button> · ` : ''}${esc(S.seg?.name)} · ${OS.open ? `<span class="badge b-g">Aberto${OS.label ? ' ' + OS.label : ' agora'}</span>` : `<span class="badge b-r">${esc(OS.label || 'Fechado')}</span>`} · entrega em ${esc(S.eta_text)}${S.min_order ? ` · pedido mínimo ${brl(S.min_order)}` : ''}${S.phone ? ` · ${esc(S.phone)}` : ''}
       ${waLink(S.phone, `Olá, ${S.name}!`) ? ` · <a href="${esc(waLink(S.phone, `Olá, ${S.name}!`))}" target="_blank" rel="noopener">Falar no WhatsApp</a>` : ''}</p>
     <div class="shop"><section>
       <div class="cats">${cats.map(c => `<button class="${c === cat ? 'on' : ''}" data-cat="${esc(c)}">${esc(c)}</button>`).join('')}</div>
       <div class="menu">${list.map(p => `<article class="item">${picture(p, S.color)}<div class="b"><h3>${esc(p.name)}</h3><span class="mut">${esc(p.description)}</span>
         <div class="foot"><span class="price">${p.groups.some(g => g.min_sel && g.options.some(o => o.price)) ? '<span class="mut">a partir de </span>' : ''}<b>${brl(p.price)}</b></span>
-        <button class="pri sm" data-add="${p.id}" ${OS.open ? '' : 'disabled'}>Adicionar</button></div></div></article>`).join('') || '<p class="empty">Cardápio vazio.</p>'}</div>
+        ${p.stock === 0 ? '<span class="badge b-r">Esgotado</span>' : `<button class="pri sm" data-add="${p.id}" ${OS.open ? '' : 'disabled'}>Adicionar</button>`}</div>${p.stock > 0 && p.stock <= 5 ? `<span class="badge b-a">Últimas ${p.stock} unidade${p.stock > 1 ? 's' : ''}</span>` : ''}</div></article>`).join('') || '<p class="empty">Cardápio vazio.</p>'}</div>
     </section>
     <aside class="cart" aria-label="Carrinho"><h3>Seu pedido</h3>
       ${cart.length ? cart.map((x, i) => `<div class="ci"><div><b>${x.qty}× ${esc(x.name)}</b>${x.optText ? `<br><span class="mut">${esc(x.optText)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}<br><button class="ghost sm" data-dec="${i}" aria-label="Diminuir">−</button> <button class="ghost sm" data-inc="${i}" aria-label="Aumentar">+</button></div><span class="price">${brl(x.qty * x.unit)}</span></div>`).join('') : '<p class="empty">Carrinho vazio.</p>'}
@@ -522,11 +523,20 @@ async function vShop(slug) {
     else if (d.dec) { if (!--cart[d.dec].qty) cart.splice(d.dec, 1); saveCart(); paint(); }
     else if (b.id === 'cupBtn') {
       const code = $('#cCup').value.trim(); coupon = null;
-      if (code) { coupon = await rpc('check_coupon', { p_slug: slug, p_code: code }); toast(coupon ? 'Cupom aplicado' : 'Cupom inválido'); }
+      if (code) {
+        coupon = await rpc('check_coupon', { p_slug: slug, p_code: code });
+        if (coupon?.soldOut) { coupon = null; toast('Este cupom já atingiu o limite de usos'); }
+        else if (coupon && coupon.minSubtotal && cart.reduce((t, c) => t + c.qty * c.unit, 0) < coupon.minSubtotal) { toast(`Cupom válido a partir de ${brl(coupon.minSubtotal)} em produtos`); coupon = null; }
+        else toast(coupon ? `Cupom aplicado${coupon.firstOrderOnly ? ' (válido só na primeira compra)' : ''}` : 'Cupom inválido ou expirado');
+      }
       paintTotals();
     }
     else if (b.id === 'checkout') checkout();
     else if (b.id === 'toCart') $('.cart').scrollIntoView({ behavior: 'smooth' });
+    else if (b.id === 'seeReviews') dialog(`<h2>Avaliações</h2><p class="lead" style="margin:0">★ ${String(RV.avg).replace('.', ',')} de 5 · ${RV.count} avaliações</p>
+      ${RV.recent.map(r => `<div class="rv"><div class="row between"><b>${esc(r.name)}</b><span class="stars">${'★'.repeat(r.rating)}${'☆'.repeat(5 - r.rating)}</span></div>
+        <p style="margin:0">${esc(r.comment)}</p>${r.reply ? `<p class="mut" style="margin:0">Resposta da loja: ${esc(r.reply)}</p>` : ''}<span class="mut" style="font-size:13px">${new Date(r.at).toLocaleDateString('pt-BR')}</span></div>`).join('') || '<p class="mut">Ainda sem comentários.</p>'}
+      <button class="ghost" onclick="document.getElementById('dlg').click()">Fechar</button>`);
   });
   app.onchange = e => { if (['cMode', 'cZone'].includes(e.target.id)) paintTotals(); };
   cleanup = () => { app.onclick = app.onchange = null; document.title = 'Balcão'; };
@@ -535,7 +545,7 @@ async function vShop(slug) {
 
 /* ---------- acompanhamento do pedido ---------- */
 async function vTrack(code) {
-  let lastSig = '';
+  let lastSig = '', rating = 0;
   const draw = async (force) => {
     const r = await rpc('track_order', { p_code: code });
     if (!r) throw new Error('Pedido não encontrado');
@@ -560,6 +570,9 @@ async function vTrack(code) {
       ${o.loyalty ? `<div class="loyal"><b>Cartão fidelidade</b>${o.loyaltyDiscount ? `<span class="badge b-g">Você ganhou ${o.loyalty.percent}% neste pedido!</span>` : ''}
         <div class="stamps">${Array.from({ length: o.loyalty.every }, (_, i) => `<i class="${i < Math.min(o.loyalty.stamps, o.loyalty.every) ? 'on' : ''}"></i>`).join('')}</div>
         <span class="mut">${o.loyalty.stamps >= o.loyalty.every ? `Seu próximo pedido tem ${o.loyalty.percent}% de desconto.` : `${o.loyalty.stamps} de ${o.loyalty.every} pedidos entregues. Faltam ${o.loyalty.every - o.loyalty.stamps} para ganhar ${o.loyalty.percent}% de desconto.`}</span></div>` : ''}
+      ${o.canReview ? `<div class="loyal" id="rvBox"><b>Como foi o seu pedido?</b><div class="starpick">${[1, 2, 3, 4, 5].map(n => `<button type="button" data-star="${n}" aria-label="${n} estrela${n > 1 ? 's' : ''}">☆</button>`).join('')}</div>
+        <textarea id="rvText" rows="2" maxlength="500" placeholder="Conte o que achou (opcional)"></textarea><button class="pri" id="rvSend" disabled>Enviar avaliação</button></div>` : ''}
+      ${o.review ? `<div class="loyal"><b>Sua avaliação</b><span class="stars">${'★'.repeat(o.review.rating)}${'☆'.repeat(5 - o.review.rating)}</span>${o.review.comment ? `<span>${esc(o.review.comment)}</span>` : ''}${o.review.reply ? `<span class="mut">Resposta da loja: ${esc(o.review.reply)}</span>` : ''}</div>` : ''}
       <a class="btn ghost" href="/loja/${esc(S.slug)}" data-link>Voltar à loja</a></div>`;
     return o.status;
   };
@@ -580,6 +593,8 @@ async function vTrack(code) {
   };
   app.onclick = attempt(async e => {
     const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.star) { rating = +b.dataset.star; document.querySelectorAll('[data-star]').forEach(x => { x.textContent = +x.dataset.star <= rating ? '★' : '☆'; x.classList.toggle('on', +x.dataset.star <= rating); }); $('#rvSend').disabled = false; return; }
+    if (b.id === 'rvSend') { b.disabled = true; try { await rpc('review_order', { p_code: code, p_rating: rating, p_comment: $('#rvText').value }); toast('Obrigado pela avaliação!'); await draw(true); } finally { b.disabled = false; } return; }
     if (b.id === 'pixCopy') { const ta = $('#pixCode'); try { await navigator.clipboard.writeText(ta.value); } catch { ta.select(); document.execCommand('copy'); } toast('Código copiado. Cole no app do banco.'); }
     if (b.id === 'pixNew') { b.disabled = true; try { await pixCall({ action: 'create', code, email: $('#pixEmail').value }); await draw(true); } finally { b.disabled = false; } }
     if (b.id === 'pixCheck') { b.disabled = true; try { const r = await pixCall({ action: 'check', code }); toast(r.paid ? 'Pagamento confirmado!' : 'Ainda não caiu. Pode levar alguns segundos.'); await draw(true); } finally { b.disabled = false; } }
@@ -699,10 +714,11 @@ async function pMenu(S, owner) {
   const load = async () => { prods = sortMenu(await q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id))); draw(); };
   const draw = () => {
     const cats = [...new Set(prods.map(p => p.category))];
-    app.innerHTML = `<div class="row between"><div><h2>Cardápio</h2><p class="lead">${owner ? 'Crie produtos com grupos de opções: tamanhos, sabores, adicionais, combos.' : 'Marque itens esgotados conforme o estoque.'}</p></div>${owner ? '<button class="pri" id="newP">Novo produto</button>' : ''}</div>
-    ${cats.map(c => `<div class="panel" style="margin-bottom:16px"><h3>${esc(c)}</h3><div class="scroll"><table class="stack"><thead><tr><th>Produto</th><th>Opções</th><th class="n">Preço</th><th>Disponível</th><th></th></tr></thead><tbody>
+    app.innerHTML = `<div class="row between"><div><h2>Cardápio</h2><p class="lead">${owner ? 'Crie produtos com grupos de opções: tamanhos, sabores, adicionais, combos.' : 'Marque itens esgotados ou ajuste o estoque.'} Estoque em branco = sem controle; com número, baixa a cada pedido e volta se o pedido for cancelado.</p></div>${owner ? '<button class="pri" id="newP">Novo produto</button>' : ''}</div>
+    ${cats.map(c => `<div class="panel" style="margin-bottom:16px"><h3>${esc(c)}</h3><div class="scroll"><table class="stack"><thead><tr><th>Produto</th><th>Opções</th><th class="n">Preço</th><th>Estoque</th><th>Disponível</th><th></th></tr></thead><tbody>
       ${prods.filter(p => p.category === c).map(p => `<tr><td data-l="Produto"><span class="row" style="flex-wrap:nowrap"><span class="thumb">${picture(p, S.color)}</span><span><b>${esc(p.name)}</b><br><span class="mut">${esc(p.description)}</span></span></span></td>
         <td data-l="Opções"><span class="mut">${p.groups.map(g => `${esc(g.name)} (${g.options.length})`).join(', ') || '—'}</span></td><td data-l="Preço" class="n price">${brl(p.price)}</td>
+        <td data-l="Estoque"><input class="stockin" type="number" min="0" inputmode="numeric" data-stock="${p.id}" value="${p.stock ?? ''}" placeholder="sem controle" aria-label="Estoque de ${esc(p.name)}">${p.stock === 0 ? ' <span class="badge b-r">zerado</span>' : ''}</td>
         <td data-l="Disponível"><button class="sm ${p.available ? 'ok' : 'ghost'}" data-av="${p.id}">${p.available ? 'Sim' : 'Esgotado'}</button></td>
         <td data-l="">${owner ? `<button class="ghost sm" data-ed="${p.id}">Editar</button>` : ''}</td></tr>`).join('')}</tbody></table></div></div>`).join('') || '<p class="empty">Nenhum produto ainda.</p>'}`;
   };
@@ -767,7 +783,14 @@ async function pMenu(S, owner) {
     if (b.dataset.ed) editor(prods.find(p => p.id === +b.dataset.ed));
     if (b.dataset.av) { const p = prods.find(x => x.id === +b.dataset.av); await rpc('set_product_availability', { p_product: p.id, p_available: !p.available }); await load(); }
   });
-  cleanup = () => { app.onclick = null; };
+  app.onchange = attempt(async e => {
+    if (!e.target.dataset.stock) return;
+    const v = e.target.value.trim();
+    if (v !== '' && !/^\d{1,7}$/.test(v)) throw new Error('Estoque inválido');
+    await rpc('set_stock', { p_product: +e.target.dataset.stock, p_stock: v === '' ? null : +v });
+    toast(v === '' ? 'Estoque sem controle' : `Estoque: ${v}`); await load();
+  });
+  cleanup = () => { app.onclick = app.onchange = null; };
   await load();
 }
 
@@ -787,7 +810,7 @@ async function pNewOrder(S) {
     app.innerHTML = `<div class="row between"><div><h2>Novo pedido</h2><p class="lead">Lance pedidos do balcão, do telefone ou da mesa. Eles entram direto em preparo.</p></div><a class="btn ghost" href="/painel" data-link>Voltar</a></div>
     <div class="shop"><section class="panel">
       <input id="n_term" type="search" placeholder="Buscar produto" value="${esc(st.term)}">
-      ${cats.map(c => `<h3>${esc(c)}</h3><div class="plist">${list.filter(p => p.category === c).map(p => `<button class="pbtn" data-p="${p.id}"><span>${esc(p.name)}</span><span class="price">${brl(p.price)}${p.groups.length ? ' +' : ''}</span></button>`).join('')}</div>`).join('') || '<p class="empty">Nenhum produto.</p>'}
+      ${cats.map(c => `<h3>${esc(c)}</h3><div class="plist">${list.filter(p => p.category === c).map(p => `<button class="pbtn" data-p="${p.id}" ${p.stock === 0 ? 'disabled' : ''}><span>${esc(p.name)}${p.stock != null ? `<br><small class="mut">${p.stock === 0 ? 'esgotado' : `estoque: ${p.stock}`}</small>` : ''}</span><span class="price">${brl(p.price)}${p.groups.length ? ' +' : ''}</span></button>`).join('')}</div>`).join('') || '<p class="empty">Nenhum produto.</p>'}
     </section>
     <aside class="cart"><h3>Pedido</h3>
       <div class="segs" style="grid-template-columns:repeat(3,minmax(0,1fr))">${['balcao', 'telefone', ...(S.allow_tables ? ['mesa'] : [])].map(c => `<button type="button" data-ch="${c}" class="${st.channel === c ? 'on' : ''}" style="min-height:44px">${CHANNEL[c]}</button>`).join('')}</div>
@@ -922,7 +945,8 @@ async function pCustomers(S) {
 async function pReports(S) {
   let days = 7;
   const draw = async () => {
-    const r = await rpc('store_report', { p_tenant: S.id, p_days: days });
+    const [r, rv] = await Promise.all([rpc('store_report', { p_tenant: S.id, p_days: days }),
+      q(sb.from('order_reviews').select('order_id, rating, comment, reply, created_at, order:orders(number, customer_name)').eq('tenant_id', S.id).order('created_at', { ascending: false }).limit(30)).catch(() => [])]);
     const bars = (rows, label, val, fmt, color) => { const m = Math.max(1, ...rows.map(val)); return rows.map(x => `<div class="bar"><span>${esc(label(x))}</span><i style="width:${val(x) / m * 100}%;${color ? `background:${color}` : ''}"></i><span class="price">${fmt(x)}</span></div>`).join('') || '<p class="empty">Sem dados no período</p>'; };
     app.innerHTML = `<div class="row between"><div><h2>Relatórios</h2><p class="lead">Pedidos não cancelados no período escolhido.</p></div>
       <span class="row">${[1, 7, 30, 90].map(d => `<button class="sm ${d === days ? 'pri' : 'ghost'}" data-days="${d}">${d === 1 ? 'Hoje' : d + ' dias'}</button>`).join('')}</span></div>
@@ -932,10 +956,16 @@ async function pReports(S) {
       <div class="panel"><h3>Pedidos por horário</h3><div class="bars">${bars(r.byHour, x => String(x.h).padStart(2, '0') + 'h', x => x.orders, x => x.orders + ' ped.')}</div></div>
       <div class="panel"><h3>Mais vendidos</h3><div class="bars">${bars(r.top, x => x.name, x => x.qty, x => x.qty + ' un.', 'var(--basil)')}</div></div>
       <div class="panel"><h3>Formas de pagamento</h3><div class="bars">${bars(r.payments, x => x.payment, x => x.revenue, x => brl(x.revenue), 'var(--basil)')}</div>
-        <h3>Entregadores</h3><table><thead><tr><th>Nome</th><th class="n">Entregas</th><th class="n">Taxas a repassar</th></tr></thead><tbody>${r.couriers.map(c => `<tr><td>${esc(c.name)}</td><td class="n">${c.deliveries}</td><td class="n price">${brl(c.fees)}</td></tr>`).join('')}</tbody></table></div></div>`;
+        <h3>Entregadores</h3><table><thead><tr><th>Nome</th><th class="n">Entregas</th><th class="n">Taxas a repassar</th></tr></thead><tbody>${r.couriers.map(c => `<tr><td>${esc(c.name)}</td><td class="n">${c.deliveries}</td><td class="n price">${brl(c.fees)}</td></tr>`).join('')}</tbody></table></div></div>
+    <div class="panel" style="margin-top:20px"><h3>Avaliações dos clientes ${rv.length ? `· ★ ${(rv.reduce((a, x) => a + x.rating, 0) / rv.length).toFixed(1).replace('.', ',')} (${rv.length} recentes)` : ''}</h3>
+      ${rv.map(x => `<div class="rv"><div class="row between"><span><b>#${x.order?.number}</b> · ${esc(x.order?.customer_name || '')}</span><span class="stars">${'★'.repeat(x.rating)}${'☆'.repeat(5 - x.rating)}</span></div>
+        ${x.comment ? `<p style="margin:0">${esc(x.comment)}</p>` : ''}
+        <form class="row" data-reply="${x.order_id}" style="flex-wrap:nowrap"><input name="reply" maxlength="500" placeholder="Responder publicamente" value="${esc(x.reply || '')}"><button class="ghost sm">${x.reply ? 'Atualizar' : 'Responder'}</button></form>
+        <span class="mut" style="font-size:13px">${new Date(x.created_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</span></div>`).join('') || '<p class="mut" style="margin:0">Nenhuma avaliação ainda. Depois da entrega, o cliente pode avaliar pela página do pedido.</p>'}</div>`;
   };
   app.onclick = attempt(async e => { const b = e.target.closest('button[data-days]'); if (b) { days = +b.dataset.days; await draw(); } });
-  cleanup = () => { app.onclick = null; };
+  app.onsubmit = attempt(async e => { const f = e.target.closest('form[data-reply]'); if (!f) return; e.preventDefault(); await rpc('reply_review', { p_order: +f.dataset.reply, p_reply: f.reply.value }); toast('Resposta salva'); await draw(); });
+  cleanup = () => { app.onclick = app.onsubmit = null; };
   await draw();
 }
 
@@ -944,12 +974,12 @@ async function pConfig(S) {
   const plans = await q(sb.from('plans').select('*').order('sort'));
   let couriers = [];
   const draw = async () => {
-    let st, zones, coupons, team, nOrders, pix, bill;
-    [st, zones, coupons, couriers, team, nOrders, pix, bill] = await Promise.all([
+    let st, zones, coupons, team, nOrders, pix, bill, usage;
+    [st, zones, coupons, couriers, team, nOrders, pix, bill, usage] = await Promise.all([
       q(sb.from('tenants').select('*').eq('id', S.id).single()), q(sb.from('zones').select('*').eq('tenant_id', S.id).order('id')),
       q(sb.from('coupons').select('*').eq('tenant_id', S.id).order('id')), q(sb.from('couriers').select('id, tenant_id, name, phone, active').eq('tenant_id', S.id).order('id')),
       rpc('list_team', { p_tenant: S.id }), sb.from('orders').select('id', { count: 'exact', head: true }).eq('tenant_id', S.id).then(r => r.count || 0),
-      rpc('pix_settings', { p_tenant: S.id }).catch(() => null), rpc('billing_info', { p_tenant: S.id }).catch(() => null)]);
+      rpc('pix_settings', { p_tenant: S.id }).catch(() => null), rpc('billing_info', { p_tenant: S.id }).catch(() => null), rpc('coupon_usage', { p_tenant: S.id }).catch(() => ({}))]);
     const link = `${location.origin}/loja/${st.slug}`;
     app.innerHTML = `<h2>Configurações</h2><p class="lead">Endereço da sua loja: <a href="${link}" target="_blank" rel="noopener">${esc(link)}</a> <button class="ghost sm" id="copy">Copiar</button></p>
     ${nOrders ? '' : '<div class="panel" style="margin-bottom:20px"><h3>Quer ver o sistema funcionando?</h3><p class="mut" style="margin:0">Gere pedidos de exemplo para testar a fila, as entregas e os relatórios.</p><button class="ok" id="demo">Gerar 12 pedidos de exemplo</button></div>'}
@@ -990,8 +1020,16 @@ async function pConfig(S) {
       <button class="pri">Salvar entrega e fidelidade</button></form>
     <div class="panel"><h3>Bairros e taxas</h3><table><tbody>${zones.map(z => `<tr><td>${esc(z.name)}</td><td class="n" style="width:120px"><input inputmode="decimal" value="${fromCents(z.fee)}" data-zone="${z.id}" aria-label="Taxa ${esc(z.name)}"></td><td class="n"><button class="ghost sm" data-del="zones:${z.id}" aria-label="Remover">×</button></td></tr>`).join('')}</tbody></table>
       <form id="fZone" class="row" style="flex-wrap:nowrap"><input id="zN" placeholder="Bairro" required maxlength="60"><input id="zF" inputmode="decimal" placeholder="Taxa" style="width:100px" required><button class="ghost">Adicionar</button></form></div>
-    <div class="panel"><h3>Cupons</h3><table><tbody>${coupons.map(c => `<tr><td><b>${esc(c.code)}</b><br><span class="mut">${[c.percent ? c.percent + '% de desconto' : '', c.free_shipping ? 'frete grátis' : ''].filter(Boolean).join(' + ')}</span></td><td class="n"><button class="sm ${c.active ? 'ok' : 'ghost'}" data-cup="${c.id}" data-on="${c.active ? 1 : 0}">${c.active ? 'Ativo' : 'Pausado'}</button> <button class="ghost sm" data-del="coupons:${c.id}" aria-label="Remover">×</button></td></tr>`).join('')}</tbody></table>
-      <form id="fCup" class="row"><input id="cuC" placeholder="CÓDIGO" required pattern="[A-Za-z0-9]{2,20}" style="flex:1"><input id="cuP" type="number" min="0" max="90" placeholder="%" style="width:80px"><label class="chk"><input type="checkbox" id="cuF"> Frete grátis</label><button class="ghost">Criar</button></form></div>
+    <div class="panel"><h3>Cupons</h3><table><tbody>${coupons.map(c => `<tr><td><b>${esc(c.code)}</b><br><span class="mut">${[c.percent ? c.percent + '% de desconto' : '', c.free_shipping ? 'frete grátis' : '',
+        c.min_subtotal ? `a partir de ${brl(c.min_subtotal)}` : '', c.first_order_only ? 'só 1ª compra' : '', c.max_per_customer ? `${c.max_per_customer}x por cliente` : '',
+        c.valid_until ? `até ${new Date(c.valid_until).toLocaleDateString('pt-BR')}${new Date(c.valid_until) < Date.now() ? ' (expirado)' : ''}` : ''].filter(Boolean).join(' · ')}</span>
+        <br><span class="mut">Usado ${usage[c.code] || 0}${c.max_uses ? ` de ${c.max_uses}` : ''} vez(es)</span></td><td class="n"><button class="sm ${c.active ? 'ok' : 'ghost'}" data-cup="${c.id}" data-on="${c.active ? 1 : 0}">${c.active ? 'Ativo' : 'Pausado'}</button> <button class="ghost sm" data-del="coupons:${c.id}" aria-label="Remover">×</button></td></tr>`).join('')}</tbody></table>
+      <form id="fCup" class="grid" style="gap:8px"><div class="row"><input id="cuC" placeholder="CÓDIGO" required pattern="[A-Za-z0-9]{2,20}" style="flex:1"><input id="cuP" type="number" min="0" max="90" placeholder="% desc." style="width:100px"><label class="chk"><input type="checkbox" id="cuF"> Frete grátis</label></div>
+        <details><summary class="mut">Regras opcionais (mínimo, validade, limites)</summary><div class="grid" style="gap:8px;margin-top:8px">
+          <div class="two" style="gap:8px"><label>Pedido mínimo (R$)<input id="cuMin" inputmode="decimal" placeholder="0,00"></label><label>Válido até<input id="cuUntil" type="date"></label></div>
+          <div class="two" style="gap:8px"><label>Limite total de usos<input id="cuMax" type="number" min="1" placeholder="sem limite"></label><label>Usos por cliente<input id="cuPer" type="number" min="1" placeholder="sem limite"></label></div>
+          <label class="chk"><input type="checkbox" id="cuFirst"> Só na primeira compra do cliente</label></div></details>
+        <button class="ghost">Criar cupom</button></form></div>
     <div class="panel"><h3>Entregadores</h3><table><tbody>${couriers.map(c => `<tr><td>${esc(c.name)}<br><span class="mut">${esc(c.phone)}</span></td><td class="n"><span class="row" style="justify-content:flex-end"><button class="ghost sm" data-clink="${c.id}">Enviar link</button><button class="ghost sm" data-crot="${c.id}">Novo link</button><button class="ghost sm" data-del="couriers:${c.id}" aria-label="Remover">×</button></span></td></tr>`).join('')}</tbody></table>
       <p class="mut" style="margin:0">Cada entregador recebe um link próprio para ver as entregas dele no celular e marcar "Entreguei", sem precisar de senha. "Novo link" desativa o anterior.</p>
       <form id="fCour" class="row" style="flex-wrap:nowrap"><input id="crN" placeholder="Nome" required maxlength="60"><input id="crP" placeholder="Telefone"><button class="ghost">Adicionar</button></form></div>
@@ -1111,7 +1149,15 @@ async function pConfig(S) {
     }
     if (id === 'fPix') { await rpc('set_pix_settings', { p_tenant: S.id, p_token: $('#pxTok').value.trim() || null, p_enabled: $('#pxOn').checked }); }
     if (id === 'fZone') { const fee = toCents($('#zF').value); if (!Number.isInteger(fee) || fee < 0) throw new Error('Taxa inválida'); await q(sb.from('zones').insert({ tenant_id: S.id, name: $('#zN').value.trim(), fee })); }
-    if (id === 'fCup') await q(sb.from('coupons').insert({ tenant_id: S.id, code: $('#cuC').value.trim().toUpperCase(), percent: +$('#cuP').value || 0, free_shipping: $('#cuF').checked }));
+    if (id === 'fCup') {
+      const min = $('#cuMin').value.trim() ? toCents($('#cuMin').value) : 0;
+      if (!Number.isInteger(min) || min < 0) throw new Error('Pedido mínimo inválido');
+      const pct = +$('#cuP').value || 0;
+      if (!pct && !$('#cuF').checked) throw new Error('Informe o % de desconto ou marque frete grátis');
+      const until = $('#cuUntil').value ? new Date(`${$('#cuUntil').value}T23:59:59-03:00`).toISOString() : null;
+      await q(sb.from('coupons').insert({ tenant_id: S.id, code: $('#cuC').value.trim().toUpperCase(), percent: pct, free_shipping: $('#cuF').checked,
+        min_subtotal: min, valid_until: until, max_uses: +$('#cuMax').value || null, max_per_customer: +$('#cuPer').value || null, first_order_only: $('#cuFirst').checked }));
+    }
     if (id === 'fCour') await q(sb.from('couriers').insert({ tenant_id: S.id, name: $('#crN').value.trim(), phone: $('#crP').value.trim() }));
     if (id === 'fTeam') await rpc('add_staff', { p_tenant: S.id, p_email: $('#tE').value });
     if (id === 'fDel') { await rpc('delete_my_tenant', { p_tenant: S.id, p_confirm_slug: $('#delSlug').value }); local.set('tenant', null); toast('Loja excluída'); return go('/'); }
