@@ -29,7 +29,7 @@ before(() => {
   psql(['-d', 'postgres', '-c', `drop database if exists ${DB}`]);
   psql(['-d', 'postgres', '-c', `create database ${DB}`]);
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -538,4 +538,37 @@ test('avaliações: só após entregue, uma por pedido, nota pública e resposta
   sql(`select change_order_status(${id2}, 'preparo'); select change_order_status(${id2}, 'pronto'); select change_order_status(${id2}, 'entregue')`, U.pizza);
   sql(`update orders set updated_at = now() - interval '8 days' where id = ${id2}`);
   fails(`select review_order('${r2.code}', 3, '')`, null, /prazo/);
+});
+
+test('pedido agendado: antecedência, limite de dias, horário de funcionamento e loja fechada agora', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const at = (sqlExpr) => sql(`select to_char((${sqlExpr}) at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`);
+  const mk = (when) => order('forno-da-vila', { customer: { name: 'Agenda', phone: '31966660000' }, fulfillment: 'pickup', payment: 'Pix', scheduledFor: when, items: [{ productId: p.id, qty: 1 }] });
+  assert.throws(() => mk(at("now() + interval '3 hours'")), /não aceita pedidos agendados/);
+  sql(`update tenants set allow_scheduling = true, schedule_days = 2, schedule_lead_minutes = 60, auto_hours = false, is_open = true where id = '${pizzaId}'`, U.pizza);
+  assert.throws(() => mk(at("now() + interval '20 minutes'")), /60 minutos de antecedência/);
+  assert.throws(() => mk(at("now() + interval '5 days'")), /até 2 dia/);
+  assert.throws(() => mk('amanhã às 8'), /inválido/);
+  const r = mk(at("now() + interval '3 hours'"));
+  assert.ok(sql(`select scheduled_for is not null from orders where public_code = '${r.code}'`) === 't');
+  assert.ok(json(`track_order('${r.code}')`, null).order.scheduledFor);
+  // com horário automático: loja fechada agora aceita agendamento para quando estiver aberta
+  const dow = +sql(`select extract(dow from (now() + interval '1 day') at time zone 'America/Sao_Paulo')`);
+  sql(`update tenants set auto_hours = true, hours = '{"${dow}":[["10:00","22:00"]]}' where id = '${pizzaId}'`, U.pizza);
+  const tomorrow = sql(`select to_char((now() + interval '1 day') at time zone 'America/Sao_Paulo', 'YYYY-MM-DD')`);
+  assert.ok(mk(`${tomorrow}T12:00:00-03:00`).code);
+  assert.throws(() => mk(`${tomorrow}T23:30:00-03:00`), /não funciona nesse horário/);
+  // pausa manual bloqueia até agendamento
+  sql(`update tenants set is_open = false where id = '${pizzaId}'`, U.pizza);
+  assert.throws(() => mk(`${tomorrow}T12:00:00-03:00`), /pausada/);
+  sql(`update tenants set is_open = true, auto_hours = false, allow_scheduling = false where id = '${pizzaId}'`, U.pizza);
+});
+
+test('vitrine: descrição, endereço, Instagram e banner só da própria pasta', () => {
+  sql(`update tenants set description = 'Pizza no forno a lenha desde 1998', address = 'Rua Augusta, 100 - São Paulo', instagram = 'fornodavila' where id = '${pizzaId}'`, U.pizza);
+  assert.equal(sql(`select instagram from tenants where slug = 'forno-da-vila'`, null), 'fornodavila');
+  fails(`update tenants set instagram = '@forno da vila' where id = '${pizzaId}'`, U.pizza, /check constraint/);
+  sql(`update tenants set banner_path = '${pizzaId}/banner.jpg' where id = '${pizzaId}'`, U.pizza);
+  fails(`update tenants set banner_path = '00000000-0000-0000-0000-000000000000/x.jpg' where id = '${pizzaId}'`, U.pizza, /check constraint/);
+  assert.equal(sql(`update tenants set description = 'hack' where id = '${pizzaId}' returning id`, U.staff), '');
 });

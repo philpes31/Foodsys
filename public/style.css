@@ -159,3 +159,9 @@ input[type=radio]{width:20px;min-height:20px;accent-color:var(--red);flex:none}
 .starpick{display:flex;gap:4px}.starpick button{font-size:30px;min-height:48px;width:48px;padding:0;background:transparent;color:#e9a23b}
 .loyal textarea{width:100%;font:inherit;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--card)}
 .stockin{width:110px;min-height:36px}
+.hero-banner{height:clamp(160px,28vw,280px);border-radius:18px;background-size:cover;background-position:center;display:flex;align-items:flex-end;padding:20px;margin-bottom:12px}
+.hero-banner h1{color:#fff;text-shadow:0 2px 12px #0008}
+.desc{font-size:17px;margin:0 0 6px;max-width:70ch}
+.hours-pub{margin:-8px 0 16px}.hours-pub table{width:auto;font-size:14px}.hours-pub td{padding:2px 12px 2px 0;border:0}
+.banner-ed{height:120px;border-radius:12px;overflow:hidden;background:var(--soft);display:grid;place-items:center}.banner-ed img{width:100%;height:100%;object-fit:cover}
+.sched{margin-bottom:14px;gap:8px}.sched .badge{font-size:13px;padding:4px 10px}

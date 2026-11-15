@@ -19,6 +19,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    6. `20261118000000_distancia_fidelidade.sql` (taxa por distância e programa de fidelidade)
    7. `20261119000000_balcao_mesa_caixa.sql` (pedido no balcão/telefone, mesa por QR Code e fechamento de caixa)
    8. `20261120000000_cupons_avaliacoes_estoque.sql` (cupons com regras, avaliações e estoque)
+   9. `20261121000000_agendamento_vitrine.sql` (pedido agendado e vitrine da loja)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -175,12 +176,20 @@ O que já está pronto:
   - Com número, cada pedido dá baixa e o cancelamento devolve, inclusive o Pix não pago.
   - Com 5 ou menos unidades, a loja mostra "Últimas N unidades".
   - Ao chegar a zero, o produto aparece como **Esgotado** e o banco recusa pedidos acima do saldo.
+- **Pedido agendado:** em **Configurações → Pedidos agendados**, ligue a opção e defina até quantos dias, a antecedência mínima e o intervalo dos horários.
+  - No checkout aparece **"Quando?"**: "o quanto antes" ou um dia e horário. Os horários seguem o funcionamento da loja.
+  - Com a loja fechada, o cliente ainda pode agendar para quando ela abrir. Já a pausa manual ("Receber pedidos" desmarcado) bloqueia tudo.
+  - No preparo, os agendados ficam numa faixa **"Agendados para mais tarde"** e entram nas colunas 1 hora antes, com ⏰ e o horário.
+  - A comanda, a mensagem do entregador e a página do cliente mostram o horário agendado.
+  - O banco confere antecedência, limite de dias e horário de funcionamento.
+- **Vitrine da loja:** em **Configurações → Vitrine da loja**, envie um **banner** (foto larga, reduzida automaticamente) e preencha descrição, endereço e Instagram.
+  - Tudo aparece no topo da loja, junto com a nota das avaliações, o link do WhatsApp, o endereço no mapa e o quadro de horários.
 - **WhatsApp:** os botões abrem o WhatsApp Web ou o app com a mensagem pronta (aceito, pronto, saiu para entrega...) e o link de acompanhamento. Basta tocar em enviar.
 - **Horário:** com "Abrir e fechar sozinha" ligado, a loja só aceita pedidos dentro dos horários. O banco confere isso, não só a tela. O checkbox "Receber pedidos" pausa a loja na hora, mesmo dentro do horário.
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 47 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 49 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;
@@ -191,7 +200,8 @@ O que já está pronto:
 - link do entregador, lista de clientes, exclusão de dados (LGPD), retenção e exclusão da loja;
 - taxa por distância (faixas, fora da área, coordenadas inválidas) e fidelidade (selos, resgate, cancelamento, cupom maior);
 - pedido na mesa, pedido lançado pela equipe (permissões, canal, telefone opcional) e fechamento de caixa;
-- regras de cupom, estoque (baixa, saldo insuficiente, devolução) e avaliações (prazo, uma por pedido, resposta).
+- regras de cupom, estoque (baixa, saldo insuficiente, devolução) e avaliações (prazo, uma por pedido, resposta);
+- pedido agendado (antecedência, limite de dias, horário de funcionamento, loja fechada e pausada) e campos da vitrine.
 
 ```bash
 PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test
