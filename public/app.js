@@ -300,7 +300,7 @@ async function loadMe() {
   if (!session) return (ME = null);
   const user = session.user;
   const [ms, adm] = await Promise.all([
-    q(sb.from('memberships').select('role, tenant:tenants(*, seg:segment_templates(name, prep))').eq('user_id', user.id)),
+    tenantsQuery(c => sb.from('memberships').select(`role, tenant:tenants(${c}, seg:segment_templates(name, prep))`).eq('user_id', user.id)),
     q(sb.from('platform_admins').select('user_id').eq('user_id', user.id))
   ]);
   const memberships = ms.filter(m => m.tenant);
@@ -443,6 +443,14 @@ async function vStart() {
 const bySort = (a, b) => a.sort - b.sort || a.id - b.id;
 const sortMenu = prods => prods.sort(bySort).map(p => ({ ...p,
   groups: (p.option_groups || []).sort(bySort).map(g => ({ ...g, options: (g.options || []).sort(bySort) })) }));
+// Colunas públicas da loja (os dados internos de cobrança não são lidos pelo site).
+const TENANT_BASE = 'id, slug, name, segment, color, plan, min_order, is_open, allow_pickup, eta_text, phone, timezone, active, created_at, hours, auto_hours, pix_online, billing_status, trial_ends_at, paid_until, delivery_mode, lat, lng, distance_tiers, loyalty_enabled, loyalty_every, loyalty_percent, allow_tables, tables_count, allow_scheduling, schedule_days, schedule_lead_minutes, schedule_slot_minutes, description, address, instagram, banner_path, free_delivery_above, card_online, custom_domain';
+let TENANT_COLS = TENANT_BASE;
+// Banco ainda sem as migrações mais novas: cai para '*' (a lista explícita falharia por coluna inexistente).
+async function tenantsQuery(build) {
+  try { return await q(build(TENANT_COLS)); }
+  catch (e) { if (TENANT_COLS !== '*' && /column|does not exist|desatualizado/i.test(e.message)) { TENANT_COLS = '*'; return await q(build('*')); } throw e; }
+}
 const MENU_COLS = 'id, category, name, description, price, icon, image_path, available, stock, sort, option_groups(id, name, min_sel, max_sel, sort, options(id, name, price, sort))';
 
 // Montador de produto com grupos de opções (usado na loja e no lançamento de pedidos do painel)
@@ -481,7 +489,7 @@ function openBuilder(p, onAdd) {
 }
 
 async function vShop(slug) {
-  const S = (await q(sb.from('tenants').select('*, seg:segment_templates(name)').eq('slug', slug).limit(1)))[0];
+  const S = (await tenantsQuery(c => sb.from('tenants').select(`${c}, seg:segment_templates(name)`).eq('slug', slug).limit(1)))[0];
   if (!S) throw new Error('Loja não encontrada');
   const [rawP, zones] = await Promise.all([
     q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id).eq('available', true)),
@@ -673,7 +681,7 @@ async function vShop(slug) {
     else if (b.id === 'seeReviews') dialog(`<h2>Avaliações</h2><p class="lead" style="margin:0">★ ${String(RV.avg).replace('.', ',')} de 5 · ${RV.count} avaliações</p>
       ${RV.recent.map(r => `<div class="rv"><div class="row between"><b>${esc(r.name)}</b><span class="stars">${'★'.repeat(r.rating)}${'☆'.repeat(5 - r.rating)}</span></div>
         <p style="margin:0">${esc(r.comment)}</p>${r.reply ? `<p class="mut" style="margin:0">Resposta da loja: ${esc(r.reply)}</p>` : ''}<span class="mut" style="font-size:13px">${new Date(r.at).toLocaleDateString('pt-BR')}</span></div>`).join('') || '<p class="mut">Ainda sem comentários.</p>'}
-      <button class="ghost" onclick="document.getElementById('dlg').click()">Fechar</button>`);
+      <button class="ghost" data-close>Fechar</button>`);
   });
   app.onchange = e => { if (['cMode', 'cZone'].includes(e.target.id)) paintTotals(); };
   cleanup = () => { app.onclick = app.onchange = null; document.title = 'Balcão'; };
@@ -1318,7 +1326,7 @@ async function pConfig(S) {
   const draw = async () => {
     let st, zones, coupons, team, nOrders, pix, bill, usage, promos, prodList;
     [st, zones, coupons, couriers, team, nOrders, pix, bill, usage, promos, prodList] = await Promise.all([
-      q(sb.from('tenants').select('*').eq('id', S.id).single()), q(sb.from('zones').select('*').eq('tenant_id', S.id).order('id')),
+      tenantsQuery(c => sb.from('tenants').select(c).eq('id', S.id).single()), q(sb.from('zones').select('*').eq('tenant_id', S.id).order('id')),
       q(sb.from('coupons').select('*').eq('tenant_id', S.id).order('id')), q(sb.from('couriers').select('id, tenant_id, name, phone, active').eq('tenant_id', S.id).order('id')),
       rpc('list_team', { p_tenant: S.id }), sb.from('orders').select('id', { count: 'exact', head: true }).eq('tenant_id', S.id).then(r => r.count || 0),
       rpc('pix_settings', { p_tenant: S.id }).catch(() => null), rpc('billing_info', { p_tenant: S.id }).catch(() => null), rpc('coupon_usage', { p_tenant: S.id }).catch(() => ({})),
@@ -1605,7 +1613,7 @@ function billLabel(t) {
 const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql',
   '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql',
   '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql',
-  '20261125000000_cartao_dominio_unidades.sql'];
+  '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };

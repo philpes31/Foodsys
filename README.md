@@ -24,6 +24,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    11. `20261123000000_checagem.sql` (a tela Plataforma passa a mostrar quais migrações faltam no banco)
    12. `20261124000000_saude_plataforma.sql` (painel de saúde na tela Plataforma)
    13. `20261125000000_cartao_dominio_unidades.sql` (cartão de crédito online, domínio próprio por loja e várias unidades)
+   14. `20261126000000_seguranca.sql` (correções do teste de segurança e de carga: limite de tentativas, privacidade e cupom sob concorrência)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -215,7 +216,7 @@ O que já está pronto:
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 57 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 73 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;
@@ -231,9 +232,15 @@ O que já está pronto:
 - promoções (leve X pague Y, % por categoria, dia e horário), frete grátis acima de valor e permissões;
 - cartão online (recusa não cancela, várias tentativas, valor conferido), domínio próprio (validação e unicidade) e criação de unidades com cópia do cardápio.
 
+- **segurança** (`test/security.test.js`): ataques como visitante, outra loja e funcionário; manipulação de preço e status; injeção de SQL; pasta de fotos; privacidade de telefone e cobrança; enxurrada de pedidos; chute de cupom; cupom com 20 pedidos simultâneos.
+
 ```bash
 PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test
 ```
+
+**Teste de carga do banco** (Postgres local, 30 lojas, pgbench): `PGHOST=... PGUSER=postgres bash test/carga/rodar.sh 50 30`
+
+**Teste de carga contra o seu Supabase** (só leitura, não cria pedidos): `node scripts/carga.mjs <slug-da-loja> 20 30`
 
 ## Estrutura
 
