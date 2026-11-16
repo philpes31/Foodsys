@@ -10,6 +10,8 @@ const app = $('#app');
 const brl = c => ((c || 0) / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const toCents = v => { const n = Number(String(v).trim().replace(/\./g, '').replace(',', '.')); return Number.isFinite(n) ? Math.round(n * 100) : NaN; };
+// Célula de planilha: texto que começa com = + - @ vira texto puro (evita fórmula maliciosa vinda de um nome de cliente).
+const csvCell = x => { let v = String(x ?? ''); if (/^[=+\-@\t\r]/.test(v)) v = "'" + v; return `"${v.replace(/"/g, '""')}"`; };
 const fromCents = c => ((c || 0) / 100).toFixed(2).replace('.', ',');
 const mins = t => Math.max(0, Math.floor((Date.now() - new Date(t).getTime()) / 60000));
 const hhmm = t => new Date(t).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
@@ -258,6 +260,11 @@ async function slugForHost() {
   return hostSlug;
 }
 
+// "Meus pedidos": os pedidos feitos neste aparelho (sem login), para acompanhar e pedir de novo.
+const myOrders = () => local.get('myorders', []);
+const rememberOrder = o => local.set('myorders', [o, ...myOrders().filter(x => x.code !== o.code)].slice(0, 20));
+const FINAL = ['entregue', 'cancelado'];
+
 /* ---------- comanda (impressora térmica 80 mm) ---------- */
 // Folha A4 com os QR Codes das mesas (imagem gerada pelo serviço público goqr.me/api.qrserver.com)
 async function printTableQrs(base, count, storeName) {
@@ -278,7 +285,7 @@ function printTicket(o, storeName) {
     <div>${o.fulfillment === 'table' ? `<b class="big">MESA ${esc(o.table_label)}</b>` : o.fulfillment === 'pickup' ? `<b>RETIRADA${o.channel === 'balcao' ? ' · BALCÃO' : ' NA LOJA'}</b>` : `<b>ENTREGA</b> · ${esc(o.address)} — ${esc(o.zone_name)}`}</div><hr>
     ${o.items.map(x => `<div class="li"><b>${x.qty}x ${esc(x.product_name)}</b><span>${brl(x.qty * x.unit_price)}</span></div>${x.options_text ? `<div class="sub">${esc(x.options_text)}</div>` : ''}${x.notes ? `<div class="sub">OBS: ${esc(x.notes)}</div>` : ''}`).join('')}<hr>
     <div class="li"><span>Subtotal</span><span>${brl(o.subtotal)}</span></div>
-    ${o.fee ? `<div class="li"><span>Entrega</span><span>${brl(o.fee)}</span></div>` : ''}${o.promo_discount ? `<div class="li"><span>Promoção</span><span>-${brl(o.promo_discount)}</span></div>` : ''}${o.discount ? `<div class="li"><span>Desconto</span><span>-${brl(o.discount)}</span></div>` : ''}
+    ${o.fee ? `<div class="li"><span>Entrega</span><span>${brl(o.fee)}</span></div>` : ''}${o.service_fee ? `<div class="li"><span>Serviço</span><span>${brl(o.service_fee)}</span></div>` : ''}${o.promo_discount ? `<div class="li"><span>Promoção</span><span>-${brl(o.promo_discount)}</span></div>` : ''}${o.discount ? `<div class="li"><span>Desconto</span><span>-${brl(o.discount)}</span></div>` : ''}
     <div class="li big"><b>TOTAL</b><b>${brl(o.total)}</b></div>
     <div>Pagamento: ${esc(o.payment)}${o.change_for ? ` · troco p/ ${brl(o.change_for)}` : ''}${o.payment_status === 'paid' ? ' · <b>PAGO</b>' : ''}</div></div>`;
   window.print();
@@ -325,6 +332,7 @@ async function render() {
     if (p[0] === 'pedido' && p[1]) return await vTrack(p[1]);
     if (p[0] === 'entrar') return vAuth(p[1]);
     if (p[0] === 'termos' || p[0] === 'privacidade') return vLegal(p[0]);
+    if (p[0] === 'meus-pedidos') return await vMyOrders();
     if (p[0] === 'entregador' && p[1]) return await vCourier(p[1]);
     if (!p.length) { const hs = await slugForHost(); if (hs) return await vShop(hs); }
     await loadMe();
@@ -389,8 +397,22 @@ function vHome() {
   const dest = ME?.tenant ? '/painel' : ME?.isAdmin ? '/plataforma' : ME ? '/comecar' : '/entrar/cadastro';
   app.innerHTML = `<section class="hero"><div class="grid"><h1>Delivery próprio para qualquer negócio</h1>
     <p>Loja online com a sua marca, fila de preparo em tempo real, despacho de entregadores e relatórios — para pizzaria, hamburgueria, açaí, mercado, farmácia e o que mais vender por entrega.</p>
-    <div class="row"><a class="btn pri" href="${dest}" data-link>${ME ? 'Ir para o painel' : 'Criar minha loja'}</a>${ME ? '' : '<a class="btn ghost" href="/entrar" data-link>Já tenho conta</a>'}</div></div>
+    <div class="row"><a class="btn pri" href="${dest}" data-link>${ME ? 'Ir para o painel' : 'Criar minha loja'}</a>${ME ? '' : '<a class="btn ghost" href="/entrar" data-link>Já tenho conta</a>'}${myOrders().length ? '<a class="btn ghost" href="/meus-pedidos" data-link>Meus pedidos</a>' : ''}</div></div>
     <div class="menu" style="grid-template-columns:repeat(2,minmax(0,1fr))">${['pizza', 'burger', 'cup', 'box'].map((i, k) => `<div class="item">${art(i, ['#d62828', '#e85d04', '#6a2c91', '#2f8f46'][k])}</div>`).join('')}</div></section>`;
+}
+
+/* ---------- meus pedidos (cliente, sem login) ---------- */
+async function vMyOrders() {
+  setColor('#d62828'); $('#bName').textContent = 'Meus pedidos'; header('', false);
+  const list = myOrders();
+  const st = await Promise.all(list.slice(0, 10).map(o => rpc('track_order', { p_code: o.code }).then(r => r?.order?.status || null).catch(() => null)));
+  app.innerHTML = `<h2>Meus pedidos</h2><p class="lead">Pedidos feitos neste aparelho. Ficam só aqui no seu celular.</p>
+    <div class="panel" style="max-width:760px">${list.map((o, i) => `<div class="ci"><span><b>${esc(o.store)}</b> · pedido #${o.number}<br><span class="mut">${new Date(o.at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })} · ${brl(o.total)}</span></span>
+      <span class="row">${st.at(i) ? `<span class="badge ${st.at(i) === 'entregue' ? 'b-g' : st.at(i) === 'cancelado' ? 'b-r' : 'b-a'}">${esc(st.at(i) === 'pagamento' ? 'Aguardando pagamento' : SLABEL[st.at(i)] || st.at(i))}</span>` : ''}
+        <a class="btn ghost sm" href="/pedido/${esc(o.code)}" data-link>Ver</a><a class="btn ghost sm" href="/loja/${esc(o.slug)}?repetir=1" data-link>Pedir de novo</a></span></div>`).join('') || '<p class="empty">Nenhum pedido feito neste aparelho ainda.</p>'}
+    ${list.length ? '<button class="ghost sm" id="myClear" style="margin-top:12px">Apagar histórico deste aparelho</button>' : ''}</div>`;
+  app.onclick = e => { const b = e.target.closest('#myClear'); if (!b || !sure(b)) return; local.set('myorders', []); ['last:', 'cart:'].forEach(k => Object.keys(localStorage).filter(x => x.startsWith(k)).forEach(x => localStorage.removeItem(x))); vMyOrders(); };
+  cleanup = () => { app.onclick = null; };
 }
 
 /* ---------- entrar / criar conta / recuperar senha ---------- */
@@ -444,12 +466,18 @@ const bySort = (a, b) => a.sort - b.sort || a.id - b.id;
 const sortMenu = prods => prods.sort(bySort).map(p => ({ ...p,
   groups: (p.option_groups || []).sort(bySort).map(g => ({ ...g, options: (g.options || []).sort(bySort) })) }));
 // Colunas públicas da loja (os dados internos de cobrança não são lidos pelo site).
-const TENANT_BASE = 'id, slug, name, segment, color, plan, min_order, is_open, allow_pickup, eta_text, phone, timezone, active, created_at, hours, auto_hours, pix_online, billing_status, trial_ends_at, paid_until, delivery_mode, lat, lng, distance_tiers, loyalty_enabled, loyalty_every, loyalty_percent, allow_tables, tables_count, allow_scheduling, schedule_days, schedule_lead_minutes, schedule_slot_minutes, description, address, instagram, banner_path, free_delivery_above, card_online, custom_domain';
+const TENANT_BASE = 'id, slug, name, segment, color, plan, min_order, is_open, allow_pickup, eta_text, phone, timezone, active, created_at, hours, auto_hours, pix_online, billing_status, trial_ends_at, paid_until, delivery_mode, lat, lng, distance_tiers, loyalty_enabled, loyalty_every, loyalty_percent, allow_tables, tables_count, allow_scheduling, schedule_days, schedule_lead_minutes, schedule_slot_minutes, description, address, instagram, banner_path, free_delivery_above, card_online, custom_domain, service_percent';
 let TENANT_COLS = TENANT_BASE;
-// Banco ainda sem as migrações mais novas: cai para '*' (a lista explícita falharia por coluna inexistente).
+// Banco sem alguma migração nova: tira da lista a coluna que ainda não existe e tenta de novo.
 async function tenantsQuery(build) {
-  try { return await q(build(TENANT_COLS)); }
-  catch (e) { if (TENANT_COLS !== '*' && /column|does not exist|desatualizado/i.test(e.message)) { TENANT_COLS = '*'; return await q(build('*')); } throw e; }
+  for (let i = 0; i < 8; i++) {
+    const { data, error } = await build(TENANT_COLS);
+    if (!error) return data;
+    const m = /column [\w.]*?\.?(\w+) does not exist/.exec(error.message || '');
+    if (!m || !TENANT_COLS.includes(m[1])) throw new Error(tr(error.message || 'Erro'));
+    TENANT_COLS = TENANT_COLS.split(', ').filter(c => c !== m[1]).join(', ');
+  }
+  throw new Error('Não foi possível ler a loja');
 }
 const MENU_COLS = 'id, category, name, description, price, icon, image_path, available, stock, sort, option_groups(id, name, min_sel, max_sel, sort, options(id, name, price, sort))';
 
@@ -527,6 +555,11 @@ async function vShop(slug) {
   };
   if (new URLSearchParams(location.search).get('repetir') === '1') { history.replaceState(null, '', location.pathname + (TABLE ? `?mesa=${encodeURIComponent(TABLE)}` : '')); if (!cart.length) setTimeout(orderAgain); }
   const unitOf = (p, ids) => p.price + p.groups.flatMap(g => g.options).filter(o => ids.includes(o.id)).reduce((t, o) => t + o.price, 0);
+  let service = true; // taxa de serviço da mesa: opcional para o cliente
+  // Pedido em andamento feito neste aparelho nas últimas 4 horas: aparece no topo da loja.
+  let ACTIVE = null;
+  const recent = myOrders().find(x => x.slug === slug && Date.now() - new Date(x.at) < 4 * 3600e3);
+  if (recent) rpc('track_order', { p_code: recent.code }).then(r => { if (r && !FINAL.includes(r.order.status) && r.order.status !== 'pagamento') { ACTIVE = { ...recent, status: r.order.status }; paint(); } }).catch(() => {});
   const totals = () => {
     const sub = cart.reduce((t, c) => t + c.qty * c.unit, 0), pickup = !!TABLE || $('#cMode')?.value === 'pickup';
     const z = DIST ? null : zones.find(z => String(z.id) === $('#cZone')?.value) || zones[0];
@@ -536,7 +569,8 @@ async function vShop(slug) {
     if (coupon) { if (coupon.percent) disc = Math.round(sub * coupon.percent / 100); if (coupon.freeShipping) fee = 0; }
     const when = $('#kWhen')?.value ? new Date($('#kWhen').value) : new Date();
     const pr = promoDiscount(PROMOS, cart, byId, S.timezone, when), promo = Math.min(pr.total, sub);
-    return { sub, fee, disc, promo, promoNames: pr.names, total: Math.max(0, sub + fee - disc - promo), pickup, zone: z, freeShip, feeKnown: pickup || freeShip || !DIST || !!geo?.quote?.inArea };
+    const svc = TABLE && S.service_percent && service ? Math.round(Math.max(0, sub - disc - promo) * S.service_percent / 100) : 0;
+    return { sub, fee, disc, promo, svc, promoNames: pr.names, total: Math.max(0, sub + fee - disc - promo) + svc, pickup, zone: z, freeShip, feeKnown: pickup || freeShip || !DIST || !!geo?.quote?.inArea };
   };
   // Sugestões no carrinho: o item mais barato de cada categoria que ainda não está no pedido (bebida, sobremesa, porção…).
   const suggest = () => {
@@ -550,7 +584,8 @@ async function vShop(slug) {
     const list = products.filter(p => p.category === cat), count = cart.reduce((t, c) => t + c.qty, 0);
     app.innerHTML = `${TABLE ? `<div class="banner" style="margin:-24px calc(-1 * max(4vw,16px)) 16px">Você está pedindo para a <b>Mesa ${esc(TABLE)}</b>. O pedido vai direto para a cozinha.</div>` : ''}${S.banner_path ? `<div class="hero-banner" style="background-image:linear-gradient(0deg,#000a,#0000 60%),url('${esc(imgUrl(S.banner_path))}')"><h1>${esc(S.name)}</h1></div>` : `<h2>${esc(S.name)}</h2>`}
     ${S.description ? `<p class="desc">${esc(S.description)}</p>` : ''}
-    <p class="lead">${SCHED_ONLY ? '<span class="badge b-a">Fechado agora · agende seu pedido</span> · ' : ''}${RV?.count ? `<button class="rating" id="seeReviews">★ ${String(RV.avg).replace('.', ',')} <span class="mut">(${RV.count} avaliaç${RV.count > 1 ? 'ões' : 'ão'})</span></button> · ` : ''}${esc(S.seg?.name)} · ${OS.open ? `<span class="badge b-g">Aberto${OS.label ? ' ' + OS.label : ' agora'}</span>` : `<span class="badge b-r">${esc(OS.label || 'Fechado')}</span>`} · entrega em ${esc(S.eta_text)}${S.min_order ? ` · pedido mínimo ${brl(S.min_order)}` : ''}${S.phone ? ` · ${esc(S.phone)}` : ''}
+    ${ACTIVE ? `<a class="activeorder" href="/pedido/${esc(ACTIVE.code)}" data-link>Seu pedido <b>#${ACTIVE.number}</b> está <b>${esc((SLABEL[ACTIVE.status] || ACTIVE.status).toLowerCase())}</b> · Acompanhar →</a>` : ''}
+    <p class="lead">${myOrders().length ? '<a href="/meus-pedidos" data-link>Meus pedidos</a> · ' : ''}${SCHED_ONLY ? '<span class="badge b-a">Fechado agora · agende seu pedido</span> · ' : ''}${RV?.count ? `<button class="rating" id="seeReviews">★ ${String(RV.avg).replace('.', ',')} <span class="mut">(${RV.count} avaliaç${RV.count > 1 ? 'ões' : 'ão'})</span></button> · ` : ''}${esc(S.seg?.name)} · ${OS.open ? `<span class="badge b-g">Aberto${OS.label ? ' ' + OS.label : ' agora'}</span>` : `<span class="badge b-r">${esc(OS.label || 'Fechado')}</span>`} · entrega em ${esc(S.eta_text)}${S.min_order ? ` · pedido mínimo ${brl(S.min_order)}` : ''}${S.phone ? ` · ${esc(S.phone)}` : ''}
       ${waLink(S.phone, `Olá, ${S.name}!`) ? ` · <a href="${esc(waLink(S.phone, `Olá, ${S.name}!`))}" target="_blank" rel="noopener">Falar no WhatsApp</a>` : ''}
       ${S.instagram ? ` · <a href="https://instagram.com/${esc(S.instagram)}" target="_blank" rel="noopener">@${esc(S.instagram)}</a>` : ''}
       ${S.address ? `<br><a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(S.address)}" target="_blank" rel="noopener">${esc(S.address)}</a>` : ''}</p>
@@ -574,7 +609,7 @@ async function vShop(slug) {
   };
   const paintTotals = () => {
     const t = totals(), low = !t.pickup && S.min_order && t.sub < S.min_order; $('#zWrap').hidden = t.pickup || DIST;
-    $('#tots').innerHTML = `<div class="ci"><span>Subtotal</span><span class="price">${brl(t.sub)}</span></div>${TABLE ? '' : `<div class="ci"><span>Entrega${DIST && geo?.quote && !t.pickup ? ` (${kmTxt(geo.quote.km)})` : ''}</span><span class="price">${!t.feeKnown ? 'pelo endereço' : t.fee ? brl(t.fee) : 'Grátis'}</span></div>`}${t.disc ? `<div class="ci"><span>Desconto</span><span class="price">−${brl(t.disc)}</span></div>` : ''}${t.promo ? `<div class="ci"><span>Promoção <span class="mut">(${esc(t.promoNames.join(', '))})</span></span><span class="price">−${brl(t.promo)}</span></div>` : ''}<div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>${low && cart.length ? `<span class="badge b-a">Faltam ${brl(S.min_order - t.sub)} para o pedido mínimo</span>` : ''}${!TABLE && !t.pickup && S.free_delivery_above && cart.length && !t.freeShip ? `<span class="badge b-g">Faltam ${brl(S.free_delivery_above - t.sub)} para o frete grátis</span>` : ''}`;
+    $('#tots').innerHTML = `<div class="ci"><span>Subtotal</span><span class="price">${brl(t.sub)}</span></div>${TABLE ? '' : `<div class="ci"><span>Entrega${DIST && geo?.quote && !t.pickup ? ` (${kmTxt(geo.quote.km)})` : ''}</span><span class="price">${!t.feeKnown ? 'pelo endereço' : t.fee ? brl(t.fee) : 'Grátis'}</span></div>`}${t.disc ? `<div class="ci"><span>Desconto</span><span class="price">−${brl(t.disc)}</span></div>` : ''}${t.promo ? `<div class="ci"><span>Promoção <span class="mut">(${esc(t.promoNames.join(', '))})</span></span><span class="price">−${brl(t.promo)}</span></div>` : ''}${TABLE && S.service_percent ? `<div class="ci"><label class="chk" style="margin:0"><input type="checkbox" id="svc" ${service ? 'checked' : ''}> Taxa de serviço (${S.service_percent}%, opcional)</label><span class="price">${brl(t.svc)}</span></div>` : ''}<div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>${low && cart.length ? `<span class="badge b-a">Faltam ${brl(S.min_order - t.sub)} para o pedido mínimo</span>` : ''}${!TABLE && !t.pickup && S.free_delivery_above && cart.length && !t.freeShip ? `<span class="badge b-g">Faltam ${brl(S.free_delivery_above - t.sub)} para o frete grátis</span>` : ''}`;
     $('#checkout').disabled = !cart.length || low || !CAN_ORDER || (!t.pickup && !DIST && !zones.length);
   };
   const addToCart = it => { const ex = cart.find(c => c.productId === it.productId && c.optionIds.join() === it.optionIds.join() && c.notes === it.notes); ex ? ex.qty += it.qty : cart.push(it); saveCart(); toast('Adicionado ao carrinho'); paint(); };
@@ -645,10 +680,12 @@ async function vShop(slug) {
           customer, fulfillment: TABLE ? 'table' : t.pickup ? 'pickup' : 'delivery', ...(TABLE ? { table: TABLE } : {}), zoneId: zoneNow?.id, address: addr, payment: $('#kPay').value,
           ...(DIST && !t.pickup ? { lat: geo.lat, lng: geo.lng } : {}),
           ...($('#kWhen')?.value ? { scheduledFor: $('#kWhen').value } : {}),
+          ...(TABLE && S.service_percent ? { service } : {}),
           changeFor: $('#kT').value ? toCents($('#kT').value) : undefined, coupon: coupon?.code,
           items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: c.notes })) } });
         local.set('customer', { ...last, ...customer, ...(email ? { email } : {}), ...(t.pickup || TABLE ? {} : { cep: $('#kCep').value, rua: $('#kRua').value, num: $('#kNum').value, comp: $('#kComp').value }) });
         local.set(lastKey, cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, optText: c.optText, notes: c.notes })));
+        rememberOrder({ code: r.code, slug, store: S.name, number: r.number, total: r.total, at: new Date().toISOString() });
         cart = []; saveCart();
         if (r.pix) { $('#kGo').textContent = 'Gerando Pix…'; try { await pixCall({ action: 'create', code: r.code, email }); } catch (err) { toast(err.message); } }
         if (r.card) {
@@ -660,6 +697,7 @@ async function vShop(slug) {
     });
   };
   app.onclick = attempt(async e => {
+    if (e.target.id === 'svc') { service = e.target.checked; paintTotals(); return; }
     const b = e.target.closest('button'); if (!b) return; const d = b.dataset;
     if (d.cat) { cat = d.cat; paint(); }
     else if (d.add) builder(products.find(p => p.id === +d.add));
@@ -711,6 +749,7 @@ async function vTrack(code) {
       ${o.courier ? `<p><b>${esc(o.courier)}</b> está a caminho de ${esc(o.address)}, ${esc(o.zone)}.</p>` : ''}
       <table><tbody>${o.items.map(x => `<tr><td>${x.qty}× ${esc(x.product_name)}${x.options_text ? `<br><span class="mut">${esc(x.options_text)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}</td><td class="n price">${brl(x.qty * x.unit_price)}</td></tr>`).join('')}
       <tr><td>${o.fulfillment === 'pickup' ? 'Retirada na loja' : o.fulfillment === 'table' ? esc(o.zone) : `Entrega (${esc(o.zone)})`}</td><td class="n price">${brl(o.fee)}</td></tr>
+      ${o.serviceFee ? `<tr><td>Taxa de serviço</td><td class="n price">${brl(o.serviceFee)}</td></tr>` : ''}
       ${o.discount ? `<tr><td>Desconto ${o.loyaltyDiscount ? 'de fidelidade' : esc(o.coupon || '')}</td><td class="n price">−${brl(o.discount)}</td></tr>` : ''}
       ${o.promoDiscount ? `<tr><td>Promoção (${esc(o.promoNames || '')})</td><td class="n price">−${brl(o.promoDiscount)}</td></tr>` : ''}
       <tr><td><b>Total · ${esc(o.payment)}</b></td><td class="n price"><b>${brl(o.total)}</b></td></tr></tbody></table>
@@ -841,6 +880,8 @@ async function pOrders(S) {
     ${later.length ? `<div class="panel sched"><h3>Agendados para mais tarde (${later.length})</h3><div class="row">${later.map(o => `<span class="badge b-a" title="${esc(o.customer_name)}">${esc(fmtWhen(o.scheduled_for, S.timezone))} · #${o.number} · ${esc(where(o))}</span>`).join('')}</div>
       <p class="mut" style="margin:0">Eles entram nas colunas 1 hora antes do horário marcado.</p></div>` : ''}
     <div class="stuck" id="stuck" role="alert" hidden></div>
+    ${(() => { const old = orders.filter(o => Date.now() - new Date(o.scheduled_for || o.created_at) > 12 * 3600e3); return old.length ? `<div class="panel" style="margin-bottom:14px"><b>${old.length} pedido(s) de dias anteriores ainda abertos</b> <span class="mut">(mais de 12 horas, de #${Math.min(...old.map(o => o.number))} a #${Math.max(...old.map(o => o.number))}). Provavelmente foram entregues e ninguém marcou.</span>
+      <div class="row" style="margin-top:8px"><button class="ok sm" data-stale="entregue">Marcar todos como entregues</button><button class="ghost sm" data-stale="cancelado">Cancelar todos</button></div></div>` : ''; })()}
     <div class="board">${cols.map(([k, t, a, next]) => { const os = soon.filter(o => o.status === k).sort((x, y) => new Date(x.scheduled_for || x.created_at) - new Date(y.scheduled_for || y.created_at));
       return `<div class="col"><h3>${t}<span class="badge">${os.length}</span></h3>${os.map(o => `<div class="tk ${!o.scheduled_for && mins(o.created_at) > 25 ? 'late' : ''}">
         <div class="top"><span>#${o.number}</span><span class="price">${o.scheduled_for ? `<span class="badge b-a">⏰ ${hhmmTz(o.scheduled_for, S.timezone)}</span>` : `${mins(o.created_at)} min`}</span></div>
@@ -855,6 +896,8 @@ async function pOrders(S) {
   app.onclick = attempt(async e => {
     const pr = e.target.closest('button[data-print]');
     if (pr) return printTicket(orders.find(o => o.id === +pr.dataset.print), S.name);
+    const sb2 = e.target.closest('button[data-stale]');
+    if (sb2) { if (sb2.dataset.stale === 'cancelado' && !sure(sb2)) return; const n = await rpc('close_stale_orders', { p_tenant: S.id, p_hours: 12, p_status: sb2.dataset.stale }); toast(`${n} pedido(s) encerrado(s)`); return load(); }
     if (e.target.closest('#printHelp')) return dialog(`<h2>Imprimir sem a janela de impressão</h2>
       <p>Por segurança, o navegador sempre mostra a janela de impressão. No computador da loja dá para pular essa janela e imprimir direto na impressora padrão:</p>
       <ol><li>Defina a impressora térmica como <b>impressora padrão</b> do Windows.</li>
@@ -1166,7 +1209,7 @@ async function pCash(S) {
     app.innerHTML = `<div class="row between"><div><h2>Caixa</h2><p class="lead">Fechamento do dia: confira os valores por forma de pagamento com a maquininha e a gaveta.</p></div>
       <span class="row"><input type="date" id="cDay" value="${day}" max="${today}" style="width:auto"><button class="pri" id="cPrint">Imprimir fechamento</button></span></div>
     <div class="kpis"><div class="kpi"><span class="mut">Total do dia</span><b class="price">${brl(r.total)}</b><span class="mut">${r.orders} pedido(s)</span></div>
-      <div class="kpi"><span class="mut">Taxas de entrega</span><b class="price">${brl(r.fees)}</b></div>
+      <div class="kpi"><span class="mut">Taxas de entrega</span><b class="price">${brl(r.fees)}</b>${r.serviceFees ? `<span class="mut">+ ${brl(r.serviceFees)} de taxa de serviço</span>` : ''}</div>
       <div class="kpi"><span class="mut">Descontos</span><b class="price">${brl(r.discounts)}</b></div>
       <div class="kpi"><span class="mut">Cancelados</span><b>${r.cancelled.count}</b><span class="mut">${brl(r.cancelled.total)}</span></div></div>
     ${r.open ? `<p class="banner warn" style="margin:0 0 16px">${r.open} pedido(s) do dia ainda não foram finalizados (entregues, retirados ou servidos).</p>` : ''}
@@ -1179,7 +1222,7 @@ async function pCash(S) {
   const printCash = () => {
     $('#print').innerHTML = `<div class="tkt"><b class="big">${esc(S.name)}</b><div>FECHAMENTO DE CAIXA</div><div>${day.split('-').reverse().join('/')} · impresso ${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</div><hr>
       ${r.byPayment.map(x => `<div class="li"><span>${esc(x.payment)} (${x.count})</span><span>${brl(x.total)}</span></div>`).join('')}<hr>
-      <div class="li"><span>Subtotal</span><span>${brl(r.subtotal)}</span></div><div class="li"><span>Taxas de entrega</span><span>${brl(r.fees)}</span></div>
+      <div class="li"><span>Subtotal</span><span>${brl(r.subtotal)}</span></div><div class="li"><span>Taxas de entrega</span><span>${brl(r.fees)}</span></div>${r.serviceFees ? `<div class="li"><span>Taxa de serviço</span><span>${brl(r.serviceFees)}</span></div>` : ''}
       <div class="li"><span>Descontos</span><span>-${brl(r.discounts)}</span></div><div class="li big"><b>TOTAL (${r.orders})</b><b>${brl(r.total)}</b></div><hr>
       ${r.byChannel.map(x => `<div class="li"><span>${CHANNEL[x.channel] || x.channel} (${x.count})</span><span>${brl(x.total)}</span></div>`).join('')}
       <div class="li"><span>Cancelados (${r.cancelled.count})</span><span>${brl(r.cancelled.total)}</span></div>
@@ -1242,7 +1285,7 @@ async function pCustomers(S) {
     if (b.id === 'csv') {
       const rows = [['Nome', 'Telefone', 'Endereço', 'Pedidos', 'Total gasto', 'Primeiro pedido', 'Último pedido'],
         ...shown().map(c => [c.name, c.phone, c.address || '', c.orders, fromCents(c.spent), new Date(c.firstOrder).toLocaleDateString('pt-BR'), new Date(c.lastOrder).toLocaleDateString('pt-BR')])];
-      const csv = '\ufeff' + rows.map(r => r.map(x => `"${String(x).replace(/"/g, '""')}"`).join(';')).join('\n');
+      const csv = '\ufeff' + rows.map(r => r.map(csvCell).join(';')).join('\n');
       const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })); a.download = `clientes-${S.slug}.csv`; a.click(); URL.revokeObjectURL(a.href);
     }
   });
@@ -1291,6 +1334,29 @@ async function pUnits(S) {
   await draw();
 }
 
+// Planilha de pedidos do período (para o contador): uma linha por pedido, itens numa coluna. Busca em lotes de 1.000.
+async function exportOrders(S, days) {
+  const from = days === 1 ? new Date(new Date().setHours(0, 0, 0, 0)) : new Date(Date.now() - days * 864e5);
+  const all = [];
+  for (let i = 0; i < 50; i++) {
+    const page = await q(sb.from('orders').select('number, created_at, channel, fulfillment, table_label, customer_name, customer_phone, address, zone_name, payment, payment_status, status, subtotal, fee, service_fee, discount, promo_discount, total, coupon_code, items:order_items(product_name, options_text, qty, unit_price)')
+      .eq('tenant_id', S.id).gte('created_at', from.toISOString()).neq('status', 'pagamento').order('created_at').range(i * 1000, i * 1000 + 999));
+    all.push(...page); if (page.length < 1000) break;
+  }
+  if (!all.length) return toast('Nenhum pedido no período');
+  const FUL = { delivery: 'Entrega', pickup: 'Retirada', table: 'Mesa' };
+  const money = c => fromCents(c || 0);
+  const rows = [['Número', 'Data', 'Hora', 'Canal', 'Tipo', 'Cliente', 'Telefone', 'Endereço', 'Bairro/Mesa', 'Pagamento', 'Pago online', 'Situação', 'Produtos', 'Entrega', 'Serviço', 'Desconto', 'Promoção', 'Total', 'Cupom', 'Itens'],
+    ...all.map(o => { const d = new Date(o.created_at); return [o.number, d.toLocaleDateString('pt-BR'), d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+      CHANNEL[o.channel] || o.channel || 'Site', FUL[o.fulfillment] || o.fulfillment, o.customer_name, o.customer_phone, o.address || '', o.zone_name || '',
+      o.payment, o.payment_status === 'paid' ? 'sim' : 'não', SLABEL[o.status] || o.status, money(o.subtotal), money(o.fee), money(o.service_fee), money(o.discount), money(o.promo_discount), money(o.total), o.coupon_code || '',
+      (o.items || []).map(x => `${x.qty}x ${x.product_name}${x.options_text ? ` (${x.options_text})` : ''}`).join(' | ')]; })];
+  const csv = '\ufeff' + rows.map(r => r.map(csvCell).join(';')).join('\n');
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  a.download = `pedidos-${S.slug}-${days === 1 ? 'hoje' : days + 'dias'}.csv`; a.click(); URL.revokeObjectURL(a.href);
+  toast(`${all.length} pedido(s) na planilha`);
+}
+
 /* ---------- relatórios ---------- */
 async function pReports(S) {
   let days = 7;
@@ -1299,7 +1365,7 @@ async function pReports(S) {
       q(sb.from('order_reviews').select('order_id, rating, comment, reply, created_at, order:orders(number, customer_name)').eq('tenant_id', S.id).order('created_at', { ascending: false }).limit(30)).catch(() => [])]);
     const bars = (rows, label, val, fmt, color) => { const m = Math.max(1, ...rows.map(val)); return rows.map(x => `<div class="bar"><span>${esc(label(x))}</span><i style="width:${val(x) / m * 100}%;${color ? `background:${color}` : ''}"></i><span class="price">${fmt(x)}</span></div>`).join('') || '<p class="empty">Sem dados no período</p>'; };
     app.innerHTML = `<div class="row between"><div><h2>Relatórios</h2><p class="lead">Pedidos não cancelados no período escolhido.</p></div>
-      <span class="row">${[1, 7, 30, 90].map(d => `<button class="sm ${d === days ? 'pri' : 'ghost'}" data-days="${d}">${d === 1 ? 'Hoje' : d + ' dias'}</button>`).join('')}</span></div>
+      <span class="row">${[1, 7, 30, 90].map(d => `<button class="sm ${d === days ? 'pri' : 'ghost'}" data-days="${d}">${d === 1 ? 'Hoje' : d + ' dias'}</button>`).join('')}<button class="ghost sm" id="ordersCsv">Baixar pedidos (CSV)</button></span></div>
     <div class="kpis"><div class="kpi"><span class="mut">Faturamento</span><b class="price">${brl(r.revenue)}</b></div><div class="kpi"><span class="mut">Pedidos</span><b>${r.orders}</b><span class="mut">${r.cancelled} cancelado(s)</span></div>
       <div class="kpi"><span class="mut">Ticket médio</span><b class="price">${brl(r.avgTicket)}</b></div><div class="kpi"><span class="mut">Tempo médio até entregar</span><b>${r.avgDeliveryMin ?? '—'}${r.avgDeliveryMin != null ? ' min' : ''}</b></div></div>
     <div class="two"><div class="panel"><h3>Faturamento por dia</h3><div class="bars">${bars(r.byDay, x => x.d.split('-').reverse().slice(0, 2).join('/'), x => x.revenue, x => brl(x.revenue))}</div></div>
@@ -1313,7 +1379,11 @@ async function pReports(S) {
         <form class="row" data-reply="${x.order_id}" style="flex-wrap:nowrap"><input name="reply" maxlength="500" placeholder="Responder publicamente" value="${esc(x.reply || '')}"><button class="ghost sm">${x.reply ? 'Atualizar' : 'Responder'}</button></form>
         <span class="mut" style="font-size:13px">${new Date(x.created_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</span></div>`).join('') || '<p class="mut" style="margin:0">Nenhuma avaliação ainda. Depois da entrega, o cliente pode avaliar pela página do pedido.</p>'}</div>`;
   };
-  app.onclick = attempt(async e => { const b = e.target.closest('button[data-days]'); if (b) { days = +b.dataset.days; await draw(); } });
+  app.onclick = attempt(async e => {
+    const ex = e.target.closest('#ordersCsv');
+    if (ex) { ex.disabled = true; try { await exportOrders(S, days); } finally { ex.disabled = false; } return; }
+    const b = e.target.closest('button[data-days]'); if (b) { days = +b.dataset.days; await draw(); }
+  });
   app.onsubmit = attempt(async e => { const f = e.target.closest('form[data-reply]'); if (!f) return; e.preventDefault(); await rpc('reply_review', { p_order: +f.dataset.reply, p_reply: f.reply.value }); toast('Resposta salva'); await draw(); });
   cleanup = () => { app.onclick = app.onsubmit = null; };
   await draw();
@@ -1391,7 +1461,7 @@ async function pConfig(S) {
         <p class="mut" style="margin:0">Acima da maior distância, a loja não entrega. Deixe linhas em branco se não precisar.</p></div>
       <h3>Pedidos na mesa (QR Code)</h3>
       <label class="chk"><input type="checkbox" id="mOn" ${st.allow_tables ? 'checked' : ''}> Aceitar pedidos na mesa pelo QR Code</label>
-      <span class="row"><label>Quantidade de mesas<input id="mCount" type="number" min="1" max="200" value="${st.tables_count ?? 10}" style="width:120px"></label><button type="button" class="ghost" id="mPrint" ${st.allow_tables ? '' : 'disabled'}>Imprimir QR Codes das mesas</button></span>
+      <span class="row"><label>Quantidade de mesas<input id="mCount" type="number" min="1" max="200" value="${st.tables_count ?? 10}" style="width:120px"></label>${'service_percent' in st ? `<label>Taxa de serviço (%)<input id="mSvc" type="number" min="0" max="20" value="${st.service_percent || 0}" style="width:120px" title="0 = sem taxa. O cliente pode desmarcar."></label>` : ''}<button type="button" class="ghost" id="mPrint" ${st.allow_tables ? '' : 'disabled'}>Imprimir QR Codes das mesas</button></span>
       <p class="mut" style="margin:0">Cada mesa recebe um QR Code. O cliente escaneia, faz o pedido pelo celular e paga no caixa (ou por Pix, se ativo). O pedido chega na cozinha marcado com o número da mesa.</p>
       <h3>Programa de fidelidade</h3>
       <label class="chk"><input type="checkbox" id="lOn" ${st.loyalty_enabled ? 'checked' : ''}> Dar desconto para clientes fiéis</label>
@@ -1569,7 +1639,8 @@ async function pConfig(S) {
       if (!(every >= 2 && every <= 50) || !(pct >= 1 && pct <= 50)) throw new Error('Fidelidade: a cada 2 a 50 pedidos, desconto de 1% a 50%');
       await q(sb.from('tenants').update({ delivery_mode: mode, lat: m ? +m[1] : null, lng: m ? +m[2] : null, distance_tiers: tiers,
         free_delivery_above: above, loyalty_enabled: $('#lOn').checked, loyalty_every: every, loyalty_percent: pct,
-        allow_tables: $('#mOn').checked, tables_count: Math.max(1, Math.min(200, +$('#mCount').value || 10)) }).eq('id', S.id));
+        allow_tables: $('#mOn').checked, tables_count: Math.max(1, Math.min(200, +$('#mCount').value || 10)),
+        ...($('#mSvc') ? { service_percent: Math.max(0, Math.min(20, Math.round(+$('#mSvc').value || 0))) } : {}) }).eq('id', S.id));
       await refreshBrand();
     }
     if (id === 'fDom') { const d = await rpc('set_custom_domain', { p_tenant: S.id, p_domain: $('#dDom').value }); toast(d ? `Domínio salvo: ${d}. Agora avise o suporte para ativar.` : 'Domínio removido'); await draw(); return; }
@@ -1613,7 +1684,8 @@ function billLabel(t) {
 const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql',
   '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql',
   '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql',
-  '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql'];
+  '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql',
+  '20261127000000_mesa_servico_pedidos_antigos.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };
