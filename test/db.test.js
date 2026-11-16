@@ -29,7 +29,7 @@ before(() => {
   psql(['-d', 'postgres', '-c', `drop database if exists ${DB}`]);
   psql(['-d', 'postgres', '-c', `create database ${DB}`]);
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -615,9 +615,25 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 11);
+  assert.equal(st.length, 12);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
   finally { sql(`alter table orders rename column scheduled_tmp to scheduled_for`); }
+});
+
+test('saúde da plataforma: só o administrador vê; traz dias, lojas paradas e testes acabando', () => {
+  fails(`select platform_health()`, U.pizza, /Sem permissão/);
+  fails(`select platform_health()`, null, /permission denied/);
+  const u = randomUUID(); sql(`insert into auth.users (id, email) values ('${u}', 'parada@loja.test')`);
+  const idleId = sql(`select (create_my_tenant('Loja Parada', 'pizzaria', 'parada')).id`, u);
+  sql(`update tenants set created_at = now() - interval '20 days' where id = '${idleId}'`);
+  sql(`update tenants set billing_status = 'trial', trial_ends_at = now() + interval '2 days' where id = '${pizzaId}'`);
+  const h = json(`platform_health(14)`, U.admin);
+  assert.equal(h.days.length, 14);
+  assert.ok(h.days.every(d => 'orders' in d && 'signups' in d));
+  assert.ok(h.idle.some(t => t.id === idleId), 'loja sem pedidos há 20 dias aparece como parada');
+  assert.ok(!h.idle.some(t => t.id === pizzaId), 'loja com pedidos recentes não aparece');
+  assert.ok(h.trialsEnding.some(t => t.id === pizzaId));
+  assert.ok(h.activeStores7d >= 1);
 });

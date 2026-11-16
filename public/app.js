@@ -517,6 +517,13 @@ async function vShop(slug) {
     const pr = promoDiscount(PROMOS, cart, byId, S.timezone, when), promo = Math.min(pr.total, sub);
     return { sub, fee, disc, promo, promoNames: pr.names, total: Math.max(0, sub + fee - disc - promo), pickup, zone: z, freeShip, feeKnown: pickup || freeShip || !DIST || !!geo?.quote?.inArea };
   };
+  // Sugestões no carrinho: o item mais barato de cada categoria que ainda não está no pedido (bebida, sobremesa, porção…).
+  const suggest = () => {
+    if (!cart.length || !CAN_ORDER) return [];
+    const inCart = new Set(cart.map(c => products.find(p => p.id === c.productId)?.category));
+    return cats.filter(c => !inCart.has(c)).map(c => products.filter(p => p.category === c && p.stock !== 0).sort((x, y) => x.price - y.price)[0])
+      .filter(Boolean).sort((x, y) => x.price - y.price).slice(0, 3);
+  };
   const paint = () => {
     cat = cats.includes(cat) ? cat : cats[0];
     const list = products.filter(p => p.category === cat), count = cart.reduce((t, c) => t + c.qty, 0);
@@ -536,6 +543,7 @@ async function vShop(slug) {
     </section>
     <aside class="cart" aria-label="Carrinho"><h3>Seu pedido</h3>
       ${cart.length ? cart.map((x, i) => `<div class="ci"><div><b>${x.qty}× ${esc(x.name)}</b>${x.optText ? `<br><span class="mut">${esc(x.optText)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}<br><button class="ghost sm" data-dec="${i}" aria-label="Diminuir">−</button> <button class="ghost sm" data-inc="${i}" aria-label="Aumentar">+</button></div><span class="price">${brl(x.qty * x.unit)}</span></div>`).join('') : `<p class="empty">Carrinho vazio.</p>${againItems().length ? `<button class="ghost" id="again" style="width:100%">↻ Pedir de novo<br><span class="mut" style="font-weight:400">${esc(againItems().map(x => `${x.qty}× ${x.name}`).join(', ').slice(0, 90))}</span></button>` : ''}`}
+      ${suggest().length ? `<div class="sugg"><span class="mut">Que tal adicionar?</span>${suggest().map(p => `<button class="ghost sm" data-add="${p.id}">+ ${esc(p.name)} <span class="mut">${brl(p.price)}</span></button>`).join('')}</div>` : ''}
       ${TABLE ? `<p style="margin:0">Pedido para a <b>Mesa ${esc(TABLE)}</b></p>` : `<label>Como receber<select id="cMode"><option value="delivery">Entrega</option>${S.allow_pickup ? '<option value="pickup">Retirar na loja</option>' : ''}</select></label>`}
       <label id="zWrap" ${DIST || TABLE ? 'hidden' : ''}>Bairro<select id="cZone">${zones.map(z => `<option value="${z.id}">${esc(z.name)} · ${z.fee ? brl(z.fee) : 'grátis'}</option>`).join('')}</select></label>
       <label>Cupom<span class="row" style="flex-wrap:nowrap"><input id="cCup" placeholder="Ex.: PRIMEIRA10" value="${esc(coupon?.code || '')}"><button class="ghost" id="cupBtn">Aplicar</button></span></label>
@@ -769,6 +777,18 @@ async function pOrders(S) {
     fresh.forEach((o, i) => setTimeout(() => printTicket(o, S.name), i * 1500));
   };
   const load = async () => { orders = await fetchOrders(S.id, ['novo', 'preparo', 'pronto']); draw(); printArrivals(); };
+  // Aviso de pedido parado: novo sem aceitar há 5+ min, ou pronto esperando há 15+ min.
+  let lastNag = 0;
+  const stuck = () => {
+    const waiting = orders.filter(o => o.status === 'novo' && !(o.scheduled_for && new Date(o.scheduled_for) - Date.now() > 60 * 60000) && mins(o.created_at) >= 5);
+    const ready = orders.filter(o => o.status === 'pronto' && mins(o.updated_at) >= 15);
+    const box = $('#stuck'); if (!box) return;
+    box.innerHTML = [waiting.length ? `⚠ ${waiting.length === 1 ? `O pedido #${waiting[0].number} está` : `${waiting.length} pedidos estão`} esperando para ser aceito há mais de 5 minutos.` : '',
+      ready.length ? `⏱ ${ready.length === 1 ? `O pedido #${ready[0].number} está pronto` : `${ready.length} pedidos estão prontos`} há mais de 15 minutos${ready.some(o => o.fulfillment === 'delivery') ? ' esperando entregador' : ''}.` : ''].filter(Boolean).map(t => `<div>${t}</div>`).join('');
+    box.hidden = !box.innerHTML;
+    if (waiting.length && Date.now() - lastNag > 60000) { lastNag = Date.now(); beep(); }
+  };
+  const tick = setInterval(() => { if (!app.contains(document.activeElement) || document.activeElement.tagName !== 'SELECT') draw(); }, 30000);
   const draw = () => {
     const cols = [['novo', 'Novos', 'Aceitar', 'preparo'], ['preparo', 'Em preparo', 'Marcar pronto', 'pronto'], ['pronto', 'Prontos', '', '']];
     const isLater = o => o.scheduled_for && o.status === 'novo' && new Date(o.scheduled_for) - Date.now() > 60 * 60000;
@@ -777,6 +797,7 @@ async function pOrders(S) {
       <span class="row"><label class="chk" style="gap:6px">Imprimir comanda <select id="printMode" style="width:auto;min-height:36px;padding:4px 8px">${[['off', 'só no botão'], ['accept', 'ao aceitar'], ['arrive', 'assim que chegar']].map(([v, t]) => `<option value="${v}" ${v === pmode ? 'selected' : ''}>${t}</option>`).join('')}</select></label><button class="ghost sm" id="printHelp" title="Imprimir sem abrir a janela">?</button><a class="btn ghost" href="/painel/kds" data-link>Tela da cozinha</a><a class="btn pri" href="/painel/novo" data-link>+ Novo pedido</a></span></div>
     ${later.length ? `<div class="panel sched"><h3>Agendados para mais tarde (${later.length})</h3><div class="row">${later.map(o => `<span class="badge b-a" title="${esc(o.customer_name)}">${esc(fmtWhen(o.scheduled_for, S.timezone))} · #${o.number} · ${esc(where(o))}</span>`).join('')}</div>
       <p class="mut" style="margin:0">Eles entram nas colunas 1 hora antes do horário marcado.</p></div>` : ''}
+    <div class="stuck" id="stuck" role="alert" hidden></div>
     <div class="board">${cols.map(([k, t, a, next]) => { const os = soon.filter(o => o.status === k).sort((x, y) => new Date(x.scheduled_for || x.created_at) - new Date(y.scheduled_for || y.created_at));
       return `<div class="col"><h3>${t}<span class="badge">${os.length}</span></h3>${os.map(o => `<div class="tk ${!o.scheduled_for && mins(o.created_at) > 25 ? 'late' : ''}">
         <div class="top"><span>#${o.number}</span><span class="price">${o.scheduled_for ? `<span class="badge b-a">⏰ ${hhmmTz(o.scheduled_for, S.timezone)}</span>` : `${mins(o.created_at)} min`}</span></div>
@@ -786,6 +807,7 @@ async function pOrders(S) {
         <div class="row">${a ? `<button class="ok sm" data-st="${next}" data-id="${o.id}">${a}</button>` : o.fulfillment === 'delivery' ? '<span class="badge b-g">Aguardando entregador</span>' : `<button class="ok sm" data-st="entregue" data-id="${o.id}">${o.fulfillment === 'table' ? 'Servido' : 'Cliente retirou'}</button>`}
         ${k !== 'pronto' ? `<button class="ghost sm" data-st="cancelado" data-id="${o.id}">${k === 'novo' ? 'Recusar' : 'Cancelar'}</button>` : ''}
         <button class="ghost sm" data-print="${o.id}">Imprimir</button>${waBtn(waLink(o.customer_phone, customerMsg(o, S.name)))}</div></div>`).join('') || '<p class="empty">Nada aqui</p>'}</div>`; }).join('')}</div>`;
+    stuck();
   };
   app.onclick = attempt(async e => {
     const pr = e.target.closest('button[data-print]');
@@ -813,21 +835,39 @@ async function pOrders(S) {
     if (p?.new?.status === 'novo' && !orders.some(o => o.id === p.new.id)) { beep(); toast(`Novo pedido #${p.new.number}${p.new.payment_status === 'paid' ? ' (Pix pago)' : ''}`); }
     load().catch(() => {});
   });
-  cleanup = () => { stop(); app.onclick = app.onchange = null; };
+  cleanup = () => { stop(); clearInterval(tick); app.onclick = app.onchange = null; };
   await load();
 }
 
+// Rota de entregas: ordena as paradas pela mais próxima (a partir da loja) e monta o link do Google Maps.
+const kmBetween = (a, b) => { const r = x => x * Math.PI / 180, dLat = r(b[0] - a[0]), dLng = r(b[1] - a[1]);
+  return 12742 * Math.asin(Math.sqrt(Math.sin(dLat / 2) ** 2 + Math.cos(r(a[0])) * Math.cos(r(b[0])) * Math.sin(dLng / 2) ** 2)); };
+function planRoute(S, os) {
+  const geo = os.filter(o => o.dest_lat != null && o.dest_lng != null), rest = os.filter(o => o.dest_lat == null || o.dest_lng == null);
+  const out = []; let at = S.lat != null ? [S.lat, S.lng] : geo[0] ? [geo[0].dest_lat, geo[0].dest_lng] : null;
+  while (geo.length) { let bi = 0; geo.forEach((o, i) => { if (kmBetween(at, [o.dest_lat, o.dest_lng]) < kmBetween(at, [geo[bi].dest_lat, geo[bi].dest_lng])) bi = i; });
+    const [o] = geo.splice(bi, 1); out.push(o); at = [o.dest_lat, o.dest_lng]; }
+  // Sem coordenadas: agrupa pelo bairro/zona.
+  return [...out, ...rest.sort((a, b) => String(a.zone_name).localeCompare(String(b.zone_name)))];
+}
+const stopOf = o => o.dest_lat != null ? `${o.dest_lat},${o.dest_lng}` : / km$/.test(o.zone_name) ? o.address : `${o.address}, ${o.zone_name}`;
+const routeUrl = (S, os) => { const pts = os.map(stopOf), origin = S.lat != null ? `${S.lat},${S.lng}` : (S.address || '');
+  return `https://www.google.com/maps/dir/?api=1&travelmode=driving${origin ? `&origin=${encodeURIComponent(origin)}` : ''}&destination=${encodeURIComponent(pts.at(-1))}${pts.length > 1 ? `&waypoints=${encodeURIComponent(pts.slice(0, -1).join('|'))}` : ''}`; };
+const routeMsg = (S, os) => `Rota com ${os.length} entregas — ${S.name}\n\n${os.map((o, i) => `${i + 1}) #${o.number} · ${o.customer_name} · ${o.customer_phone}\n${o.address} — ${o.zone_name}\n${o.payment_status === 'paid' ? `JÁ PAGO (${o.payment}) · não cobrar` : `Cobrar: ${o.payment} · ${brl(o.total)}${o.change_for ? ` (troco p/ ${brl(o.change_for)})` : ''}`}`).join('\n\n')}\n\nRota no mapa: ${routeUrl(S, os)}`;
+
 async function pDelivery(S) {
   let ready = [], route = [], couriers = [];
+  const picked = new Set();
   const load = async () => {
     [ready, route, couriers] = await Promise.all([fetchOrders(S.id, ['pronto']), fetchOrders(S.id, ['rota']), q(sb.from('couriers').select('id, tenant_id, name, phone, active').eq('tenant_id', S.id).order('id'))]);
     draw();
   };
   const draw = () => {
     const free = couriers.filter(c => c.active);
-    app.innerHTML = `<h2>Entregas</h2><p class="lead">Despache os pedidos prontos e confirme quando forem entregues.</p>
-    <div class="two"><div class="panel"><h3>Prontos (${ready.length})</h3>
-      ${ready.map(o => `<div class="tk"><div class="top"><span>#${o.number} · ${esc(o.customer_name)}</span><span class="price">${brl(o.total)}</span></div>
+    const dels = ready.filter(o => o.fulfillment === 'delivery'); [...picked].forEach(id => dels.some(o => o.id === id) || picked.delete(id));
+    app.innerHTML = `<h2>Entregas</h2><p class="lead">Despache os pedidos prontos e confirme quando forem entregues. Para levar vários de uma vez, marque os pedidos e monte uma rota.</p>
+    <div class="two"><div class="panel"><div class="row between"><h3>Prontos (${ready.length})</h3>${dels.length >= 2 ? `<span class="row"><button class="ghost sm" id="pickAll">${picked.size === dels.length ? 'Desmarcar todos' : 'Marcar todas as entregas'}</button><button class="pri sm" id="mkRoute" ${picked.size >= 2 ? '' : 'disabled'}>Montar rota${picked.size ? ` (${picked.size})` : ''}</button></span>` : ''}</div>
+      ${ready.map(o => `<div class="tk"><div class="top"><span>${o.fulfillment === 'delivery' && dels.length >= 2 ? `<input type="checkbox" data-pick="${o.id}" ${picked.has(o.id) ? 'checked' : ''} aria-label="Incluir na rota" style="vertical-align:middle;margin-right:6px">` : ''}#${o.number} · ${esc(o.customer_name)}</span><span class="price">${brl(o.total)}</span></div>
         <span class="mut">${o.fulfillment === 'pickup' ? 'Retirada na loja' : o.fulfillment === 'table' ? `Mesa ${esc(o.table_label)}` : `${esc(o.address)} — ${esc(o.zone_name)}`} · ${esc(o.payment)}${o.change_for ? ` (troco p/ ${brl(o.change_for)})` : ''} · ${esc(o.customer_phone)}</span>
         ${o.fulfillment !== 'delivery' ? `<button class="ok sm" data-st="entregue" data-id="${o.id}">${o.fulfillment === 'table' ? 'Servido na mesa' : 'Cliente retirou'}</button>` : free.length ? `<span class="row" style="flex-wrap:nowrap"><select id="c${o.id}" aria-label="Entregador">${free.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><button class="pri sm" data-st="rota" data-id="${o.id}">Despachar</button></span>` : '<span class="badge b-a">Cadastre ou ative um entregador</span>'}
         <span class="row">${waBtn(waLink(o.customer_phone, customerMsg(o, S.name)), 'Avisar cliente')}${o.fulfillment === 'delivery' ? `<a class="btn ghost sm" href="${esc(mapsUrl(o))}" target="_blank" rel="noopener">Mapa</a>` : ''}</span></div>`).join('') || '<p class="empty">Nenhum pedido pronto</p>'}
@@ -837,8 +877,32 @@ async function pDelivery(S) {
       <h3>Entregadores</h3><table><tbody>${couriers.map(c => `<tr><td>${esc(c.name)}<br><span class="mut">${esc(c.phone)}</span></td><td>${route.some(o => o.courier_id === c.id) ? '<span class="badge b-a">Em rota</span>' : c.active ? '<span class="badge b-g">Disponível</span>' : '<span class="badge">Folga</span>'}</td><td class="n"><button class="ghost sm" data-cour="${c.id}">${c.active ? 'Dar folga' : 'Ativar'}</button></td></tr>`).join('') || '<tr><td class="mut">Cadastre entregadores em Configurações.</td></tr>'}</tbody></table>
     </div></div>`;
   };
+  const openRoute = () => {
+    const os = planRoute(S, ready.filter(o => picked.has(o.id))), free = couriers.filter(c => c.active);
+    if (!free.length) return toast('Cadastre ou ative um entregador primeiro');
+    const noGeo = os.filter(o => o.dest_lat == null).length;
+    dialog(`<h2>Rota com ${os.length} entregas</h2>
+      <p class="mut" style="margin:0">${noGeo === os.length ? 'Ordem pelo bairro (os endereços não têm localização exata).' : `Ordem pela entrega mais próxima, saindo da loja${noGeo ? `. ${noGeo === 1 ? '1 endereço sem localização exata ficou' : `${noGeo} endereços sem localização exata ficaram`} no fim, agrupados por bairro` : ''}.`}</p>
+      <ol class="stops">${os.map(o => `<li><b>#${o.number} · ${esc(o.customer_name)}</b><br><span class="mut">${esc(o.address)} — ${esc(o.zone_name)} · ${o.payment_status === 'paid' ? 'já pago' : `cobrar ${brl(o.total)} (${esc(o.payment)})`}</span></li>`).join('')}</ol>
+      <a class="btn ghost" href="${esc(routeUrl(S, os))}" target="_blank" rel="noopener">Ver rota no Google Maps</a>
+      <label>Entregador<select id="rCour">${free.map(c => `<option value="${c.id}">${esc(c.name)}${route.some(o => o.courier_id === c.id) ? ' (em rota)' : ''}</option>`).join('')}</select></label>
+      <div id="rDone"></div>
+      <div class="row"><button class="pri" id="rGo">Despachar ${os.length} pedidos</button><button class="ghost" data-close>Cancelar</button></div>`);
+    $('#dlgBody').onclick = attempt(async ev => {
+      const go = ev.target.closest('#rGo'); if (!go) return;
+      go.disabled = true; const cid = +$('#rCour').value, c = couriers.find(x => x.id === cid);
+      try { for (const o of os) await setStatus(o.id, 'rota', cid); }
+      finally { picked.clear(); load().catch(() => {}); }
+      const wa = waLink(c.phone, routeMsg(S, os));
+      $('#rDone').innerHTML = `<p class="banner" style="text-align:left;border-radius:12px">✓ ${os.length} pedidos despachados com <b>${esc(c.name)}</b>.</p>`;
+      go.outerHTML = wa ? `<a class="btn pri" href="${esc(wa)}" target="_blank" rel="noopener">Enviar rota ao entregador no WhatsApp</a>` : '<span class="mut">O entregador não tem WhatsApp válido cadastrado.</span>';
+    });
+  };
+  app.onchange = e => { const id = e.target.dataset.pick; if (!id) return; e.target.checked ? picked.add(+id) : picked.delete(+id); draw(); };
   app.onclick = attempt(async e => {
     const b = e.target.closest('button'); if (!b) return;
+    if (b.id === 'pickAll') { const dels = ready.filter(o => o.fulfillment === 'delivery'); picked.size === dels.length ? picked.clear() : dels.forEach(o => picked.add(o.id)); return draw(); }
+    if (b.id === 'mkRoute') return openRoute();
     if (b.dataset.st) {
       await setStatus(+b.dataset.id, b.dataset.st, b.dataset.st === 'rota' ? +$('#c' + b.dataset.id).value : null);
       if (b.dataset.st === 'rota') toast('Despachado. Use “Enviar ao entregador” para mandar o endereço pelo WhatsApp.');
@@ -847,7 +911,7 @@ async function pDelivery(S) {
     await load();
   });
   const stop = live(S.id, () => load().catch(() => {}));
-  cleanup = () => { stop(); app.onclick = null; };
+  cleanup = () => { stop(); app.onclick = app.onchange = null; };
   await load();
 }
 
@@ -1448,20 +1512,47 @@ function billLabel(t) {
   const lbl = { trial: `Teste até ${d(t.trialEndsAt)}`, active: `Ativa até ${d(t.paidUntil)}`, past_due: 'Pagamento com problema', canceled: 'Cancelada', free: 'Grátis' }[t.billingStatus];
   return `<span class="badge ${t.canSell ? (t.billingStatus === 'trial' ? '' : 'b-g') : 'b-r'}">${lbl}${t.canSell ? '' : ' · bloqueada'}</span>`;
 }
+// Migrações que o site espera encontrar no banco (a tela Plataforma avisa as que faltam).
+const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql',
+  '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql',
+  '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql'];
+const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
+  return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
+    <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };
 async function vPlatform() {
+  let hDays = 30;
   setColor('#1d1716'); $('#bName').textContent = 'Balcão';
   header('<a class="on" href="/plataforma" data-link>Plataforma</a>' + (ME.tenant ? '<a href="/painel" data-link>Minha loja</a>' : ''));
   const plans = await q(sb.from('plans').select('name').order('sort'));
   const draw = async () => {
-    const [o, sch] = await Promise.all([rpc('platform_overview'), rpc('schema_status').catch(() => null)]);
-    const missing = sch ? sch.filter(m => !m.ok) : null;
+    const [o, sch, h] = await Promise.all([rpc('platform_overview'), rpc('schema_status').catch(() => null), rpc('platform_health', { p_days: hDays }).catch(() => null)]);
+    const missing = sch ? MIGRATIONS.map((file, i) => ({ n: i + 1, file, ok: sch.find(m => m.file === file)?.ok ?? false })).filter(m => !m.ok) : null;
     const dbBox = !missing ? `<div class="banner warn" style="margin-bottom:16px;text-align:left;border:1px solid var(--line);border-radius:12px"><b>Não consegui conferir o banco.</b> Rode no SQL Editor do Supabase a migração <code>20261123000000_checagem.sql</code> (e as anteriores que faltarem). Depois recarregue esta página.</div>`
       : missing.length ? `<div class="banner warn" style="margin-bottom:16px;text-align:left;border:1px solid var(--line);border-radius:12px"><b>Faltam ${missing.length} migraç${missing.length > 1 ? 'ões' : 'ão'} no banco.</b> Rode no SQL Editor do Supabase, nesta ordem, cada uma numa consulta nova:<ol style="margin:6px 0 0">${missing.map(m => `<li><code>${esc(m.file)}</code></li>`).join('')}</ol>Os arquivos estão na pasta <code>supabase/migrations</code> do GitHub. Enquanto faltarem, algumas telas mostram erro.</div>`
-      : `<p class="mut" style="margin:-8px 0 16px">✓ Banco de dados em dia (${sch.length} migrações).</p>`;
+      : `<p class="mut" style="margin:-8px 0 16px">✓ Banco de dados em dia (${MIGRATIONS.length} migrações).</p>`;
+    const sum = (k) => h ? h.days.reduce((a, x) => a + x[k], 0) : 0;
+    const mail = t => t.ownerEmail ? `<a href="mailto:${esc(t.ownerEmail)}">${esc(t.ownerEmail)}</a>` : '<span class="mut">—</span>';
+    const ago = d => d ? `${Math.floor(mins(d) / 1440)} dias` : 'nunca';
+    const healthBox = !h ? '' : `<div class="row between" style="margin:8px 0 12px"><h3 style="margin:0">Saúde da plataforma</h3>
+        <span class="row">${[7, 30, 90].map(d => `<button class="sm ${d === hDays ? 'pri' : 'ghost'}" data-hdays="${d}">${d} dias</button>`).join('')}</span></div>
+      <div class="kpis"><div class="kpi"><span class="mut">Pedidos no período</span><b>${sum('orders')}</b><span class="mut">${brl(sum('gmv'))} vendidos</span></div>
+        <div class="kpi"><span class="mut">Lojas com pedido (7 dias)</span><b>${h.activeStores7d}</b><span class="mut">de ${o.tenants.filter(t => t.active).length} ativas</span></div>
+        <div class="kpi"><span class="mut">Novos cadastros</span><b>${sum('signups')}</b><span class="mut">no período</span></div>
+        <div class="kpi"><span class="mut">Precisam de atenção</span><b>${h.pastDue.length + h.trialsEnding.length}</b><span class="mut">${h.pastDue.length} cobrança(s) · ${h.trialsEnding.length} teste(s) acabando</span></div></div>
+      <div class="two" style="margin-bottom:20px"><div class="panel"><h3>Pedidos por dia</h3>${sparkCols(h.days, x => x.orders, x => `${x.orders} pedidos · ${brl(x.gmv)}`)}</div>
+        <div class="panel"><h3>Cadastros por dia</h3>${sparkCols(h.days, x => x.signups, x => `${x.signups} cadastro(s)`, 'var(--basil)')}</div>
+        <div class="panel"><h3>Testes acabando (${h.trialsEnding.length})</h3><p class="mut" style="margin:0 0 8px">Bom momento para oferecer ajuda e converter em assinatura.</p>
+          ${h.trialsEnding.map(t => `<div class="ci"><span><a href="/loja/${esc(t.slug)}" target="_blank" rel="noopener">${esc(t.name)}</a><br>${mail(t)}</span><span class="mut" style="text-align:right">${new Date(t.trialEndsAt) < Date.now() ? '<span class="badge b-r">acabou</span>' : `acaba ${new Date(t.trialEndsAt).toLocaleDateString('pt-BR')}`}<br>último pedido: ${ago(t.lastOrder)}</span></div>`).join('') || '<p class="empty">Nenhum</p>'}
+          <h3>Cobrança com problema (${h.pastDue.length})</h3>
+          ${h.pastDue.map(t => `<div class="ci"><span><a href="/loja/${esc(t.slug)}" target="_blank" rel="noopener">${esc(t.name)}</a><br>${mail(t)}</span><span><span class="badge ${t.status === 'canceled' ? 'b-r' : 'b-a'}">${t.status === 'canceled' ? 'Cancelada' : 'Pagamento falhou'}</span></span></div>`).join('') || '<p class="empty">Nenhuma</p>'}</div>
+        <div class="panel"><h3>Lojas paradas (${h.idle.length})</h3><p class="mut" style="margin:0 0 8px">Ativas, mas sem nenhum pedido há mais de 7 dias. Risco de cancelar.</p>
+          ${h.idle.slice(0, 15).map(t => `<div class="ci"><span><a href="/loja/${esc(t.slug)}" target="_blank" rel="noopener">${esc(t.name)}</a><br>${mail(t)}</span><span class="mut" style="text-align:right">${t.lastOrder ? `sem pedir há ${ago(t.lastOrder)}` : `nenhum pedido<br>cadastro há ${ago(t.createdAt)}`}</span></div>`).join('') || '<p class="empty">Nenhuma. Todas vendendo!</p>'}
+          ${h.idle.length > 15 ? `<p class="mut">e mais ${h.idle.length - 15}…</p>` : ''}</div></div>`;
     app.innerHTML = `<h2>Plataforma</h2><p class="lead">Todas as empresas assinantes. Novas empresas se cadastram sozinhas em <a href="/entrar/cadastro" data-link>/entrar/cadastro</a>.</p>
     ${dbBox}
     <div class="kpis"><div class="kpi"><span class="mut">Empresas</span><b>${o.tenants.length}</b><span class="mut">${o.paying ?? 0} pagando · ${o.trials ?? 0} em teste</span></div><div class="kpi"><span class="mut">Receita mensal (MRR)</span><b class="price">${brl(o.mrr)}</b><span class="mut">+ ${brl(o.potentialMrr || 0)} se os testes virarem assinatura</span></div>
       <div class="kpi"><span class="mut">Vendido pelas lojas</span><b class="price">${brl(o.gmv)}</b></div><div class="kpi"><span class="mut">Pedidos</span><b>${o.orders}</b></div></div>
+    ${healthBox}
     <div class="panel"><h3>Empresas</h3><div class="scroll"><table class="stack"><thead><tr><th>Empresa</th><th>Segmento</th><th>Dono</th><th>Plano</th><th>Assinatura</th><th class="n">Pedidos</th><th class="n">Vendas</th><th></th></tr></thead><tbody>
       ${o.tenants.map(t => `<tr><td data-l="Empresa"><span class="dot" style="background:${esc(t.color)}"></span><a href="/loja/${esc(t.slug)}" target="_blank" rel="noopener">${esc(t.name)}</a> ${t.active ? '' : '<span class="badge b-r">Suspensa</span>'}</td><td data-l="Segmento">${esc(t.segmentName)}</td><td data-l="Dono"><span class="mut">${esc(t.ownerEmail || '—')}</span></td>
         <td data-l="Plano"><select data-plan="${t.id}" aria-label="Plano">${plans.map(p => `<option ${p.name === t.plan ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></td>
@@ -1469,6 +1560,7 @@ async function vPlatform() {
         <td data-l="Pedidos" class="n">${t.orders}</td><td data-l="Vendas" class="n price">${brl(t.revenue)}</td><td data-l=""><button class="ghost sm" data-act="${t.id}" data-on="${t.active ? 1 : 0}">${t.active ? 'Suspender' : 'Reativar'}</button></td></tr>`).join('') || '<tr><td class="mut">Nenhuma empresa ainda.</td></tr>'}</tbody></table></div></div>`;
   };
   app.onclick = attempt(async e => {
+    const hd = e.target.closest('button[data-hdays]'); if (hd) { hDays = +hd.dataset.hdays; return draw(); }
     const bb = e.target.closest('button[data-bill]');
     if (bb) { await rpc('platform_set_billing', { p_tenant: bb.dataset.bill, p_status: bb.dataset.st, p_add_days: bb.dataset.days ? +bb.dataset.days : null }); toast('Assinatura atualizada'); return draw(); }
     const b = e.target.closest('button[data-act]'); if (!b) return;

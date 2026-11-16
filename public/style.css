@@ -192,3 +192,12 @@ body.kds-on main{max-width:none;padding:0}
 .promo{background:#2f8f461f;color:var(--basil);border:1px solid #2f8f4655;border-radius:99px;padding:6px 12px;font-weight:700;font-size:14px}
 .promo.off{opacity:.55}
 .promo-row{border-bottom:1px solid var(--line);padding-bottom:8px}
+.spark{display:flex;align-items:flex-end;gap:2px;height:120px;margin:4px 0}
+.spark i{flex:1;background:var(--red);border-radius:3px 3px 0 0;min-width:2px}
+.spark i:hover{opacity:.7}
+.sugg{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:10px;border:1px dashed var(--line);border-radius:12px}
+.sugg .mut{width:100%;font-size:13px}
+.sugg button{white-space:nowrap;display:inline-flex;gap:6px;align-items:center}
+.sugg button .mut{width:auto}
+.stuck{background:#d6282826;border:1px solid #d6282866;border-radius:12px;padding:10px 14px;margin-bottom:14px;font-weight:600;display:grid;gap:4px}
+.stops{margin:12px 0;padding-left:22px;display:grid;gap:8px}
