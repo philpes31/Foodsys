@@ -29,7 +29,7 @@ before(() => {
   psql(['-d', 'postgres', '-c', `drop database if exists ${DB}`]);
   psql(['-d', 'postgres', '-c', `create database ${DB}`]);
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -615,7 +615,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 12);
+  assert.equal(st.length, 13);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -636,4 +636,63 @@ test('saúde da plataforma: só o administrador vê; traz dias, lojas paradas e 
   assert.ok(!h.idle.some(t => t.id === pizzaId), 'loja com pedidos recentes não aparece');
   assert.ok(h.trialsEnding.some(t => t.id === pizzaId));
   assert.ok(h.activeStores7d >= 1);
+});
+
+test('cartão online: só com token, pedido espera aprovação, recusa não cancela e o painel não lança', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', allow_pickup = true, min_order = 0 where id = '${pizzaId}'`);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const body = { customer, fulfillment: 'pickup', payment: 'Cartão online', items: [{ productId: p.id, qty: 1 }] };
+  assert.throws(() => order('forno-da-vila', body), /não aceita cartão online/);
+  fails(`select set_card_online('${pizzaId}', true)`, U.burger, /Sem permissão/);
+  assert.equal(json(`set_card_online('${pizzaId}', true)`, U.pizza).cardEnabled, true);
+  const r = order('forno-da-vila', body);
+  assert.deepEqual([r.card, r.pix], [true, false]);
+  const o = json(`pix_order('${r.code}')`, 'service');
+  assert.deepEqual([o.status, o.paymentStatus, o.cardOnline, o.storeSlug], ['pagamento', 'pending', true, 'forno-da-vila']);
+  // cartão recusado: o pedido continua esperando outra tentativa
+  assert.equal(sql(`select pix_apply('${pizzaId}', ${o.id}, 'MP-A', 'rejected', ${r.total})`, 'service'), 'pagamento');
+  // outra tentativa (outro pagamento) aprovada
+  assert.equal(sql(`select pix_apply('${pizzaId}', ${o.id}, 'MP-B', 'approved', ${r.total})`, 'service'), 'novo');
+  assert.equal(sql(`select pix_apply('${pizzaId}', ${o.id}, 'MP-C', 'approved', ${r.total})`, 'service'), 'novo');
+  assert.equal(json(`track_order('${r.code}')`, null).order.paymentStatus, 'paid');
+  fails(`select staff_place_order('${pizzaId}', '${JSON.stringify({ ...body, channel: 'balcao' })}'::jsonb)`, U.pizza, /No painel/);
+  sql(`select set_card_online('${pizzaId}', false)`, U.pizza);
+});
+
+test('domínio próprio: validação, unicidade e busca pelo endereço', () => {
+  fails(`select set_custom_domain('${pizzaId}', 'x.com')`, U.burger, /Sem permissão/);
+  fails(`select set_custom_domain('${pizzaId}', 'não é domínio')`, U.pizza, /Domínio inválido/);
+  fails(`select set_custom_domain('${pizzaId}', 'loja.vercel.app')`, U.pizza, /domínio seu/);
+  assert.equal(sql(`select set_custom_domain('${pizzaId}', 'https://Pedidos.FornoDaVila.com.br/')`, U.pizza), 'pedidos.fornodavila.com.br');
+  const u2 = randomUUID(); sql(`insert into auth.users (id, email) values ('${u2}', 'dominio@loja.test')`);
+  const otherId = sql(`select (create_my_tenant('Outra Loja', 'pizzaria', 'outra-loja')).id`, u2);
+  fails(`select set_custom_domain('${otherId}', 'pedidos.fornodavila.com.br')`, u2, /já está em uso/);
+  assert.equal(sql(`select store_by_domain('pedidos.fornodavila.com.br')`, null), 'forno-da-vila');
+  assert.equal(sql(`select store_by_domain('www.pedidos.fornodavila.com.br')`, null), 'forno-da-vila');
+  assert.equal(sql(`select coalesce(store_by_domain('outro.com'), 'nada')`, null), 'nada');
+  fails(`select platform_domains()`, U.pizza, /Sem permissão/);
+  assert.equal(json(`platform_domains()`, U.admin)[0].domain, 'pedidos.fornodavila.com.br');
+  assert.equal(sql(`select coalesce(set_custom_domain('${pizzaId}', ''), 'removido')`, U.pizza), 'removido');
+});
+
+test('várias unidades: copia cardápio, opções, zonas e promoções; resumo só das lojas do dono', () => {
+  fails(`select create_unit('${pizzaId}', 'Filial', null)`, U.burger, /Sem permissão/);
+  fails(`select create_unit('${pizzaId}', 'Filial', null)`, U.staff, /Sem permissão/);
+  const src = menu('forno-da-vila');
+  const promoProd = src.find(x => x.groups.length) || src[0];
+  sql(`insert into promotions (tenant_id, name, kind, product_id, percent, active) values ('${pizzaId}', 'Promo item', 'percent', ${promoProd.id}, 10, true)`);
+  const u = json(`(select to_jsonb(create_unit('${pizzaId}', 'Forno da Vila Centro', 'forno-centro')))`, U.pizza);
+  assert.equal(u.slug, 'forno-centro');
+  const dst = menu('forno-centro');
+  assert.equal(dst.length, src.length);
+  assert.deepEqual(dst.map(x => [x.name, x.price, x.groups.length]).sort(), src.map(x => [x.name, x.price, x.groups.length]).sort());
+  assert.ok(dst.every(x => !src.some(s => s.id === x.id)), 'produtos são cópias novas');
+  assert.equal(sql(`select count(*) from zones where tenant_id = '${u.id}'`), sql(`select count(*) from zones where tenant_id = '${pizzaId}'`));
+  const pm = json(`(select to_jsonb(p) from promotions p where tenant_id = '${u.id}' and name = 'Promo item')`);
+  assert.equal(pm.product_id, dst.find(x => x.name === promoProd.name).id);
+  assert.equal(sql(`select role from memberships where tenant_id = '${u.id}' and user_id = '${U.pizza}'`), 'owner');
+  const units = json(`my_units()`, U.pizza);
+  assert.deepEqual(units.map(x => x.slug).sort(), ['forno-centro', 'forno-da-vila']);
+  assert.ok(units.every(x => 'today' in x && 'month' in x));
+  assert.deepEqual(json(`my_units()`, U.staff), []);
 });

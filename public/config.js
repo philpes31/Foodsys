@@ -11,5 +11,6 @@ export const PLATFORM = {
   company: '',                  // razão social, ex.: 'Fulano Tecnologia LTDA'
   cnpj: '',                     // ex.: '00.000.000/0001-00'
   email: '',                    // e-mail de contato e do encarregado de dados (DPO)
-  city: ''                      // cidade/UF do foro, ex.: 'São Paulo/SP'
+  city: '',                     // cidade/UF do foro, ex.: 'São Paulo/SP'
+  domains: []                   // domínios da própria plataforma, ex.: ['balcao.com.br', 'www.balcao.com.br'] (o resto é tratado como domínio de loja)
 };

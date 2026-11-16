@@ -23,6 +23,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    10. `20261122000000_promocoes.sql` (promoções automáticas e frete grátis acima de um valor)
    11. `20261123000000_checagem.sql` (a tela Plataforma passa a mostrar quais migrações faltam no banco)
    12. `20261124000000_saude_plataforma.sql` (painel de saúde na tela Plataforma)
+   13. `20261125000000_cartao_dominio_unidades.sql` (cartão de crédito online, domínio próprio por loja e várias unidades)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -99,6 +100,8 @@ O Pix online usa uma **Edge Function** do Supabase, a `supabase/functions/pix/in
 - Se não for pago em 45 minutos, o pedido é cancelado sozinho. Se o pagamento cair depois do prazo, o pedido volta para a fila.
 - O valor cobrado vem sempre do banco, e a confirmação só vale se o valor pago for igual ao total do pedido.
 
+**Cartão de crédito online:** usa a mesma função e o mesmo Access Token. Em **Configurações → Pix e cartão online**, a loja marca "Oferecer Cartão de crédito agora". O cliente é levado ao checkout do Mercado Pago (até 12x), volta para a página do pedido e o pedido entra na fila quando o pagamento é aprovado. Cartão recusado não cancela o pedido: o cliente pode tentar outro cartão até o prazo de 45 minutos. Com token de teste, o checkout abre no ambiente de testes do Mercado Pago, onde dá para pagar com os [cartões de teste](https://www.mercadopago.com.br/developers/pt/docs/checkout-pro/additional-content/your-integrations/test/cards).
+
 **Para testar:** as credenciais de teste (`TEST-`) do Mercado Pago geram QR Codes, mas o Pix de teste não pode ser pago de verdade. O jeito mais simples é usar o token de produção com um produto de R$ 1,00 e depois devolver o valor pelo app do Mercado Pago.
 
 ### 8. Cobrar a assinatura das lojas (sua receita)
@@ -122,6 +125,13 @@ Toda loja nova ganha **14 dias grátis**. Depois disso, a loja paga a mensalidad
 - **Para o dono da loja:** o painel mostra um aviso com os dias de teste restantes. Em **Configurações → Assinatura do Balcão**, ele clica em **Assinar com cartão** e paga no Mercado Pago. Se assinar durante o teste, a 1ª cobrança só acontece quando o teste termina. Trocar de plano ajusta o valor da mensalidade sozinho.
 - **Para você, em `/plataforma`:** aparecem quantas lojas estão pagando e quantas estão em teste, a receita mensal real e a potencial, e o status de cada loja. Os botões **+30 dias**, **+7 dias teste** e **Grátis** servem para quem paga por fora (Pix, boleto) ou para parceiros.
 - O cliente da loja bloqueada vê "Temporariamente indisponível", e o banco recusa pedidos novos.
+
+### 8b. Domínio próprio de uma loja (opcional)
+
+1. A loja informa o domínio em **Configurações → Domínio próprio** (por exemplo `pedidos.minhapizzaria.com.br`) e cria no DNS um **CNAME** apontando para `cname.vercel-dns.com`.
+2. Você vê a lista em **Plataforma → Domínios próprios** e adiciona cada domínio na Vercel: projeto → **Settings → Domains → Add**. A Vercel confere o DNS e cria o certificado https.
+3. Quem abre o domínio cai direto na loja. Links de campanha, QR Codes das mesas e o link copiado no painel passam a usar o domínio.
+4. Se a própria plataforma tiver um domínio (ex.: `balcao.com.br`), coloque em `PLATFORM.domains` no `public/config.js`, para ele abrir a página inicial e não ser tratado como loja.
 
 ### 9. Termos de Uso, privacidade e LGPD
 
@@ -205,7 +215,7 @@ O que já está pronto:
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 52 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 57 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;
@@ -218,7 +228,8 @@ O que já está pronto:
 - pedido na mesa, pedido lançado pela equipe (permissões, canal, telefone opcional) e fechamento de caixa;
 - regras de cupom, estoque (baixa, saldo insuficiente, devolução) e avaliações (prazo, uma por pedido, resposta);
 - pedido agendado (antecedência, limite de dias, horário de funcionamento, loja fechada e pausada) e campos da vitrine;
-- promoções (leve X pague Y, % por categoria, dia e horário), frete grátis acima de valor e permissões.
+- promoções (leve X pague Y, % por categoria, dia e horário), frete grátis acima de valor e permissões;
+- cartão online (recusa não cancela, várias tentativas, valor conferido), domínio próprio (validação e unicidade) e criação de unidades com cópia do cardápio.
 
 ```bash
 PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test
@@ -240,7 +251,5 @@ Valores em dinheiro são inteiros em **centavos**.
 
 ## Próximos passos sugeridos
 
-- **Cartão de crédito online** (Checkout do Mercado Pago) usando a mesma função de pagamentos.
 - **WhatsApp a cada mudança de status:** um Database Webhook ou uma Edge Function chamando a API do WhatsApp.
 - **Distância pela rua** (rota de carro) com um serviço de mapas pago, no lugar da linha reta.
-- **Campanhas** para clientes "sumidos" a partir da aba Clientes.

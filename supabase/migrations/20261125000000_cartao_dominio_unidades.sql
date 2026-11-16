@@ -1,0 +1,423 @@
+-- =====================================================================
+-- Balcão — cartão de crédito online, domínio próprio e várias unidades
+-- Rode depois de 20261124000000_saude_plataforma.sql.
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- 1. Cartão de crédito online (Checkout do Mercado Pago, na conta da loja)
+-- Usa o mesmo Access Token do Pix online. O pedido fica em "pagamento" até o Mercado Pago aprovar.
+-- ---------------------------------------------------------------------
+alter table public.tenants add column card_online boolean not null default false;
+grant select (card_online) on public.tenants to anon, authenticated;
+
+alter table public.orders drop constraint orders_payment_check;
+alter table public.orders add constraint orders_payment_check check (payment in ('Pix', 'Cartão na entrega', 'Dinheiro', 'Pix online', 'Cartão online', 'Pagar no caixa'));
+
+CREATE OR REPLACE FUNCTION public._create_order(t tenants, p jsonb, p_check_min boolean DEFAULT true, p_status text DEFAULT 'novo'::text, p_channel text DEFAULT 'online'::text)
+ RETURNS orders
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public', 'pg_temp'
+AS $$
+declare
+  v_name text := left(trim(coalesce(p->'customer'->>'name', '')), 80);
+  v_phone text := left(trim(coalesce(p->'customer'->>'phone', '')), 30);
+  v_ful text := case p->>'fulfillment' when 'pickup' then 'pickup' when 'table' then 'table' else 'delivery' end;
+  v_table text;
+  v_pay text := p->>'payment';
+  v_fee int := 0; v_zone text := ''; v_addr text := '';
+  z zones; c coupons; pr products; g option_groups; v_km numeric; v_lat double precision; v_lng double precision;
+  v_coupon text; v_loy int := 0; v_every int; v_avail int; v_left int; v_pk text; v_sched timestamptz;
+  pm promotions; v_promo int := 0; v_m int; v_n int; v_free int; v_pnames text[] := '{}';
+  it jsonb; v_items jsonb := '[]'; v_qty int; v_unit int; v_labels text[]; v_chosen bigint[]; v_cnt int; v_add int;
+  v_sub int := 0; v_disc int := 0; v_total int; v_change int; v_num int; o orders;
+begin
+  if p_channel not in ('online', 'balcao', 'telefone', 'mesa') then raise exception 'Canal inválido'; end if;
+  -- telefone é obrigatório para entrega e para retirada feita pelo site; no balcão e na mesa é opcional
+  if v_name = '' and p_channel = 'balcao' then v_name := 'Balcão'; end if;
+  if v_name = '' then raise exception 'Informe o nome'; end if;
+  if (v_ful = 'delivery' or (v_ful = 'pickup' and p_channel = 'online') or v_phone <> '')
+     and length(regexp_replace(v_phone, '\D', '', 'g')) < 8 then raise exception 'Informe nome e telefone válidos'; end if;
+  if v_ful = 'table' then
+    if not t.allow_tables then raise exception 'Esta loja não atende pedidos na mesa'; end if;
+    v_table := upper(trim(coalesce(p->>'table', '')));
+    if v_table !~ '^[A-Z0-9][A-Z0-9 -]{0,9}$' then raise exception 'Mesa inválida'; end if;
+    v_zone := 'Mesa ' || v_table;
+  end if;
+  if v_ful = 'pickup' and not t.allow_pickup then raise exception 'Esta loja não aceita retirada'; end if;
+  if v_ful = 'delivery' then
+    v_addr := left(trim(coalesce(p->>'address', '')), 200);
+    if length(v_addr) < 5 then raise exception 'Informe o endereço de entrega'; end if;
+    if t.delivery_mode = 'distance' then
+      -- taxa por distância: calculada aqui, a partir da localização da loja e do endereço
+      if coalesce(p->>'lat', '') !~ '^-?\d{1,2}(\.\d+)?$' or coalesce(p->>'lng', '') !~ '^-?\d{1,3}(\.\d+)?$' then
+        raise exception 'Não conseguimos localizar o endereço. Confira o CEP e o número.';
+      end if;
+      v_lat := (p->>'lat')::double precision; v_lng := (p->>'lng')::double precision;
+      if t.lat is null then raise exception 'A loja ainda não configurou a localização para entregas'; end if;
+      v_km := round(haversine_km(t.lat, t.lng, v_lat, v_lng)::numeric, 1);
+      v_fee := distance_fee(t.distance_tiers, v_km);
+      if v_fee is null then raise exception 'Endereço fora da área de entrega (% km)', replace(v_km::text, '.', ','); end if;
+      v_zone := replace(v_km::text, '.', ',') || ' km';
+    else
+      select * into z from zones where tenant_id = t.id and id::text = coalesce(p->>'zoneId', '');
+      if not found then raise exception 'Escolha um bairro atendido'; end if;
+      v_fee := z.fee; v_zone := z.name;
+    end if;
+  end if;
+  if v_pay is null or v_pay not in ('Pix', 'Cartão na entrega', 'Dinheiro', 'Pix online', 'Cartão online', 'Pagar no caixa') then raise exception 'Forma de pagamento inválida'; end if;
+  if v_pay = 'Pagar no caixa' and v_ful <> 'table' and p_channel = 'online' then raise exception 'Forma de pagamento inválida'; end if;
+  if v_pay = 'Pix online' and not t.pix_online then raise exception 'Esta loja não aceita Pix online'; end if;
+  if v_pay = 'Cartão online' and not t.card_online then raise exception 'Esta loja não aceita cartão online'; end if;
+  if jsonb_typeof(p->'items') <> 'array' or jsonb_array_length(p->'items') not between 1 and 50 then raise exception 'Carrinho vazio'; end if;
+  -- pedido agendado: horário entre a antecedência mínima e o limite de dias, dentro do funcionamento da loja
+  if nullif(p->>'scheduledFor', '') is not null then
+    if not t.allow_scheduling then raise exception 'Esta loja não aceita pedidos agendados'; end if;
+    if p->>'scheduledFor' !~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$' then raise exception 'Horário agendado inválido'; end if;
+    v_sched := (p->>'scheduledFor')::timestamptz;
+    if v_sched < now() + make_interval(mins => t.schedule_lead_minutes) then
+      raise exception 'Agende com pelo menos % minutos de antecedência', t.schedule_lead_minutes;
+    end if;
+    if v_sched > now() + make_interval(days => t.schedule_days) then raise exception 'Dá para agendar com até % dia(s) de antecedência', t.schedule_days; end if;
+    if t.auto_hours and not store_open_at(t, v_sched) then raise exception 'A loja não funciona nesse horário. Escolha outro.'; end if;
+  end if;
+
+  for it in select * from jsonb_array_elements(p->'items') loop
+    select * into pr from products where tenant_id = t.id and id::text = coalesce(it->>'productId', '') and available;
+    if not found then raise exception 'Um dos produtos não está mais disponível'; end if;
+    if coalesce(it->>'qty', '') !~ '^\d{1,2}$' or (it->>'qty')::int < 1 then raise exception 'Quantidade inválida'; end if;
+    v_qty := (it->>'qty')::int;
+    if it->'optionIds' is not null and jsonb_typeof(it->'optionIds') <> 'array' then raise exception 'Opções inválidas'; end if;
+    select coalesce(array_agg(distinct x::bigint), '{}') into v_chosen
+      from jsonb_array_elements_text(coalesce(it->'optionIds', '[]')) x where x ~ '^\d{1,18}$';
+    if cardinality(v_chosen) <> jsonb_array_length(coalesce(it->'optionIds', '[]')) then raise exception 'Opções inválidas'; end if;
+    if exists (select 1 from unnest(v_chosen) x where x not in
+        (select op.id from options op join option_groups og on og.id = op.group_id where og.product_id = pr.id)) then
+      raise exception 'Opção inválida para o produto %', pr.name;
+    end if;
+    v_unit := pr.price; v_labels := '{}';
+    for g in select * from option_groups where product_id = pr.id order by sort, id loop
+      select count(*), coalesce(sum(price), 0) into v_cnt, v_add from options where group_id = g.id and id = any(v_chosen);
+      if v_cnt < g.min_sel or v_cnt > g.max_sel then
+        raise exception 'Escolha entre % e % em "%" (%)', g.min_sel, g.max_sel, g.name, pr.name;
+      end if;
+      v_unit := v_unit + v_add;
+      v_labels := v_labels || array(select name from options where group_id = g.id and id = any(v_chosen) order by sort, id);
+    end loop;
+    -- estoque: baixa na hora (e devolve sozinho se o pedido for cancelado)
+    if pr.stock is not null then
+      update products set stock = stock - v_qty where id = pr.id and stock >= v_qty;
+      if not found then
+        select stock into v_left from products where id = pr.id;
+        raise exception 'Só restam % unidade(s) de %', greatest(v_left, 0), pr.name;
+      end if;
+    end if;
+    v_items := v_items || jsonb_build_object('product_id', pr.id, 'product_name', pr.name, 'options_text', array_to_string(v_labels, ', '),
+      'qty', v_qty, 'unit_price', v_unit, 'notes', left(coalesce(it->>'notes', ''), 140));
+    v_sub := v_sub + v_qty * v_unit;
+  end loop;
+
+  if p_check_min and v_ful = 'delivery' and v_sub < t.min_order then raise exception 'Pedido abaixo do valor mínimo da loja'; end if;
+  -- frete grátis acima de um valor
+  if v_ful = 'delivery' and t.free_delivery_above is not null and v_sub >= t.free_delivery_above then v_fee := 0; end if;
+  -- promoções automáticas válidas no momento do pedido (ou no horário agendado)
+  for pm in select * from promotions where tenant_id = t.id and active order by id loop
+    if not promo_active(pm, t, coalesce(v_sched, now())) then continue; end if;
+    if pm.kind = 'percent' then
+      select coalesce(sum((x->>'qty')::int * (x->>'unit_price')::int), 0) into v_m
+        from jsonb_array_elements(v_items) x join products pp on pp.id = (x->>'product_id')::bigint
+        where (pm.product_id is null or pp.id = pm.product_id) and (pm.category is null or pp.category = pm.category);
+      v_m := round(v_m * pm.percent / 100.0);
+    else
+      -- leve X, pague Y: as unidades mais baratas entre as participantes saem de graça
+      select count(*) into v_n from jsonb_array_elements(v_items) x join products pp on pp.id = (x->>'product_id')::bigint
+        cross join generate_series(1, (x->>'qty')::int)
+        where (pm.product_id is null or pp.id = pm.product_id) and (pm.category is null or pp.category = pm.category);
+      v_free := (v_n / pm.buy_qty) * (pm.buy_qty - pm.pay_qty);
+      select coalesce(sum(u), 0) into v_m from (
+        select (x->>'unit_price')::int u from jsonb_array_elements(v_items) x join products pp on pp.id = (x->>'product_id')::bigint
+          cross join generate_series(1, (x->>'qty')::int)
+          where (pm.product_id is null or pp.id = pm.product_id) and (pm.category is null or pp.category = pm.category)
+          order by 1 limit v_free) f;
+    end if;
+    if v_m > 0 then v_promo := v_promo + v_m; v_pnames := v_pnames || pm.name; end if;
+  end loop;
+  v_promo := least(v_promo, v_sub);
+  if coalesce(trim(p->>'coupon'), '') <> '' then
+    select * into c from coupons where tenant_id = t.id and code = upper(trim(p->>'coupon')) and active;
+    if not found then raise exception 'Cupom inválido'; end if;
+    if c.valid_until is not null and c.valid_until < now() then raise exception 'Este cupom expirou'; end if;
+    if v_sub < c.min_subtotal then raise exception 'Este cupom vale para pedidos a partir de R$ %', replace(to_char(c.min_subtotal / 100.0, 'FM9999990.00'), '.', ','); end if;
+    if c.max_uses is not null and (select count(*) from orders where tenant_id = t.id and coupon_code = c.code and status <> 'cancelado') >= c.max_uses then
+      raise exception 'Este cupom já atingiu o limite de usos';
+    end if;
+    v_pk := phone_key(v_phone);
+    if (c.max_per_customer is not null or c.first_order_only) and length(v_pk) < 8 then raise exception 'Informe o telefone para usar este cupom'; end if;
+    if c.max_per_customer is not null and (select count(*) from orders where tenant_id = t.id and coupon_code = c.code and status <> 'cancelado'
+        and phone_key(customer_phone) = v_pk) >= c.max_per_customer then
+      raise exception 'Você já usou este cupom o máximo de vezes';
+    end if;
+    if c.first_order_only and exists (select 1 from orders where tenant_id = t.id and status not in ('cancelado', 'pagamento') and phone_key(customer_phone) = v_pk) then
+      raise exception 'Este cupom é só para a primeira compra';
+    end if;
+    v_disc := round(v_sub * c.percent / 100.0);
+    if c.free_shipping then v_fee := 0; end if;
+    v_coupon := c.code;
+  end if;
+  -- fidelidade: a cada N pedidos entregues, desconto no próximo (não soma com cupom: vale o maior)
+  if t.loyalty_enabled and v_phone <> '' then
+    v_avail := loyalty_stamps(t.id, v_phone);
+    if v_avail >= t.loyalty_every then
+      v_loy := round(v_sub * t.loyalty_percent / 100.0);
+      if v_loy > v_disc then
+        v_disc := v_loy;
+        if v_coupon is not null and not c.free_shipping then v_coupon := null; end if;
+      else v_loy := 0; end if;
+    end if;
+  end if;
+  v_total := greatest(0, v_sub + v_fee - v_disc - v_promo);
+  if v_pay = 'Dinheiro' and coalesce(p->>'changeFor', '') ~ '^\d{1,8}$' and (p->>'changeFor')::int > v_total then
+    v_change := (p->>'changeFor')::int;
+  end if;
+
+  perform pg_advisory_xact_lock(hashtext(t.id::text));
+  select coalesce(max(number), 100) + 1 into v_num from orders where tenant_id = t.id;
+  insert into orders (tenant_id, number, public_code, customer_name, customer_phone, fulfillment, address, zone_name, payment, change_for,
+                      subtotal, fee, discount, total, coupon_code, status, payment_status, delivery_km, dest_lat, dest_lng, loyalty_discount, channel, table_label, scheduled_for,
+                      promo_discount, promo_names)
+  values (t.id, v_num, upper(left(replace(gen_random_uuid()::text, '-', ''), 12)), v_name, v_phone, v_ful, v_addr, v_zone, v_pay, v_change,
+          v_sub, v_fee, v_disc, v_total, v_coupon, p_status, case when v_pay in ('Pix online', 'Cartão online') then 'pending' else 'na' end, v_km, v_lat, v_lng, v_loy, p_channel, v_table, v_sched, v_promo, nullif(array_to_string(v_pnames, ', '), ''))
+  returning * into o;
+  insert into order_items (order_id, tenant_id, product_id, product_name, options_text, qty, unit_price, notes)
+    select o.id, t.id, (x->>'product_id')::bigint, x->>'product_name', x->>'options_text', (x->>'qty')::int, (x->>'unit_price')::int, x->>'notes'
+    from jsonb_array_elements(v_items) x;
+  insert into order_events (order_id, tenant_id, status, at) values (o.id, t.id, p_status, o.created_at);
+  return o;
+end $$;
+
+create or replace function public.place_order(p_slug text, p jsonb) returns jsonb
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare t tenants; v_limit int; o orders;
+begin
+  select * into t from tenants where slug = p_slug and active;
+  if not found then raise exception 'Loja não encontrada'; end if;
+  if not billing_ok(t) then raise exception 'Esta loja está temporariamente indisponível'; end if;
+  -- agendado: a loja pode estar fechada agora (o horário escolhido é conferido em _create_order); só a pausa manual bloqueia
+  if nullif(p->>'scheduledFor', '') is null and not store_open_at(t) then raise exception 'A loja está fechada no momento'; end if;
+  if nullif(p->>'scheduledFor', '') is not null and not t.is_open then raise exception 'A loja está pausada no momento'; end if;
+  select monthly_orders into v_limit from plans where name = t.plan;
+  if v_limit is not null and (select count(*) from orders where tenant_id = t.id and status <> 'pagamento'
+      and created_at >= (date_trunc('month', now() at time zone t.timezone) at time zone t.timezone)) >= v_limit then
+    raise exception 'A loja atingiu o limite de pedidos do plano neste mês';
+  end if;
+  o := _create_order(t, p, true, case when p->>'payment' in ('Pix online', 'Cartão online') then 'pagamento' else 'novo' end,
+                    case when p->>'fulfillment' = 'table' then 'mesa' else 'online' end);
+  return jsonb_build_object('code', o.public_code, 'number', o.number, 'total', o.total, 'pix', o.payment = 'Pix online', 'card', o.payment = 'Cartão online');
+end $$;
+
+create or replace function public.staff_place_order(p_tenant uuid, p jsonb) returns jsonb
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare t tenants; o orders; v_channel text := coalesce(p->>'channel', 'balcao');
+begin
+  if not is_member(p_tenant) then raise exception 'Sem permissão'; end if;
+  select * into t from tenants where id = p_tenant;
+  if not billing_ok(t) then raise exception 'Assinatura pendente: regularize para lançar pedidos'; end if;
+  if v_channel not in ('balcao', 'telefone', 'mesa') then raise exception 'Canal inválido'; end if;
+  if p->>'payment' in ('Pix online', 'Cartão online') then raise exception 'No painel, use Pix, cartão, dinheiro ou pagar no caixa'; end if;
+  o := _create_order(t, p, false, 'preparo', v_channel);
+  return jsonb_build_object('id', o.id, 'code', o.public_code, 'number', o.number, 'total', o.total);
+end $$;
+
+-- Liga/desliga o cartão online (exige o Access Token do Mercado Pago já cadastrado no Pix online).
+create or replace function public.set_card_online(p_tenant uuid, p_enabled boolean) returns jsonb
+language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  if not is_owner(p_tenant) then raise exception 'Sem permissão'; end if;
+  if p_enabled and not exists (select 1 from tenant_pix where tenant_id = p_tenant) then
+    raise exception 'Cadastre o Access Token do Mercado Pago antes de ativar';
+  end if;
+  update tenants set card_online = coalesce(p_enabled, false) where id = p_tenant;
+  return pix_settings(p_tenant);
+end $$;
+
+create or replace function public.pix_settings(p_tenant uuid) returns jsonb
+language plpgsql stable security definer set search_path = public, pg_temp as $$
+declare v_tok text;
+begin
+  if not is_owner(p_tenant) then raise exception 'Sem permissão'; end if;
+  select mp_access_token into v_tok from tenant_pix where tenant_id = p_tenant;
+  return jsonb_build_object('configured', v_tok is not null, 'enabled', (select pix_online from tenants where id = p_tenant),
+    'cardEnabled', (select card_online from tenants where id = p_tenant),
+    'test', v_tok like 'TEST-%', 'hint', case when v_tok is not null then '…' || right(v_tok, 4) end);
+end $$;
+
+-- Usada só pela Edge Function "pix": agora também informa se a loja aceita cartão.
+create or replace function public.pix_order(p_code text) returns jsonb
+language sql stable security definer set search_path = public, pg_temp as $$
+  select jsonb_build_object('id', o.id, 'number', o.number, 'code', o.public_code, 'total', o.total, 'status', o.status,
+    'payment', o.payment, 'paymentStatus', o.payment_status, 'pixRef', o.pix_ref, 'pixQr', o.pix_qr, 'pixQrBase64', o.pix_qr_base64,
+    'pixExpiresAt', o.pix_expires_at, 'customerName', o.customer_name, 'tenantId', t.id, 'storeName', t.name, 'storeSlug', t.slug,
+    'pixOnline', t.pix_online, 'cardOnline', t.card_online, 'token', tp.mp_access_token)
+  from orders o join tenants t on t.id = o.tenant_id left join tenant_pix tp on tp.tenant_id = t.id
+  where o.public_code = upper(trim(p_code))
+$$;
+
+-- Aplica o resultado conferido na API do Mercado Pago (Pix ou cartão). Idempotente.
+create or replace function public.pix_apply(p_tenant uuid, p_order bigint, p_ref text, p_mp_status text, p_amount integer) returns text
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare o orders;
+begin
+  select * into o from orders where id = p_order and tenant_id = p_tenant for update;
+  if not found or o.payment not in ('Pix online', 'Cartão online') then raise exception 'Pedido não encontrado'; end if;
+  if o.payment_status = 'paid' then return o.status; end if;
+  -- No cartão o cliente pode tentar vários cartões (cada tentativa é um pagamento diferente); no Pix o código é um só.
+  if o.payment = 'Pix online' and o.pix_ref is not null and o.pix_ref <> p_ref then raise exception 'Pagamento não corresponde ao pedido'; end if;
+  if p_mp_status = 'approved' then
+    if p_amount <> o.total then raise exception 'Valor pago (%) diferente do total (%)', p_amount, o.total; end if;
+    if o.status = 'pagamento' or (o.status = 'cancelado' and o.payment_status = 'expired') then
+      update orders set payment_status = 'paid', paid_at = now(), pix_ref = p_ref, status = 'novo', updated_at = now()
+      where id = o.id returning * into o;
+      insert into order_events (order_id, tenant_id, status) values (o.id, o.tenant_id, 'novo');
+    else
+      -- a loja cancelou o pedido antes do pagamento cair: fica registrado como pago para a loja devolver o valor
+      update orders set payment_status = 'paid', paid_at = now(), pix_ref = p_ref, updated_at = now() where id = o.id returning * into o;
+    end if;
+    return o.status;
+  elsif o.payment = 'Pix online' and p_mp_status in ('cancelled', 'rejected', 'expired') and o.status = 'pagamento' then
+    -- cartão recusado não cancela: o cliente pode tentar outro cartão até o prazo do pedido
+    update orders set status = 'cancelado', payment_status = 'expired', updated_at = now() where id = o.id returning * into o;
+    insert into order_events (order_id, tenant_id, status) values (o.id, o.tenant_id, 'cancelado');
+  end if;
+  return o.status;
+end $$;
+
+grant execute on function public.set_card_online(uuid, boolean) to authenticated;
+revoke execute on function public.set_card_online(uuid, boolean) from public, anon;
+revoke execute on function public._create_order(public.tenants, jsonb, boolean, text, text) from public, anon, authenticated;
+
+-- ---------------------------------------------------------------------
+-- 2. Domínio próprio por loja (ex.: pedidos.minhapizzaria.com.br)
+-- O dono informa o domínio; o administrador liga o domínio no projeto da Vercel.
+-- ---------------------------------------------------------------------
+alter table public.tenants add column custom_domain text unique
+  check (custom_domain ~ '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$');
+grant select (custom_domain) on public.tenants to anon, authenticated;
+
+create or replace function public.set_custom_domain(p_tenant uuid, p_domain text) returns text
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare v text := lower(trim(coalesce(p_domain, '')));
+begin
+  if not is_owner(p_tenant) then raise exception 'Sem permissão'; end if;
+  v := regexp_replace(regexp_replace(v, '^https?://', ''), '/.*$', '');
+  if v = '' then update tenants set custom_domain = null where id = p_tenant; return null; end if;
+  if v !~ '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$' then raise exception 'Domínio inválido. Exemplo: pedidos.minhaloja.com.br'; end if;
+  if v ~ '(vercel\.app|supabase\.co|localhost)$' then raise exception 'Use um domínio seu, não o endereço da plataforma'; end if;
+  if exists (select 1 from tenants where custom_domain = v and id <> p_tenant) then raise exception 'Esse domínio já está em uso por outra loja'; end if;
+  update tenants set custom_domain = v where id = p_tenant;
+  return v;
+end $$;
+
+-- O site descobre qual loja abrir pelo endereço digitado.
+create or replace function public.store_by_domain(p_host text) returns text
+language sql stable security definer set search_path = public, pg_temp as $$
+  select slug from tenants
+  where active and custom_domain in (lower(trim(coalesce(p_host, ''))), regexp_replace(lower(trim(coalesce(p_host, ''))), '^www\.', ''))
+  limit 1
+$$;
+
+create or replace function public.platform_domains() returns jsonb
+language plpgsql stable security definer set search_path = public, pg_temp as $$
+begin
+  if not is_platform_admin() then raise exception 'Sem permissão'; end if;
+  return (select coalesce(jsonb_agg(jsonb_build_object('name', name, 'slug', slug, 'domain', custom_domain) order by name), '[]')
+          from tenants where custom_domain is not null);
+end $$;
+
+grant execute on function public.store_by_domain(text) to anon, authenticated;
+grant execute on function public.set_custom_domain(uuid, text), public.platform_domains() to authenticated;
+revoke execute on function public.set_custom_domain(uuid, text), public.platform_domains() from public, anon;
+
+-- ---------------------------------------------------------------------
+-- 3. Várias unidades: criar uma loja nova copiando cardápio e configurações de outra
+-- ---------------------------------------------------------------------
+create or replace function public.create_unit(p_from uuid, p_name text, p_slug text default null) returns public.tenants
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare f tenants; t tenants; pr products; g option_groups; v_pid bigint; v_gid bigint; v_map jsonb := '{}';
+begin
+  if not is_owner(p_from) then raise exception 'Sem permissão'; end if;
+  select * into f from tenants where id = p_from;
+  t := create_my_tenant(p_name, f.segment, p_slug, f.color);
+  -- configurações da loja de origem (endereço, localização, telefone e domínio ficam para preencher)
+  update tenants set min_order = f.min_order, allow_pickup = f.allow_pickup, eta_text = f.eta_text, timezone = f.timezone,
+    hours = f.hours, auto_hours = f.auto_hours, delivery_mode = case when f.delivery_mode = 'distance' then 'zones' else f.delivery_mode end,
+    distance_tiers = f.distance_tiers, loyalty_enabled = f.loyalty_enabled, loyalty_every = f.loyalty_every, loyalty_percent = f.loyalty_percent,
+    allow_tables = f.allow_tables, tables_count = f.tables_count, allow_scheduling = f.allow_scheduling, schedule_days = f.schedule_days,
+    schedule_lead_minutes = f.schedule_lead_minutes, schedule_slot_minutes = f.schedule_slot_minutes, description = f.description,
+    instagram = f.instagram, free_delivery_above = f.free_delivery_above, plan = f.plan
+  where id = t.id returning * into t;
+  -- troca o cardápio-modelo pelo cardápio da loja de origem
+  delete from products where tenant_id = t.id;
+  for pr in select * from products where tenant_id = f.id order by sort, id loop
+    insert into products (tenant_id, category, name, description, price, icon, available, sort, image_path, stock)
+      values (t.id, pr.category, pr.name, pr.description, pr.price, pr.icon, pr.available, pr.sort, pr.image_path, null)
+      returning id into v_pid;
+    v_map := v_map || jsonb_build_object(pr.id::text, v_pid);
+    for g in select * from option_groups where product_id = pr.id order by sort, id loop
+      insert into option_groups (product_id, tenant_id, name, min_sel, max_sel, sort) values (v_pid, t.id, g.name, g.min_sel, g.max_sel, g.sort) returning id into v_gid;
+      insert into options (group_id, tenant_id, name, price, sort) select v_gid, t.id, name, price, sort from options where group_id = g.id order by sort, id;
+    end loop;
+  end loop;
+  delete from zones where tenant_id = t.id;
+  insert into zones (tenant_id, name, fee) select t.id, name, fee from zones where tenant_id = f.id order by id;
+  insert into promotions (tenant_id, name, kind, product_id, category, buy_qty, pay_qty, percent, days, start_time, end_time, active)
+    select t.id, name, kind, (v_map->>product_id::text)::bigint, category, buy_qty, pay_qty, percent, days, start_time, end_time, active
+    from promotions where tenant_id = f.id and (product_id is null or v_map ? product_id::text);
+  return t;
+end $$;
+
+-- Resumo de todas as unidades da conta (só as lojas em que a pessoa é dona).
+create or replace function public.my_units() returns jsonb
+language plpgsql stable security definer set search_path = public, pg_temp as $$
+begin
+  if auth.uid() is null then raise exception 'Faça login'; end if;
+  return (select coalesce(jsonb_agg(x order by x->>'name'), '[]') from (
+    select jsonb_build_object('id', t.id, 'name', t.name, 'slug', t.slug, 'color', t.color, 'open', store_open_at(t), 'active', t.active,
+      'billingOk', billing_ok(t), 'billingStatus', t.billing_status, 'domain', t.custom_domain,
+      'today', (select jsonb_build_object('orders', count(*), 'revenue', coalesce(sum(total), 0)) from orders o
+                where o.tenant_id = t.id and o.status not in ('cancelado', 'pagamento') and o.created_at >= date_trunc('day', now() at time zone t.timezone) at time zone t.timezone),
+      'month', (select jsonb_build_object('orders', count(*), 'revenue', coalesce(sum(total), 0)) from orders o
+                where o.tenant_id = t.id and o.status not in ('cancelado', 'pagamento') and o.created_at >= date_trunc('month', now() at time zone t.timezone) at time zone t.timezone),
+      'openOrders', (select count(*) from orders o where o.tenant_id = t.id and o.status in ('novo', 'preparo', 'pronto', 'rota'))) x
+    from tenants t join memberships m on m.tenant_id = t.id and m.user_id = auth.uid() and m.role = 'owner') s);
+end $$;
+
+grant execute on function public.create_unit(uuid, text, text), public.my_units() to authenticated;
+revoke execute on function public.create_unit(uuid, text, text), public.my_units() from public, anon;
+
+-- ---------------------------------------------------------------------
+-- Checagem das migrações: inclui esta.
+-- ---------------------------------------------------------------------
+create or replace function public.schema_status() returns jsonb
+language plpgsql stable security definer set search_path = public, pg_temp as $$
+declare r jsonb;
+begin
+  select jsonb_agg(jsonb_build_object('n', n, 'file', file, 'ok', ok) order by n) into r
+  from (values
+    (1,  '20261113000000_balcao.sql',                     to_regclass('public.tenants') is not null),
+    (2,  '20261114000000_horarios_fotos.sql',             exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'tenants'  and column_name = 'hours')),
+    (3,  '20261115000000_pix_online.sql',                 exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'orders'   and column_name = 'payment_status')),
+    (4,  '20261116000000_assinaturas.sql',                exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'tenants'  and column_name = 'billing_status')),
+    (5,  '20261117000000_entregador_clientes_lgpd.sql',   exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'couriers' and column_name = 'access_token')),
+    (6,  '20261118000000_distancia_fidelidade.sql',       exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'tenants'  and column_name = 'delivery_mode')),
+    (7,  '20261119000000_balcao_mesa_caixa.sql',          to_regprocedure('public.cash_report(uuid, date)') is not null),
+    (8,  '20261120000000_cupons_avaliacoes_estoque.sql',  exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'coupons'  and column_name = 'min_subtotal')),
+    (9,  '20261121000000_agendamento_vitrine.sql',        exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'orders'   and column_name = 'scheduled_for')),
+    (10, '20261122000000_promocoes.sql',                  to_regclass('public.promotions') is not null),
+    (11, '20261123000000_checagem.sql',                   true),
+    (12, '20261124000000_saude_plataforma.sql',           to_regprocedure('public.platform_health(integer)') is not null),
+    (13, '20261125000000_cartao_dominio_unidades.sql',    to_regprocedure('public.create_unit(uuid, text, text)') is not null)
+  ) as m(n, file, ok);
+  return r;
+end $$;
+
+notify pgrst, 'reload schema';

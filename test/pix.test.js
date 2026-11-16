@@ -102,3 +102,50 @@ test('token inválido vira mensagem clara', async () => {
   assert.equal(r.status, 502);
   assert.match((await r.json()).error, /Access Token/);
 });
+
+test('card: cria o checkout de cartão com o valor do banco e volta para o pedido', async () => {
+  const { post, calls } = setup({ order: { payment: 'Cartão online', cardOnline: true } });
+  const orig = calls.length;
+  const s = setup({ order: { payment: 'Cartão online', cardOnline: true } });
+  // rota extra do Mercado Pago para preferências
+  const r = await (async () => {
+    const pref = { id: 'PREF1', init_point: 'https://mp/real', sandbox_init_point: 'https://mp/sandbox' };
+    const h = makeHandler({ supabaseUrl: SUPA, serviceKey: 'sb_secret_x', log: silent, now: () => new Date('2026-11-14T00:00:00Z'), fetchImpl: async (url, init = {}) => {
+      s.calls.push({ url, body: init.body ? JSON.parse(init.body) : null, headers: init.headers });
+      if (url.endsWith('/pix_order')) return new Response(JSON.stringify(s.db.order));
+      if (url.endsWith('/pix_expire_overdue')) return new Response('0');
+      if (url === 'https://api.mercadopago.com/checkout/preferences') return new Response(JSON.stringify(pref), { status: 201 });
+      return new Response('{}', { status: 500 });
+    } });
+    const res = await h(new Request(`${SUPA}/functions/v1/pix`, { method: 'POST', body: JSON.stringify({ action: 'card', code: 'ABCDEF123456', origin: 'https://forno.com.br' }) }));
+    return { status: res.status, data: await res.json() };
+  })();
+  assert.equal(r.status, 200);
+  assert.equal(r.data.url, 'https://mp/sandbox');            // token de teste usa o sandbox
+  const pc = s.calls.find(c => c.url.endsWith('/checkout/preferences')).body;
+  assert.equal(pc.items[0].unit_price, 45.5);
+  assert.equal(pc.external_reference, '7');
+  assert.equal(pc.back_urls.success, 'https://forno.com.br/pedido/ABCDEF123456');
+  assert.match(pc.notification_url, new RegExp(`action=webhook&t=${TENANT}`));
+  assert.equal(orig, calls.length);
+  // origem estranha, pedido Pix ou loja sem cartão
+  assert.equal((await post({ action: 'card', code: 'ABCDEF123456', origin: 'javascript:alert(1)' })).status, 400);
+  assert.equal((await setup().post({ action: 'card', code: 'ABCDEF123456', origin: 'https://a.com' })).status, 400);
+  assert.equal((await setup({ order: { payment: 'Cartão online', cardOnline: false } }).post({ action: 'card', code: 'ABCDEF123456', origin: 'https://a.com' })).status, 400);
+});
+
+test('check de cartão: procura a tentativa aprovada; webhook aceita pagamento com cartão', async () => {
+  const s = setup({ order: { payment: 'Cartão online', cardOnline: true }, mpPayment: { payment_method_id: 'visa', id: 999 } });
+  const h = makeHandler({ supabaseUrl: SUPA, serviceKey: 'sb_secret_x', log: silent, fetchImpl: async (url, init = {}) => {
+    s.calls.push({ url, body: init.body ? JSON.parse(init.body) : null });
+    if (url.endsWith('/pix_order')) return new Response(JSON.stringify(s.db.order));
+    if (url.endsWith('/pix_apply')) return new Response(JSON.stringify('novo'));
+    if (url.includes('/v1/payments/search')) return new Response(JSON.stringify({ results: [{ id: 1, status: 'rejected', external_reference: '7' }, { id: 2, status: 'approved', external_reference: '7', transaction_amount: 45.5 }] }));
+    return new Response('{}', { status: 500 });
+  } });
+  const r = await h(new Request(`${SUPA}/functions/v1/pix`, { method: 'POST', body: JSON.stringify({ action: 'check', code: 'ABCDEF123456' }) }));
+  assert.deepEqual(await r.json(), { status: 'novo', paid: true, mpStatus: 'approved' });
+  assert.deepEqual(s.calls.find(c => c.url.endsWith('/pix_apply')).body, { p_tenant: TENANT, p_order: 7, p_ref: '2', p_mp_status: 'approved', p_amount: 4550 });
+  const w = await s.post({ type: 'payment', data: { id: '999' } }, `?action=webhook&t=${TENANT}`);
+  assert.deepEqual(w.data, { ok: true, status: 'novo' });
+});

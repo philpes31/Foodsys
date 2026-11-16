@@ -246,10 +246,22 @@ async function locateAddress({ street, number, city, state, cep }, cepInfo) {
 }
 const kmTxt = km => `${String(km).replace('.', ',')} km`;
 
+// Endereço público da loja: o domínio próprio, quando a loja tem um; senão o caminho /loja/<slug> da plataforma.
+const storeLink = t => t?.custom_domain ? `https://${t.custom_domain}` : `${location.origin}/loja/${t.slug}`;
+// Domínio próprio: quem abre pedidos.minhaloja.com.br cai direto na loja.
+const isPlatformHost = h => /^(localhost|127\.0\.0\.1)$|\.vercel\.app$/.test(h) || (PLATFORM.domains || []).includes(h);
+let hostSlug; // undefined = ainda não consultado
+async function slugForHost() {
+  if (hostSlug !== undefined) return hostSlug;
+  if (isPlatformHost(location.hostname)) return (hostSlug = null);
+  try { hostSlug = await rpc('store_by_domain', { p_host: location.hostname }); } catch { hostSlug = null; }
+  return hostSlug;
+}
+
 /* ---------- comanda (impressora térmica 80 mm) ---------- */
 // Folha A4 com os QR Codes das mesas (imagem gerada pelo serviço público goqr.me/api.qrserver.com)
-async function printTableQrs(slug, count, storeName) {
-  const url = n => `${location.origin}/loja/${slug}?mesa=${n}`;
+async function printTableQrs(base, count, storeName) {
+  const url = n => `${base}?mesa=${n}`;
   $('#print').innerHTML = `<div class="qrsheet">${Array.from({ length: count }, (_, i) => `<div class="qrcard"><b>${esc(storeName)}</b>
     <img src="https://api.qrserver.com/v1/create-qr-code/?size=360x360&margin=8&data=${encodeURIComponent(url(i + 1))}" alt="QR Code da mesa ${i + 1}">
     <span class="big">Mesa ${i + 1}</span><span>Aponte a câmera para pedir</span></div>`).join('')}</div>`;
@@ -314,6 +326,7 @@ async function render() {
     if (p[0] === 'entrar') return vAuth(p[1]);
     if (p[0] === 'termos' || p[0] === 'privacidade') return vLegal(p[0]);
     if (p[0] === 'entregador' && p[1]) return await vCourier(p[1]);
+    if (!p.length) { const hs = await slugForHost(); if (hs) return await vShop(hs); }
     await loadMe();
     if (p[0] === 'comecar') { if (!ME) return go('/entrar/cadastro'); return await vStart(); }
     if (p[0] === 'painel') { if (!ME) return go('/entrar'); if (!ME.tenant) return go(ME.isAdmin ? '/plataforma' : '/comecar'); return await vPanel(p[1] || 'pedidos'); }
@@ -570,7 +583,7 @@ async function vShop(slug) {
       <p class="mut" id="kZone" style="margin:0">${DIST ? (geo?.quote ? zoneTxt() : 'Taxa de entrega: preencha o CEP e o número para calcular.') : `Bairro de entrega: <b>${esc(t.zone.name)}</b> · taxa ${t.fee ? brl(t.fee) : 'grátis'}`}</p>`}
       ${S.loyalty_enabled ? `<p class="mut" style="margin:0">Fidelidade: a cada ${S.loyalty_every} pedidos entregues, ${S.loyalty_percent}% de desconto no próximo, aplicado automaticamente.</p>` : ''}
       ${SLOTS.length ? `<label>Quando?<select id="kWhen">${SCHED_ONLY ? '' : `<option value="">O quanto antes (${esc(S.eta_text)})</option>`}${SLOTS.map(d => `<optgroup label="${esc(d.day)}">${d.slots.map(x => `<option value="${x.iso}">${esc(d.day)} às ${x.label}</option>`).join('')}</optgroup>`).join('')}</select></label>` : ''}
-      <label>Pagamento<select id="kPay">${TABLE ? '<option value="Pagar no caixa" selected>Pagar no caixa / na mesa</option>' : ''}${S.pix_online ? `<option value="Pix online" ${TABLE ? '' : 'selected'}>Pix agora (QR Code, confirmação automática)</option>` : ''}${TABLE ? '' : '<option value="Pix">Pix na entrega</option><option>Cartão na entrega</option><option>Dinheiro</option>'}</select></label>
+      <label>Pagamento<select id="kPay">${TABLE ? '<option value="Pagar no caixa" selected>Pagar no caixa / na mesa</option>' : ''}${S.pix_online ? `<option value="Pix online" ${TABLE ? '' : 'selected'}>Pix agora (QR Code, confirmação automática)</option>` : ''}${S.card_online && !TABLE ? `<option value="Cartão online" ${S.pix_online ? '' : 'selected'}>Cartão de crédito agora (pagamento online)</option>` : ''}${TABLE ? '' : '<option value="Pix">Pix na entrega</option><option>Cartão na entrega</option><option>Dinheiro</option>'}</select></label>
       <label id="kEm" ${S.pix_online ? '' : 'hidden'}>E-mail (para o comprovante do Pix)<input id="kEmail" type="email" autocomplete="email" value="${esc(last.email || '')}" placeholder="voce@email.com"></label>
       <label id="kTr" hidden>Troco para (R$)<input id="kT" inputmode="decimal" placeholder="Ex.: 100"></label>
       <div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>
@@ -630,6 +643,10 @@ async function vShop(slug) {
         local.set(lastKey, cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, optText: c.optText, notes: c.notes })));
         cart = []; saveCart();
         if (r.pix) { $('#kGo').textContent = 'Gerando Pix…'; try { await pixCall({ action: 'create', code: r.code, email }); } catch (err) { toast(err.message); } }
+        if (r.card) {
+          $('#kGo').textContent = 'Abrindo pagamento…';
+          try { const c = await pixCall({ action: 'card', code: r.code, origin: location.origin }); if (c.url) { location.href = c.url; return; } } catch (err) { toast(err.message); }
+        }
         closeDlg(); go(`/pedido/${r.code}`);
       } finally { const b = $('#kGo'); if (b) b.disabled = false; }
     });
@@ -673,7 +690,7 @@ async function vTrack(code) {
     const sig = JSON.stringify(r);
     if (!force && sig === lastSig) return o.status;
     lastSig = sig;
-    if (o.status === 'pagamento') { drawPix(S, o); return o.status; }
+    if (o.status === 'pagamento') { o.payment === 'Cartão online' ? drawCard(S, o) : drawPix(S, o); return o.status; }
     setColor(S.color); $('#bName').textContent = S.name; header('', false);
     const flow = o.fulfillment !== 'delivery' ? ['novo', 'preparo', 'pronto', 'entregue'] : ['novo', 'preparo', 'pronto', 'rota', 'entregue'];
     const idx = flow.indexOf(o.status), at = Object.fromEntries(o.events.map(e => [e.status, e.at]));
@@ -698,6 +715,18 @@ async function vTrack(code) {
       <div class="row"><a class="btn ghost" href="/loja/${esc(S.slug)}" data-link>Voltar à loja</a>${['entregue', 'cancelado'].includes(o.status) && o.fulfillment !== 'table' ? `<a class="btn pri" href="/loja/${esc(S.slug)}?repetir=1" data-link>↻ Pedir de novo</a>` : ''}</div></div>`;
     return o.status;
   };
+  // Pagamento com cartão: o Mercado Pago cuida dos dados do cartão; aqui só o botão para pagar e a conferência.
+  const drawCard = (S, o) => {
+    setColor(S.color); $('#bName').textContent = S.name; header('', false);
+    app.innerHTML = `<h2>Pague com cartão</h2><p class="lead">Pedido #${o.number} · ${esc(S.name)} — assim que o pagamento for aprovado, ele vai direto para o preparo. Esta página atualiza sozinha.</p>
+    <div class="panel pix" style="max-width:560px">
+      <div class="tot"><span>Total</span><span class="price">${brl(o.total)}</span></div>
+      <p class="mut" style="margin:0">Você será levado ao ambiente seguro do Mercado Pago para digitar o cartão. A loja não vê os dados do seu cartão.</p>
+      <button class="pri" id="cardPay">Pagar ${brl(o.total)} com cartão</button>
+      <button class="ghost" id="pixCheck">Já paguei</button>
+      <p class="mut" style="margin:0">Cartão recusado? Tente outro cartão pelo mesmo botão. Sem pagamento, o pedido é cancelado em 45 minutos.</p>
+    </div>`;
+  };
   // Tela de pagamento: QR Code, copia-e-cola, prazo e botão "Já paguei"
   const drawPix = (S, o) => {
     setColor(S.color); $('#bName').textContent = S.name; header('', false);
@@ -718,9 +747,15 @@ async function vTrack(code) {
     if (b.dataset.star) { rating = +b.dataset.star; document.querySelectorAll('[data-star]').forEach(x => { x.textContent = +x.dataset.star <= rating ? '★' : '☆'; x.classList.toggle('on', +x.dataset.star <= rating); }); $('#rvSend').disabled = false; return; }
     if (b.id === 'rvSend') { b.disabled = true; try { await rpc('review_order', { p_code: code, p_rating: rating, p_comment: $('#rvText').value }); toast('Obrigado pela avaliação!'); await draw(true); } finally { b.disabled = false; } return; }
     if (b.id === 'pixCopy') { const ta = $('#pixCode'); try { await navigator.clipboard.writeText(ta.value); } catch { ta.select(); document.execCommand('copy'); } toast('Código copiado. Cole no app do banco.'); }
+    if (b.id === 'cardPay') { b.disabled = true; try { const c = await pixCall({ action: 'card', code, origin: location.origin }); if (c.url) location.href = c.url; else await draw(true); } finally { b.disabled = false; } return; }
     if (b.id === 'pixNew') { b.disabled = true; try { await pixCall({ action: 'create', code, email: $('#pixEmail').value }); await draw(true); } finally { b.disabled = false; } }
     if (b.id === 'pixCheck') { b.disabled = true; try { const r = await pixCall({ action: 'check', code }); toast(r.paid ? 'Pagamento confirmado!' : 'Ainda não caiu. Pode levar alguns segundos.'); await draw(true); } finally { b.disabled = false; } }
   });
+  // Voltou do Mercado Pago: confere o pagamento na hora, sem esperar o aviso.
+  if (/[?&](payment_id|collection_id|status)=/.test(location.search)) {
+    history.replaceState(null, '', location.pathname);
+    try { const r = await pixCall({ action: 'check', code }); if (r.paid) toast('Pagamento aprovado!'); } catch {}
+  }
   const st = await draw(true);
   if (!['entregue', 'cancelado'].includes(st)) {
     const h = setInterval(async () => { try { if (['entregue', 'cancelado'].includes(await draw())) clearInterval(h); } catch {} }, 5000);
@@ -732,12 +767,12 @@ async function vTrack(code) {
 async function vPanel(tab) {
   const S = ME.tenant, owner = ME.role === 'owner';
   setColor(S.color); $('#bName').textContent = S.name;
-  const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ['cardapio', 'Cardápio'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['config', 'Configurações']] : [])];
+  const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ['cardapio', 'Cardápio'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['unidades', 'Unidades'], ['config', 'Configurações']] : [])];
   if (tab === 'kds') return pKitchenScreen(S);
   if (!tabs.some(t => t[0] === tab) && tab !== 'novo') tab = 'pedidos';
   $('#banner').innerHTML = billingBanner(S, owner);
   header(tabs.map(([k, n]) => `<a href="/painel/${k}" data-link class="${k === tab ? 'on' : ''}">${esc(n)}</a>`).join('') + `<a href="/loja/${S.slug}" target="_blank" rel="noopener">Ver loja ↗</a>` + (ME.isAdmin ? '<a href="/plataforma" data-link>Plataforma</a>' : ''));
-  await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, caixa: pCash, novo: pNewOrder, clientes: pCustomers, relatorios: pReports, config: pConfig })[tab](S, owner);
+  await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, caixa: pCash, novo: pNewOrder, clientes: pCustomers, relatorios: pReports, unidades: pUnits, config: pConfig })[tab](S, owner);
 }
 
 function billingBanner(t, owner) {
@@ -1157,7 +1192,7 @@ async function pCustomers(S) {
   const coupons = await q(sb.from('coupons').select('code, percent, free_shipping, active').eq('tenant_id', S.id).eq('active', true).order('id')).catch(() => []);
   const cupTxt = c => c ? `\nUse o cupom *${c.code}*: ${[c.percent ? `${c.percent}% de desconto` : '', c.free_shipping ? 'entrega grátis' : ''].filter(Boolean).join(' e ')}.` : '';
   const msgFor = c => camp.msg.replaceAll('{nome}', c.name.split(' ')[0]).replaceAll('{loja}', S.name)
-    .replaceAll('{cupom}', cupTxt(coupons.find(x => x.code === camp.coupon))).replaceAll('{link}', `${location.origin}/loja/${S.slug}?repetir=1`);
+    .replaceAll('{cupom}', cupTxt(coupons.find(x => x.code === camp.coupon))).replaceAll('{link}', `${storeLink(S)}?repetir=1`);
   const saveCamp = () => local.set(`camp:${S.id}`, camp);
   const load = async () => { list = await rpc('store_customers', { p_tenant: S.id, p_search: term || null, p_limit: gone ? 1000 : 200 }); draw(); };
   const shown = () => gone ? list.filter(c => mins(c.lastOrder) > gone * 1440 && c.orders > 0) : list;
@@ -1207,6 +1242,47 @@ async function pCustomers(S) {
   await load();
 }
 
+/* ---------- várias unidades ---------- */
+async function pUnits(S) {
+  const draw = async () => {
+    const us = await rpc('my_units');
+    const sum = k => us.reduce((a, u) => a + u[k].revenue, 0), cnt = k => us.reduce((a, u) => a + u[k].orders, 0);
+    app.innerHTML = `<div class="row between"><div><h2>Unidades</h2><p class="lead">Todas as lojas da sua conta num lugar só. Cada unidade tem cardápio, pedidos, equipe e assinatura próprios.</p></div>
+      <button class="pri" id="uNew">+ Nova unidade</button></div>
+    <div class="kpis"><div class="kpi"><span class="mut">Vendas hoje (todas)</span><b class="price">${brl(sum('today'))}</b><span class="mut">${cnt('today')} pedido(s)</span></div>
+      <div class="kpi"><span class="mut">Vendas no mês (todas)</span><b class="price">${brl(sum('month'))}</b><span class="mut">${cnt('month')} pedido(s)</span></div>
+      <div class="kpi"><span class="mut">Unidades</span><b>${us.length}</b><span class="mut">${us.filter(u => u.open).length} aberta(s) agora</span></div>
+      <div class="kpi"><span class="mut">Pedidos em andamento</span><b>${us.reduce((a, u) => a + u.openOrders, 0)}</b><span class="mut">em todas as unidades</span></div></div>
+    <div class="panel"><div class="scroll"><table class="stack"><thead><tr><th>Unidade</th><th>Agora</th><th class="n">Hoje</th><th class="n">No mês</th><th class="n">Em andamento</th><th></th></tr></thead><tbody>
+      ${us.map(u => `<tr><td data-l="Unidade"><span class="dot" style="background:${esc(u.color)}"></span><b>${esc(u.name)}</b>${u.id === S.id ? ' <span class="badge">esta</span>' : ''}<br><span class="mut">${esc(u.domain || '/loja/' + u.slug)}</span></td>
+        <td data-l="Agora">${!u.active ? '<span class="badge b-r">Suspensa</span>' : !u.billingOk ? '<span class="badge b-r">Assinatura pendente</span>' : u.open ? '<span class="badge b-g">Aberta</span>' : '<span class="badge">Fechada</span>'}</td>
+        <td data-l="Hoje" class="n"><span class="price">${brl(u.today.revenue)}</span><br><span class="mut">${u.today.orders} ped.</span></td>
+        <td data-l="No mês" class="n"><span class="price">${brl(u.month.revenue)}</span><br><span class="mut">${u.month.orders} ped.</span></td>
+        <td data-l="Em andamento" class="n">${u.openOrders}</td>
+        <td data-l=""><span class="row">${u.id === S.id ? '' : `<button class="ghost sm" data-go="${u.id}">Abrir painel</button>`}<a class="btn ghost sm" href="${esc(storeLink({ slug: u.slug, custom_domain: u.domain }))}" target="_blank" rel="noopener">Ver loja</a></span></td></tr>`).join('')}</tbody></table></div></div>`;
+  };
+  app.onclick = attempt(async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.go) { local.set('tenant', b.dataset.go); return go('/painel'); }
+    if (b.id === 'uNew') {
+      dialog(`<h2>Nova unidade</h2><p class="mut" style="margin:0">A nova loja começa com uma cópia do cardápio (com opções e fotos), das taxas de entrega, das promoções, dos horários e das regras de <b>${esc(S.name)}</b>. Endereço, telefone, equipe, cupons e Mercado Pago você configura depois.</p>
+        <form id="fUnit"><label>Nome da unidade<input id="uN" required maxlength="80" placeholder="${esc(S.name)} — Centro"></label>
+        <label>Endereço da loja (opcional)<input id="uS" maxlength="40" placeholder="${esc(S.slug)}-centro"></label>
+        <p class="mut" style="margin:0">Cada unidade tem a própria assinatura (com teste grátis).</p>
+        <div class="row"><button class="pri">Criar unidade</button><button class="ghost" type="button" data-close>Cancelar</button></div></form>`);
+      $('#dlgBody').onsubmit = attempt(async ev => {
+        ev.preventDefault(); const btn = ev.target.querySelector('button.pri'); btn.disabled = true;
+        try {
+          const t = await rpc('create_unit', { p_from: S.id, p_name: $('#uN').value, p_slug: $('#uS').value.trim() || null });
+          closeDlg(); toast(`Unidade "${t.name}" criada`); local.set('tenant', t.id); go('/painel/config');
+        } finally { btn.disabled = false; }
+      });
+    }
+  });
+  cleanup = () => { app.onclick = null; };
+  await draw();
+}
+
 /* ---------- relatórios ---------- */
 async function pReports(S) {
   let days = 7;
@@ -1249,7 +1325,7 @@ async function pConfig(S) {
       q(sb.from('promotions').select('*').eq('tenant_id', S.id).order('id')).catch(() => []), q(sb.from('products').select('id, name, category').eq('tenant_id', S.id).order('sort'))]);
     const prodById = Object.fromEntries(prodList.map(p => [p.id, p]));
     st0 = st;
-    const link = `${location.origin}/loja/${st.slug}`;
+    const link = storeLink(st);
     app.innerHTML = `<h2>Configurações</h2><p class="lead">Endereço da sua loja: <a href="${link}" target="_blank" rel="noopener">${esc(link)}</a> <button class="ghost sm" id="copy">Copiar</button></p>
     ${nOrders ? '' : '<div class="panel" style="margin-bottom:20px"><h3>Quer ver o sistema funcionando?</h3><p class="mut" style="margin:0">Gere pedidos de exemplo para testar a fila, as entregas e os relatórios.</p><button class="ok" id="demo">Gerar 12 pedidos de exemplo</button></div>'}
     <div class="two"><form class="panel" id="fStore"><h3>Loja</h3>
@@ -1332,7 +1408,7 @@ async function pConfig(S) {
     <div class="panel"><h3>Equipe</h3><table><tbody>${team.map(u => `<tr><td>${esc(u.email)}</td><td>${u.role === 'owner' ? 'Dono' : 'Atendente'}</td><td class="n">${u.role === 'staff' ? `<button class="ghost sm" data-staff="${u.user_id}" aria-label="Remover">×</button>` : ''}</td></tr>`).join('')}</tbody></table>
       <form id="fTeam" class="row" style="flex-wrap:nowrap"><input id="tE" type="email" placeholder="E-mail do atendente" required><button class="ghost">Adicionar</button></form>
       <p class="mut" style="margin:0">O atendente precisa criar uma conta em /entrar/cadastro antes. Ele opera pedidos, entregas e disponibilidade do cardápio, sem acesso a relatórios e configurações.</p></div>
-    <form class="panel" id="fPix"><h3>Pix online (Mercado Pago)</h3>
+    <form class="panel" id="fPix"><h3>Pix e cartão online (Mercado Pago)</h3>
       ${pix ? `<p class="mut" style="margin:0">Situação: ${pix.enabled ? '<span class="badge b-g">Ativo na loja</span>' : '<span class="badge">Desligado</span>'}
         ${pix.configured ? ` · Access Token cadastrado (${esc(pix.hint)})${pix.test ? ' · <span class="badge b-a">modo de teste</span>' : ''}` : ''}</p>` : '<p class="mut" style="margin:0">Rode a migração do Pix no Supabase para usar este recurso.</p>'}
       <p class="mut" style="margin:0">O cliente paga com QR Code na hora de pedir, o dinheiro cai direto na sua conta do Mercado Pago e o pedido só aparece no preparo depois de pago.</p>
@@ -1343,7 +1419,16 @@ async function pConfig(S) {
         <li>Sua conta precisa ter uma <b>chave Pix cadastrada</b> no Mercado Pago.</li></ol></details>
       <label>Access Token<input id="pxTok" type="password" autocomplete="off" placeholder="${pix?.configured ? 'Deixe em branco para manter o atual' : 'APP_USR-...'}"></label>
       <label class="chk"><input type="checkbox" id="pxOn" ${pix?.enabled ? 'checked' : ''}> Oferecer "Pix agora" na loja</label>
+      <label class="chk"><input type="checkbox" id="pxCard" ${pix?.cardEnabled ? 'checked' : ''} ${pix && 'cardEnabled' in pix ? '' : 'disabled'}> Oferecer "Cartão de crédito agora" na loja <span class="mut">(até 12x, taxas do Mercado Pago)</span></label>
       <button class="pri" ${pix ? '' : 'disabled'}>Salvar Pix</button></form>
+    <form class="panel" id="fDom"><h3>Domínio próprio</h3>
+      <p class="mut" style="margin:0">Use um endereço com o nome da sua marca, como <b>pedidos.minhaloja.com.br</b>, no lugar do link do Balcão. O link antigo continua funcionando.</p>
+      ${'custom_domain' in st ? `<label>Domínio<input id="dDom" maxlength="120" placeholder="pedidos.minhaloja.com.br" value="${esc(st.custom_domain || '')}"></label>
+      <details ${st.custom_domain ? 'open' : ''}><summary class="mut">Como ligar o domínio</summary><ol class="mut">
+        <li>Compre o domínio (por exemplo no Registro.br) ou use um que você já tem.</li>
+        <li>No painel de DNS do domínio, crie um registro <b>CNAME</b> com nome <b>${esc((st.custom_domain || 'pedidos.minhaloja.com.br').split('.')[0])}</b> apontando para <b>cname.vercel-dns.com</b>.</li>
+        <li>Salve aqui e avise o suporte do ${esc(PLATFORM.name)} para ativar o domínio. O endereço começa a funcionar em até algumas horas, com cadeado (https).</li></ol></details>
+      <button class="pri">Salvar domínio</button>` : '<p class="mut" style="margin:0">Rode a migração 20261125000000_cartao_dominio_unidades.sql no Supabase para usar este recurso.</p>'}</form>
     <div class="panel" id="assinatura"><h3>Assinatura do Balcão</h3>
       ${bill ? `<p style="margin:0">${{ trial: `<span class="badge">Teste grátis</span> termina em ${new Date(bill.trialEndsAt).toLocaleDateString('pt-BR')} (${bill.daysLeft} dia${bill.daysLeft === 1 ? '' : 's'})`,
         active: `<span class="badge b-g">Ativa</span> próxima cobrança em ${bill.paidUntil ? new Date(bill.paidUntil).toLocaleDateString('pt-BR') : '—'}`,
@@ -1366,7 +1451,7 @@ async function pConfig(S) {
     // botões de envio de formulário são tratados no onsubmit; os demais (fora de formulários) aqui
     const b = e.target.closest('button'); if (!b || (b.type === 'submit' && b.closest('form'))) return;
     if (b.id === 'shRm') { await q(sb.from('tenants').update({ banner_path: null }).eq('id', S.id)); if (st0?.banner_path) sb.storage.from(BUCKET).remove([st0.banner_path]).catch(() => {}); toast('Banner removido'); return draw(); }
-    if (b.id === 'mPrint') { await printTableQrs(S.slug, Math.max(1, Math.min(200, +$('#mCount').value || 10)), S.name); return; }
+    if (b.id === 'mPrint') { await printTableQrs(storeLink(S), Math.max(1, Math.min(200, +$('#mCount').value || 10)), S.name); return; }
     if (b.id === 'dLoc') {
       const info = await lookupCep($('#dCep').value);
       if (!info) throw new Error('CEP não encontrado');
@@ -1375,7 +1460,7 @@ async function pConfig(S) {
       $('#dCoord').value = `${pos.lat.toFixed(6)}, ${pos.lng.toFixed(6)}`; toast('Localização encontrada. Confira em "Ver no mapa" depois de salvar.'); return;
     }
     if (b.id === 'copyMon') { for (let i = 0; i < 7; i++) for (const k of 'abcd') $(`#h${i}${k}`).value = $(`#h1${k}`).value; return; }
-    if (b.id === 'copy') { try { await navigator.clipboard.writeText(`${location.origin}/loja/${S.slug}`); toast('Link copiado'); } catch { toast('Copie o link manualmente'); } return; }
+    if (b.id === 'copy') { try { await navigator.clipboard.writeText(storeLink(st0 || S)); toast('Link copiado'); } catch { toast('Copie o link manualmente'); } return; }
     if (b.id === 'demo') { b.disabled = true; await rpc('generate_demo_orders', { p_tenant: S.id, p_count: 12 }); toast('Pedidos de exemplo criados'); }
     if (b.dataset.del) { if (!sure(b)) return; const [t, id] = b.dataset.del.split(':'); await q(sb.from(t).delete().eq('id', +id)); }
     if (b.dataset.clink || b.dataset.crot) {
@@ -1479,7 +1564,11 @@ async function pConfig(S) {
         allow_tables: $('#mOn').checked, tables_count: Math.max(1, Math.min(200, +$('#mCount').value || 10)) }).eq('id', S.id));
       await refreshBrand();
     }
-    if (id === 'fPix') { await rpc('set_pix_settings', { p_tenant: S.id, p_token: $('#pxTok').value.trim() || null, p_enabled: $('#pxOn').checked }); }
+    if (id === 'fDom') { const d = await rpc('set_custom_domain', { p_tenant: S.id, p_domain: $('#dDom').value }); toast(d ? `Domínio salvo: ${d}. Agora avise o suporte para ativar.` : 'Domínio removido'); await draw(); return; }
+    if (id === 'fPix') {
+      const ps = await rpc('set_pix_settings', { p_tenant: S.id, p_token: $('#pxTok').value.trim() || null, p_enabled: $('#pxOn').checked });
+      if (ps && 'cardEnabled' in ps && ps.cardEnabled !== $('#pxCard').checked) await rpc('set_card_online', { p_tenant: S.id, p_enabled: $('#pxCard').checked });
+    }
     if (id === 'fZone') { const fee = toCents($('#zF').value); if (!Number.isInteger(fee) || fee < 0) throw new Error('Taxa inválida'); await q(sb.from('zones').insert({ tenant_id: S.id, name: $('#zN').value.trim(), fee })); }
     if (id === 'fCup') {
       const min = $('#cuMin').value.trim() ? toCents($('#cuMin').value) : 0;
@@ -1515,7 +1604,8 @@ function billLabel(t) {
 // Migrações que o site espera encontrar no banco (a tela Plataforma avisa as que faltam).
 const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql',
   '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql',
-  '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql'];
+  '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql',
+  '20261125000000_cartao_dominio_unidades.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };
@@ -1526,6 +1616,7 @@ async function vPlatform() {
   const plans = await q(sb.from('plans').select('name').order('sort'));
   const draw = async () => {
     const [o, sch, h] = await Promise.all([rpc('platform_overview'), rpc('schema_status').catch(() => null), rpc('platform_health', { p_days: hDays }).catch(() => null)]);
+    const doms = await rpc('platform_domains').catch(() => null);
     const missing = sch ? MIGRATIONS.map((file, i) => ({ n: i + 1, file, ok: sch.find(m => m.file === file)?.ok ?? false })).filter(m => !m.ok) : null;
     const dbBox = !missing ? `<div class="banner warn" style="margin-bottom:16px;text-align:left;border:1px solid var(--line);border-radius:12px"><b>Não consegui conferir o banco.</b> Rode no SQL Editor do Supabase a migração <code>20261123000000_checagem.sql</code> (e as anteriores que faltarem). Depois recarregue esta página.</div>`
       : missing.length ? `<div class="banner warn" style="margin-bottom:16px;text-align:left;border:1px solid var(--line);border-radius:12px"><b>Faltam ${missing.length} migraç${missing.length > 1 ? 'ões' : 'ão'} no banco.</b> Rode no SQL Editor do Supabase, nesta ordem, cada uma numa consulta nova:<ol style="margin:6px 0 0">${missing.map(m => `<li><code>${esc(m.file)}</code></li>`).join('')}</ol>Os arquivos estão na pasta <code>supabase/migrations</code> do GitHub. Enquanto faltarem, algumas telas mostram erro.</div>`
@@ -1553,6 +1644,9 @@ async function vPlatform() {
     <div class="kpis"><div class="kpi"><span class="mut">Empresas</span><b>${o.tenants.length}</b><span class="mut">${o.paying ?? 0} pagando · ${o.trials ?? 0} em teste</span></div><div class="kpi"><span class="mut">Receita mensal (MRR)</span><b class="price">${brl(o.mrr)}</b><span class="mut">+ ${brl(o.potentialMrr || 0)} se os testes virarem assinatura</span></div>
       <div class="kpi"><span class="mut">Vendido pelas lojas</span><b class="price">${brl(o.gmv)}</b></div><div class="kpi"><span class="mut">Pedidos</span><b>${o.orders}</b></div></div>
     ${healthBox}
+    ${doms?.length ? `<div class="panel" style="margin-bottom:20px"><h3>Domínios próprios (${doms.length})</h3>
+      <p class="mut" style="margin:0 0 8px">Para ativar, adicione cada domínio na Vercel: projeto → <b>Settings → Domains → Add</b>. A Vercel confere o DNS da loja e cria o certificado sozinha.</p>
+      ${doms.map(d => `<div class="ci"><span><b>${esc(d.domain)}</b><br><span class="mut">${esc(d.name)}</span></span><span class="row"><button class="ghost sm" data-copydom="${esc(d.domain)}">Copiar</button><a class="btn ghost sm" href="https://${esc(d.domain)}" target="_blank" rel="noopener">Testar</a></span></div>`).join('')}</div>` : ''}
     <div class="panel"><h3>Empresas</h3><div class="scroll"><table class="stack"><thead><tr><th>Empresa</th><th>Segmento</th><th>Dono</th><th>Plano</th><th>Assinatura</th><th class="n">Pedidos</th><th class="n">Vendas</th><th></th></tr></thead><tbody>
       ${o.tenants.map(t => `<tr><td data-l="Empresa"><span class="dot" style="background:${esc(t.color)}"></span><a href="/loja/${esc(t.slug)}" target="_blank" rel="noopener">${esc(t.name)}</a> ${t.active ? '' : '<span class="badge b-r">Suspensa</span>'}</td><td data-l="Segmento">${esc(t.segmentName)}</td><td data-l="Dono"><span class="mut">${esc(t.ownerEmail || '—')}</span></td>
         <td data-l="Plano"><select data-plan="${t.id}" aria-label="Plano">${plans.map(p => `<option ${p.name === t.plan ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></td>
@@ -1561,6 +1655,7 @@ async function vPlatform() {
   };
   app.onclick = attempt(async e => {
     const hd = e.target.closest('button[data-hdays]'); if (hd) { hDays = +hd.dataset.hdays; return draw(); }
+    const cd = e.target.closest('button[data-copydom]'); if (cd) { try { await navigator.clipboard.writeText(cd.dataset.copydom); toast('Domínio copiado'); } catch { toast(cd.dataset.copydom); } return; }
     const bb = e.target.closest('button[data-bill]');
     if (bb) { await rpc('platform_set_billing', { p_tenant: bb.dataset.bill, p_status: bb.dataset.st, p_add_days: bb.dataset.days ? +bb.dataset.days : null }); toast('Assinatura atualizada'); return draw(); }
     const b = e.target.closest('button[data-act]'); if (!b) return;

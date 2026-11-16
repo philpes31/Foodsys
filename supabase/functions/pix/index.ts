@@ -1,9 +1,11 @@
 // @ts-nocheck  (JavaScript puro; roda no Deno do Supabase e nos testes do Node)
-// Edge Function "pix": cobrança Pix pelo Mercado Pago para os pedidos do Balcão.
+// Edge Function "pix": cobrança Pix e cartão de crédito pelo Mercado Pago para os pedidos do Balcão.
 //
 // Ações (POST com JSON):
 //   { action: "create", code, email } -> cria (ou reaproveita) a cobrança Pix do pedido e devolve QR Code e copia-e-cola
 //   { action: "check",  code }        -> confere o pagamento direto na API do Mercado Pago (botão "Já paguei")
+//   { action: "card",   code, origin } -> cria o checkout de cartão do Mercado Pago e devolve o link para pagar
+//   { action: "check",  code }        -> também vale para cartão: procura um pagamento aprovado do pedido
 //   ?action=webhook&t=<empresa>       -> aviso do Mercado Pago; o pagamento é SEMPRE reconferido na API antes de valer
 //
 // O dinheiro cai direto na conta do Mercado Pago de cada loja (Access Token cadastrado no painel).
@@ -46,12 +48,44 @@ export function makeHandler({ supabaseUrl, serviceKey, fetchImpl = fetch, now = 
     p_tenant: tenantId, p_order: orderId, p_ref: String(pay.id), p_mp_status: pay.status, p_amount: Math.round(Number(pay.transaction_amount) * 100)
   });
 
-  async function loadOrder(code) {
+  async function loadOrder(code, kinds = ['Pix online']) {
     if (!code || !/^[A-Za-z0-9]{6,20}$/.test(String(code))) throw new HttpError(400, 'Código do pedido inválido');
     const o = await rpc('pix_order', { p_code: String(code) });
     if (!o) throw new HttpError(404, 'Pedido não encontrado');
-    if (o.payment !== 'Pix online') throw new HttpError(400, 'Este pedido não é Pix online');
+    if (!kinds.includes(o.payment)) throw new HttpError(400, kinds.length === 1 && kinds[0] === 'Cartão online' ? 'Este pedido não é cartão online' : 'Este pedido não é Pix online');
     return o;
+  }
+
+  // Endereço para onde o Mercado Pago devolve o cliente depois de pagar: só https (ou localhost em testes).
+  const safeOrigin = o => { const v = String(o || ''); return /^https:\/\/[a-z0-9.-]+(:\d+)?$/i.test(v) || /^http:\/\/localhost(:\d+)?$/.test(v) ? v : null; };
+
+  async function card(body) {
+    rpc('pix_expire_overdue', {}).catch(() => {});
+    const o = await loadOrder(body.code, ['Cartão online']);
+    if (o.status !== 'pagamento') return { status: o.status, paid: o.paymentStatus === 'paid' };
+    if (!o.cardOnline || !o.token) throw new HttpError(400, 'A loja desativou o cartão online');
+    const origin = safeOrigin(body.origin);
+    if (!origin) throw new HttpError(400, 'Endereço de retorno inválido');
+    const back = `${origin}/pedido/${o.code}`;
+    const pref = await mp(o.token, '/checkout/preferences', {
+      method: 'POST',
+      body: JSON.stringify({
+        items: [{ id: String(o.id), title: `Pedido #${o.number} - ${o.storeName}`.slice(0, 120), quantity: 1, unit_price: o.total / 100, currency_id: 'BRL' }],
+        payer: { name: String(o.customerName || '').split(' ')[0] || 'Cliente' },
+        external_reference: String(o.id),
+        notification_url: `${supabaseUrl}/functions/v1/pix?action=webhook&t=${o.tenantId}`,
+        back_urls: { success: back, pending: back, failure: back },
+        auto_return: 'approved',
+        statement_descriptor: String(o.storeName || '').replace(/[^A-Za-z0-9 ]/g, '').slice(0, 13) || undefined,
+        // só cartão: boleto e Pix ficam de fora (o Pix tem a opção própria)
+        payment_methods: { excluded_payment_types: [{ id: 'ticket' }, { id: 'bank_transfer' }, { id: 'atm' }], installments: 12 },
+        expires: true,
+        expiration_date_to: new Date(now().getTime() + 40 * 60000).toISOString().replace('Z', '+00:00')
+      })
+    });
+    const url = o.token.startsWith('TEST-') ? (pref.sandbox_init_point || pref.init_point) : pref.init_point;
+    if (!url) throw new HttpError(502, 'O Mercado Pago não devolveu o link de pagamento');
+    return { status: o.status, url };
   }
 
   async function create(body) {
@@ -86,7 +120,16 @@ export function makeHandler({ supabaseUrl, serviceKey, fetchImpl = fetch, now = 
   }
 
   async function check(body) {
-    const o = await loadOrder(body.code);
+    const o = await loadOrder(body.code, ['Pix online', 'Cartão online']);
+    if (o.payment === 'Cartão online') {
+      if (o.paymentStatus === 'paid' || !o.token) return { status: o.status, paid: o.paymentStatus === 'paid' };
+      // no cartão o pedido pode ter várias tentativas: procura uma aprovada
+      const found = await mp(o.token, `/v1/payments/search?external_reference=${encodeURIComponent(String(o.id))}&sort=date_created&criteria=desc`);
+      const pay = (found?.results || []).find(p => p.status === 'approved' && String(p.external_reference) === String(o.id));
+      if (!pay) return { status: o.status, paid: false, mpStatus: found?.results?.[0]?.status || null };
+      const status = await apply(o.tenantId, o.id, pay);
+      return { status, paid: true, mpStatus: 'approved' };
+    }
     if (o.paymentStatus === 'paid' || !o.pixRef || !o.token) return { status: o.status, paid: o.paymentStatus === 'paid' };
     const pay = await mp(o.token, `/v1/payments/${encodeURIComponent(o.pixRef)}`);
     const status = await apply(o.tenantId, o.id, pay);
@@ -103,7 +146,8 @@ export function makeHandler({ supabaseUrl, serviceKey, fetchImpl = fetch, now = 
     // Nunca confiar no corpo do aviso: o pagamento é buscado direto no Mercado Pago com o token da loja.
     const pay = await mp(token, `/v1/payments/${encodeURIComponent(String(payId))}`);
     const orderId = Number(pay.external_reference);
-    if (pay.payment_method_id !== 'pix' || !Number.isInteger(orderId)) return { ignored: true };
+    // Pix ou cartão: o banco confere se a forma de pagamento e o valor batem com o pedido
+    if (!Number.isInteger(orderId)) return { ignored: true };
     const status = await apply(tenant, orderId, pay);
     return { ok: true, status };
   }
@@ -124,6 +168,7 @@ export function makeHandler({ supabaseUrl, serviceKey, fetchImpl = fetch, now = 
       }
       if (action === 'create') return json(await create(body));
       if (action === 'check') return json(await check(body));
+      if (action === 'card') return json(await card(body));
       throw new HttpError(400, 'Ação inválida');
     } catch (e) {
       if (!(e instanceof HttpError)) log.error(e);
