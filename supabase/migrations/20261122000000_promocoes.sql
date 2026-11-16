@@ -285,3 +285,6 @@ begin
 end $$;
 
 revoke execute on function public.promo_active(public.promotions, public.tenants, timestamptz) from public, anon;
+
+-- Faz a API do Supabase enxergar as funções novas na hora.
+notify pgrst, 'reload schema';
