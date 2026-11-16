@@ -29,7 +29,7 @@ before(() => {
   psql(['-d', 'postgres', '-c', `drop database if exists ${DB}`]);
   psql(['-d', 'postgres', '-c', `create database ${DB}`]);
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -611,4 +611,13 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
   assert.equal(c.total, c.subtotal + c.fees - c.discounts);
   sql(`update tenants set free_delivery_above = null where id = '${pizzaId}'`, U.pizza);
   sql(`update promotions set active = false where tenant_id = '${pizzaId}'`, U.pizza);
+});
+
+test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
+  const st = json(`public.schema_status()`, null);
+  assert.equal(st.length, 11);
+  assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
+  sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
+  try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
+  finally { sql(`alter table orders rename column scheduled_tmp to scheduled_for`); }
 });

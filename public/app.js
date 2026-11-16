@@ -28,7 +28,8 @@ const sb = configured ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 const TR = [[/Invalid login credentials/i, 'E-mail ou senha incorretos'], [/Email not confirmed/i, 'Confirme seu e-mail pelo link que enviamos antes de entrar'],
   [/User already registered/i, 'Já existe uma conta com esse e-mail'], [/Password should be at least/i, 'A senha precisa ter pelo menos 6 caracteres'],
   [/rate limit/i, 'Muitas tentativas. Aguarde um pouco.'], [/permission denied|row-level security/i, 'Sem permissão para essa ação'],
-  [/duplicate key/i, 'Já existe um registro igual'], [/Failed to fetch|NetworkError/i, 'Sem conexão com o servidor']];
+  [/duplicate key/i, 'Já existe um registro igual'],
+  [/Could not find the (function|table)|schema cache|column .* does not exist|relation .* does not exist/i, 'O banco de dados está desatualizado: falta rodar migrações no Supabase. O administrador vê quais na tela Plataforma.'], [/Failed to fetch|NetworkError/i, 'Sem conexão com o servidor']];
 const tr = m => (TR.find(([re]) => re.test(m)) || [0, m])[1];
 async function q(promise) { const { data, error } = await promise; if (error) throw new Error(tr(error.message || 'Erro')); return data; }
 const rpc = (fn, args) => q(sb.rpc(fn, args));
@@ -57,7 +58,7 @@ async function pixCall(body) {
 function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2800); }
 function dialog(html, wide = false) { $('#dlg').classList.toggle('wide', wide); $('#dlgBody').innerHTML = html; $('#dlg').classList.add('open'); $('#dlgBody').querySelector('input,select,button')?.focus(); }
 function closeDlg() { $('#dlg').classList.remove('open'); $('#dlgBody').onclick = $('#dlgBody').onchange = $('#dlgBody').onsubmit = null; }
-$('#dlg').addEventListener('click', e => { if (e.target.id === 'dlg') closeDlg(); });
+$('#dlg').addEventListener('click', e => { if (e.target.id === 'dlg' || e.target.closest('[data-close]')) closeDlg(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDlg(); });
 const setColor = c => { document.documentElement.style.setProperty('--red', c || '#d62828'); document.querySelector('meta[name="theme-color"]')?.setAttribute('content', c || '#d62828'); };
 
@@ -490,6 +491,20 @@ async function vShop(slug) {
   let cart = local.get(cartKey, []).filter(c => products.some(p => p.id === c.productId)), cat = null, coupon = null;
   const cats = [...new Set(products.map(p => p.category))];
   const saveCart = () => local.set(cartKey, cart);
+  // "Pedir de novo": guarda o último pedido neste aparelho e remonta com os preços de hoje.
+  const lastKey = `last:${slug}`;
+  const againItems = () => local.get(lastKey, []).flatMap(c => {
+    const p = products.find(x => x.id === c.productId); if (!p) return [];
+    const opts = p.groups.flatMap(g => g.options);
+    if (!c.optionIds.every(id => opts.some(o => o.id === id))) return [];
+    return [{ ...c, name: p.name, unit: unitOfP(p, c.optionIds) }];
+  });
+  const orderAgain = () => {
+    const its = againItems(); if (!its.length) return toast('Os itens do último pedido não estão mais disponíveis');
+    for (const it of its) { const ex = cart.find(c => c.productId === it.productId && c.optionIds.join() === it.optionIds.join() && c.notes === it.notes); ex ? ex.qty += it.qty : cart.push({ ...it }); }
+    saveCart(); toast(its.length < local.get(lastKey, []).length ? 'Último pedido no carrinho (alguns itens não estão mais disponíveis)' : 'Último pedido no carrinho'); paint();
+  };
+  if (new URLSearchParams(location.search).get('repetir') === '1') { history.replaceState(null, '', location.pathname + (TABLE ? `?mesa=${encodeURIComponent(TABLE)}` : '')); if (!cart.length) setTimeout(orderAgain); }
   const unitOf = (p, ids) => p.price + p.groups.flatMap(g => g.options).filter(o => ids.includes(o.id)).reduce((t, o) => t + o.price, 0);
   const totals = () => {
     const sub = cart.reduce((t, c) => t + c.qty * c.unit, 0), pickup = !!TABLE || $('#cMode')?.value === 'pickup';
@@ -520,7 +535,7 @@ async function vShop(slug) {
         ${p.stock === 0 ? '<span class="badge b-r">Esgotado</span>' : `<button class="pri sm" data-add="${p.id}" ${CAN_ORDER ? '' : 'disabled'}>Adicionar</button>`}</div>${p.stock > 0 && p.stock <= 5 ? `<span class="badge b-a">Últimas ${p.stock} unidade${p.stock > 1 ? 's' : ''}</span>` : ''}</div></article>`).join('') || '<p class="empty">Cardápio vazio.</p>'}</div>
     </section>
     <aside class="cart" aria-label="Carrinho"><h3>Seu pedido</h3>
-      ${cart.length ? cart.map((x, i) => `<div class="ci"><div><b>${x.qty}× ${esc(x.name)}</b>${x.optText ? `<br><span class="mut">${esc(x.optText)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}<br><button class="ghost sm" data-dec="${i}" aria-label="Diminuir">−</button> <button class="ghost sm" data-inc="${i}" aria-label="Aumentar">+</button></div><span class="price">${brl(x.qty * x.unit)}</span></div>`).join('') : '<p class="empty">Carrinho vazio.</p>'}
+      ${cart.length ? cart.map((x, i) => `<div class="ci"><div><b>${x.qty}× ${esc(x.name)}</b>${x.optText ? `<br><span class="mut">${esc(x.optText)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}<br><button class="ghost sm" data-dec="${i}" aria-label="Diminuir">−</button> <button class="ghost sm" data-inc="${i}" aria-label="Aumentar">+</button></div><span class="price">${brl(x.qty * x.unit)}</span></div>`).join('') : `<p class="empty">Carrinho vazio.</p>${againItems().length ? `<button class="ghost" id="again" style="width:100%">↻ Pedir de novo<br><span class="mut" style="font-weight:400">${esc(againItems().map(x => `${x.qty}× ${x.name}`).join(', ').slice(0, 90))}</span></button>` : ''}`}
       ${TABLE ? `<p style="margin:0">Pedido para a <b>Mesa ${esc(TABLE)}</b></p>` : `<label>Como receber<select id="cMode"><option value="delivery">Entrega</option>${S.allow_pickup ? '<option value="pickup">Retirar na loja</option>' : ''}</select></label>`}
       <label id="zWrap" ${DIST || TABLE ? 'hidden' : ''}>Bairro<select id="cZone">${zones.map(z => `<option value="${z.id}">${esc(z.name)} · ${z.fee ? brl(z.fee) : 'grátis'}</option>`).join('')}</select></label>
       <label>Cupom<span class="row" style="flex-wrap:nowrap"><input id="cCup" placeholder="Ex.: PRIMEIRA10" value="${esc(coupon?.code || '')}"><button class="ghost" id="cupBtn">Aplicar</button></span></label>
@@ -604,6 +619,7 @@ async function vShop(slug) {
           changeFor: $('#kT').value ? toCents($('#kT').value) : undefined, coupon: coupon?.code,
           items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: c.notes })) } });
         local.set('customer', { ...last, ...customer, ...(email ? { email } : {}), ...(t.pickup || TABLE ? {} : { cep: $('#kCep').value, rua: $('#kRua').value, num: $('#kNum').value, comp: $('#kComp').value }) });
+        local.set(lastKey, cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, optText: c.optText, notes: c.notes })));
         cart = []; saveCart();
         if (r.pix) { $('#kGo').textContent = 'Gerando Pix…'; try { await pixCall({ action: 'create', code: r.code, email }); } catch (err) { toast(err.message); } }
         closeDlg(); go(`/pedido/${r.code}`);
@@ -627,6 +643,7 @@ async function vShop(slug) {
       paintTotals();
     }
     else if (b.id === 'checkout') checkout();
+    else if (b.id === 'again') orderAgain();
     else if (b.id === 'toCart') $('.cart').scrollIntoView({ behavior: 'smooth' });
     else if (b.id === 'seeReviews') dialog(`<h2>Avaliações</h2><p class="lead" style="margin:0">★ ${String(RV.avg).replace('.', ',')} de 5 · ${RV.count} avaliações</p>
       ${RV.recent.map(r => `<div class="rv"><div class="row between"><b>${esc(r.name)}</b><span class="stars">${'★'.repeat(r.rating)}${'☆'.repeat(5 - r.rating)}</span></div>
@@ -670,7 +687,7 @@ async function vTrack(code) {
       ${o.canReview ? `<div class="loyal" id="rvBox"><b>Como foi o seu pedido?</b><div class="starpick">${[1, 2, 3, 4, 5].map(n => `<button type="button" data-star="${n}" aria-label="${n} estrela${n > 1 ? 's' : ''}">☆</button>`).join('')}</div>
         <textarea id="rvText" rows="2" maxlength="500" placeholder="Conte o que achou (opcional)"></textarea><button class="pri" id="rvSend" disabled>Enviar avaliação</button></div>` : ''}
       ${o.review ? `<div class="loyal"><b>Sua avaliação</b><span class="stars">${'★'.repeat(o.review.rating)}${'☆'.repeat(5 - o.review.rating)}</span>${o.review.comment ? `<span>${esc(o.review.comment)}</span>` : ''}${o.review.reply ? `<span class="mut">Resposta da loja: ${esc(o.review.reply)}</span>` : ''}</div>` : ''}
-      <a class="btn ghost" href="/loja/${esc(S.slug)}" data-link>Voltar à loja</a></div>`;
+      <div class="row"><a class="btn ghost" href="/loja/${esc(S.slug)}" data-link>Voltar à loja</a>${['entregue', 'cancelado'].includes(o.status) && o.fulfillment !== 'table' ? `<a class="btn pri" href="/loja/${esc(S.slug)}?repetir=1" data-link>↻ Pedir de novo</a>` : ''}</div></div>`;
     return o.status;
   };
   // Tela de pagamento: QR Code, copia-e-cola, prazo e botão "Já paguei"
@@ -739,13 +756,25 @@ const setStatus = (id, status, courier) => rpc('change_order_status', { p_order:
 
 async function pOrders(S) {
   let orders = [];
-  const load = async () => { orders = await fetchOrders(S.id, ['novo', 'preparo', 'pronto']); draw(); };
+  // Impressão automática: 'off', 'accept' (ao aceitar) ou 'arrive' (assim que o pedido chega). Vale só para este aparelho.
+  let pmode = local.get('printMode', local.get('autoPrint', false) ? 'accept' : 'off');
+  const printedKey = `printed:${S.id}`;
+  const printed = new Set(local.get(printedKey, []));
+  const markPrinted = ids => { ids.forEach(id => printed.add(id)); local.set(printedKey, [...printed].slice(-300)); };
+  const printArrivals = () => {
+    if (pmode !== 'arrive') return;
+    const fresh = orders.filter(o => o.status === 'novo' && !printed.has(o.id)).sort((a, b) => a.id - b.id);
+    if (!fresh.length) return;
+    markPrinted(fresh.map(o => o.id));
+    fresh.forEach((o, i) => setTimeout(() => printTicket(o, S.name), i * 1500));
+  };
+  const load = async () => { orders = await fetchOrders(S.id, ['novo', 'preparo', 'pronto']); draw(); printArrivals(); };
   const draw = () => {
     const cols = [['novo', 'Novos', 'Aceitar', 'preparo'], ['preparo', 'Em preparo', 'Marcar pronto', 'pronto'], ['pronto', 'Prontos', '', '']];
     const isLater = o => o.scheduled_for && o.status === 'novo' && new Date(o.scheduled_for) - Date.now() > 60 * 60000;
     const later = orders.filter(isLater).sort((a, b) => new Date(a.scheduled_for) - new Date(b.scheduled_for)), soon = orders.filter(o => !isLater(o));
     app.innerHTML = `<div class="row between"><div><h2>${esc(S.seg?.prep || 'Preparo')}</h2><p class="lead">Pedidos chegam aqui na hora, com aviso sonoro. Tickets com mais de 25 min ficam em alerta.</p></div>
-      <span class="row"><label class="chk"><input type="checkbox" id="autoPrint" ${local.get('autoPrint', false) ? 'checked' : ''}> Imprimir comanda ao aceitar</label><a class="btn ghost" href="/painel/kds" data-link>Tela da cozinha</a><a class="btn pri" href="/painel/novo" data-link>+ Novo pedido</a></span></div>
+      <span class="row"><label class="chk" style="gap:6px">Imprimir comanda <select id="printMode" style="width:auto;min-height:36px;padding:4px 8px">${[['off', 'só no botão'], ['accept', 'ao aceitar'], ['arrive', 'assim que chegar']].map(([v, t]) => `<option value="${v}" ${v === pmode ? 'selected' : ''}>${t}</option>`).join('')}</select></label><button class="ghost sm" id="printHelp" title="Imprimir sem abrir a janela">?</button><a class="btn ghost" href="/painel/kds" data-link>Tela da cozinha</a><a class="btn pri" href="/painel/novo" data-link>+ Novo pedido</a></span></div>
     ${later.length ? `<div class="panel sched"><h3>Agendados para mais tarde (${later.length})</h3><div class="row">${later.map(o => `<span class="badge b-a" title="${esc(o.customer_name)}">${esc(fmtWhen(o.scheduled_for, S.timezone))} · #${o.number} · ${esc(where(o))}</span>`).join('')}</div>
       <p class="mut" style="margin:0">Eles entram nas colunas 1 hora antes do horário marcado.</p></div>` : ''}
     <div class="board">${cols.map(([k, t, a, next]) => { const os = soon.filter(o => o.status === k).sort((x, y) => new Date(x.scheduled_for || x.created_at) - new Date(y.scheduled_for || y.created_at));
@@ -761,13 +790,25 @@ async function pOrders(S) {
   app.onclick = attempt(async e => {
     const pr = e.target.closest('button[data-print]');
     if (pr) return printTicket(orders.find(o => o.id === +pr.dataset.print), S.name);
+    if (e.target.closest('#printHelp')) return dialog(`<h2>Imprimir sem a janela de impressão</h2>
+      <p>Por segurança, o navegador sempre mostra a janela de impressão. No computador da loja dá para pular essa janela e imprimir direto na impressora padrão:</p>
+      <ol><li>Defina a impressora térmica como <b>impressora padrão</b> do Windows.</li>
+      <li>Crie um atalho do Google Chrome na área de trabalho, clique com o botão direito em <b>Propriedades</b> e, no campo <b>Destino</b>, acrescente no final: <code>--kiosk-printing</code></li>
+      <li>Feche todas as janelas do Chrome e abra o painel por esse atalho.</li>
+      <li>Aqui no Preparo, escolha <b>Imprimir comanda: assim que chegar</b>. Deixe esta tela aberta.</li></ol>
+      <p class="mut">A escolha vale só para este aparelho. Pedidos com Pix online são impressos quando o pagamento é confirmado.</p>
+      <button class="pri" data-close>Entendi</button>`);
     const b = e.target.closest('button[data-st]'); if (!b) return;
     if (b.dataset.st === 'cancelado' && !sure(b)) return;
     await setStatus(+b.dataset.id, b.dataset.st);
-    if (b.dataset.st === 'preparo' && local.get('autoPrint', false)) printTicket(orders.find(o => o.id === +b.dataset.id), S.name);
+    if (b.dataset.st === 'preparo' && pmode === 'accept') printTicket(orders.find(o => o.id === +b.dataset.id), S.name);
     await load();
   });
-  app.onchange = e => { if (e.target.id === 'autoPrint') local.set('autoPrint', e.target.checked); };
+  app.onchange = e => {
+    if (e.target.id !== 'printMode') return;
+    pmode = e.target.value; local.set('printMode', pmode);
+    if (pmode === 'arrive') { markPrinted(orders.filter(o => o.status === 'novo').map(o => o.id)); toast('Os próximos pedidos serão impressos assim que chegarem'); }
+  };
   const stop = live(S.id, p => {
     if (p?.new?.status === 'novo' && !orders.some(o => o.id === p.new.id)) { beep(); toast(`Novo pedido #${p.new.number}${p.new.payment_status === 'paid' ? ' (Pix pago)' : ''}`); }
     load().catch(() => {});
@@ -1046,34 +1087,59 @@ async function pCash(S) {
 
 /* ---------- clientes ---------- */
 async function pCustomers(S) {
-  let list = [], term = '';
-  const load = async () => { list = await rpc('store_customers', { p_tenant: S.id, p_search: term || null }); draw(); };
+  let list = [], term = '', gone = 0; // gone = dias sem pedir (0 = todos os clientes)
+  const camp = local.get(`camp:${S.id}`, { msg: 'Olá, {nome}! Aqui é da {loja}. Sentimos sua falta! 😊{cupom}\nPeça por aqui: {link}', coupon: '' });
+  const sent = local.get(`sent:${S.id}`, {}); // telefone → data em que a mensagem da campanha foi aberta
+  const coupons = await q(sb.from('coupons').select('code, percent, free_shipping, active').eq('tenant_id', S.id).eq('active', true).order('id')).catch(() => []);
+  const cupTxt = c => c ? `\nUse o cupom *${c.code}*: ${[c.percent ? `${c.percent}% de desconto` : '', c.free_shipping ? 'entrega grátis' : ''].filter(Boolean).join(' e ')}.` : '';
+  const msgFor = c => camp.msg.replaceAll('{nome}', c.name.split(' ')[0]).replaceAll('{loja}', S.name)
+    .replaceAll('{cupom}', cupTxt(coupons.find(x => x.code === camp.coupon))).replaceAll('{link}', `${location.origin}/loja/${S.slug}?repetir=1`);
+  const saveCamp = () => local.set(`camp:${S.id}`, camp);
+  const load = async () => { list = await rpc('store_customers', { p_tenant: S.id, p_search: term || null, p_limit: gone ? 1000 : 200 }); draw(); };
+  const shown = () => gone ? list.filter(c => mins(c.lastOrder) > gone * 1440 && c.orders > 0) : list;
   const draw = () => {
-    const box = $('#custList');
-    const html = `<div class="scroll"><table class="stack"><thead><tr><th>Cliente</th><th class="n">Pedidos</th><th class="n">Total gasto</th><th>Último pedido</th><th></th></tr></thead><tbody>
-      ${list.map(c => `<tr><td data-l="Cliente"><b>${esc(c.name)}</b><br><span class="mut">${esc(c.phone)}${c.address ? ' · ' + esc(c.address) : ''}</span></td>
+    const box = $('#custList'), rows = shown();
+    const html = `${gone ? `<p class="mut" style="margin:0 0 8px">${rows.length} cliente(s) sem pedir há mais de ${gone} dias · ${rows.filter(c => sent[c.phone]).length} já contatado(s)</p>` : ''}
+      <div class="scroll"><table class="stack"><thead><tr><th>Cliente</th><th class="n">Pedidos</th><th class="n">Total gasto</th><th>Último pedido</th><th></th></tr></thead><tbody>
+      ${rows.map(c => `<tr><td data-l="Cliente"><b>${esc(c.name)}</b><br><span class="mut">${esc(c.phone)}${c.address ? ' · ' + esc(c.address) : ''}</span></td>
         <td data-l="Pedidos" class="n">${c.orders}${S.loyalty_enabled && c.stamps != null ? `<br><span class="mut">${Math.min(c.stamps, S.loyalty_every)}/${S.loyalty_every} selos</span>` : ''}</td><td data-l="Total gasto" class="n price">${brl(c.spent)}</td>
-        <td data-l="Último pedido">${new Date(c.lastOrder).toLocaleDateString('pt-BR')}${mins(c.lastOrder) > 30 * 1440 ? ' <span class="badge b-a">sumido</span>' : ''}</td>
-        <td data-l=""><span class="row">${waBtn(waLink(c.phone, `Olá, ${c.name.split(' ')[0]}! Aqui é da ${S.name}. Sentimos sua falta! 😊`))}<button class="ghost sm" data-anon="${esc(c.phone)}">Excluir dados</button></span></td></tr>`).join('') || '<tr><td class="mut">Nenhum cliente encontrado.</td></tr>'}</tbody></table></div>`;
+        <td data-l="Último pedido">${new Date(c.lastOrder).toLocaleDateString('pt-BR')}${mins(c.lastOrder) > 30 * 1440 ? ` <span class="badge b-a">sumido há ${Math.floor(mins(c.lastOrder) / 1440)} dias</span>` : ''}</td>
+        <td data-l=""><span class="row">${gone
+          ? (waLink(c.phone, '') ? `<a class="btn ${sent[c.phone] ? 'ghost' : 'pri'} sm" data-send="${esc(c.phone)}" href="${esc(waLink(c.phone, msgFor(c)))}" target="_blank" rel="noopener">${sent[c.phone] ? `Enviado em ${new Date(sent[c.phone]).toLocaleDateString('pt-BR')} · reenviar` : 'Enviar no WhatsApp'}</a>` : '<span class="mut">telefone inválido</span>')
+          : `${waBtn(waLink(c.phone, `Olá, ${c.name.split(' ')[0]}! Aqui é da ${S.name}.`))}<button class="ghost sm" data-anon="${esc(c.phone)}">Excluir dados</button>`}</span></td></tr>`).join('') || `<tr><td class="mut">${gone ? 'Nenhum cliente sumido. Ótimo sinal!' : 'Nenhum cliente encontrado.'}</td></tr>`}</tbody></table></div>`;
     if (box) { box.innerHTML = html; return; }
-    app.innerHTML = `<div class="row between"><div><h2>Clientes</h2><p class="lead">Quem já pediu na sua loja, montado a partir dos pedidos. Clientes sem pedir há mais de 30 dias aparecem como "sumido".</p></div>
+    app.innerHTML = `<div class="row between"><div><h2>Clientes</h2><p class="lead">Quem já pediu na sua loja, montado a partir dos pedidos.</p></div>
       <span class="row"><button class="ghost" id="csv">Baixar planilha (CSV)</button></span></div>
+      <div class="row" style="margin-bottom:12px">${[[0, 'Todos'], [30, 'Sumidos há 30+ dias'], [60, '60+ dias'], [90, '90+ dias']].map(([d, t]) => `<button class="sm ${d === gone ? 'pri' : 'ghost'}" data-gone="${d}">${t}</button>`).join('')}</div>
+      ${gone ? `<div class="panel" style="margin-bottom:16px"><h3>Campanha "volte a pedir"</h3>
+        <p class="mut" style="margin:0">Escreva a mensagem uma vez e envie para cada cliente com um toque. O WhatsApp abre com o texto pronto; você só confirma o envio. Use {nome}, {loja}, {cupom} e {link} (o link já abre a loja com o último pedido no carrinho).</p>
+        <label>Mensagem<textarea id="cMsg" rows="3" maxlength="600">${esc(camp.msg)}</textarea></label>
+        <label>Cupom de volta<select id="cCupSel"><option value="">Sem cupom</option>${coupons.map(c => `<option value="${esc(c.code)}" ${c.code === camp.coupon ? 'selected' : ''}>${esc(c.code)} · ${[c.percent ? c.percent + '%' : '', c.free_shipping ? 'entrega grátis' : ''].filter(Boolean).join(' + ')}</option>`).join('')}</select></label>
+        ${coupons.length ? '' : '<p class="mut" style="margin:0">Para oferecer um desconto, crie um cupom em <a href="/painel/config" data-link>Configurações</a>.</p>'}
+        <p class="mut" style="margin:0"><b>Prévia:</b> <span id="cPrev" style="white-space:pre-wrap">${esc(msgFor({ name: 'Maria' }))}</span></p></div>` : ''}
       <div class="panel"><input id="custQ" type="search" placeholder="Buscar por nome ou telefone" value="${esc(term)}"><div id="custList">${html}</div>
-      <p class="mut" style="margin:0">"Excluir dados" atende pedidos de exclusão da LGPD: apaga nome, telefone e endereço desse cliente em todos os pedidos da loja. Os valores continuam nos relatórios.</p></div>`;
+      ${gone ? '' : '<p class="mut" style="margin:0">"Excluir dados" atende pedidos de exclusão da LGPD: apaga nome, telefone e endereço desse cliente em todos os pedidos da loja. Os valores continuam nos relatórios.</p>'}</div>`;
   };
   let tmr;
-  app.oninput = e => { if (e.target.id !== 'custQ') return; clearTimeout(tmr); tmr = setTimeout(() => { term = e.target.value.trim(); load().catch(err => toast(err.message)); }, 300); };
+  app.oninput = e => {
+    if (e.target.id === 'cMsg') { camp.msg = e.target.value; clearTimeout(tmr); tmr = setTimeout(() => { saveCamp(); $('#cPrev').textContent = msgFor({ name: 'Maria' }); const box = $('#custList'); if (box) draw(); }, 250); return; }
+    if (e.target.id !== 'custQ') return; clearTimeout(tmr); tmr = setTimeout(() => { term = e.target.value.trim(); load().catch(err => toast(err.message)); }, 300);
+  };
+  app.onchange = e => { if (e.target.id === 'cCupSel') { camp.coupon = e.target.value; saveCamp(); $('#cPrev').textContent = msgFor({ name: 'Maria' }); draw(); } };
   app.onclick = attempt(async e => {
+    const l = e.target.closest('a[data-send]');
+    if (l) { sent[l.dataset.send] = new Date().toISOString(); local.set(`sent:${S.id}`, sent); setTimeout(draw, 300); return; }
     const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.gone != null) { const was = gone; gone = +b.dataset.gone; app.innerHTML = ''; if (!was !== !gone) await load(); else draw(); return; }
     if (b.dataset.anon) { if (!sure(b)) return; const n = await rpc('anonymize_customer', { p_tenant: S.id, p_phone: b.dataset.anon }); toast(`Dados removidos de ${n} pedido(s)`); await load(); }
     if (b.id === 'csv') {
       const rows = [['Nome', 'Telefone', 'Endereço', 'Pedidos', 'Total gasto', 'Primeiro pedido', 'Último pedido'],
-        ...list.map(c => [c.name, c.phone, c.address || '', c.orders, fromCents(c.spent), new Date(c.firstOrder).toLocaleDateString('pt-BR'), new Date(c.lastOrder).toLocaleDateString('pt-BR')])];
+        ...shown().map(c => [c.name, c.phone, c.address || '', c.orders, fromCents(c.spent), new Date(c.firstOrder).toLocaleDateString('pt-BR'), new Date(c.lastOrder).toLocaleDateString('pt-BR')])];
       const csv = '\ufeff' + rows.map(r => r.map(x => `"${String(x).replace(/"/g, '""')}"`).join(';')).join('\n');
       const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })); a.download = `clientes-${S.slug}.csv`; a.click(); URL.revokeObjectURL(a.href);
     }
   });
-  cleanup = () => { app.oninput = app.onclick = null; clearTimeout(tmr); };
+  cleanup = () => { app.oninput = app.onclick = app.onchange = null; clearTimeout(tmr); };
   await load();
 }
 
@@ -1387,8 +1453,13 @@ async function vPlatform() {
   header('<a class="on" href="/plataforma" data-link>Plataforma</a>' + (ME.tenant ? '<a href="/painel" data-link>Minha loja</a>' : ''));
   const plans = await q(sb.from('plans').select('name').order('sort'));
   const draw = async () => {
-    const o = await rpc('platform_overview');
+    const [o, sch] = await Promise.all([rpc('platform_overview'), rpc('schema_status').catch(() => null)]);
+    const missing = sch ? sch.filter(m => !m.ok) : null;
+    const dbBox = !missing ? `<div class="banner warn" style="margin-bottom:16px;text-align:left;border:1px solid var(--line);border-radius:12px"><b>Não consegui conferir o banco.</b> Rode no SQL Editor do Supabase a migração <code>20261123000000_checagem.sql</code> (e as anteriores que faltarem). Depois recarregue esta página.</div>`
+      : missing.length ? `<div class="banner warn" style="margin-bottom:16px;text-align:left;border:1px solid var(--line);border-radius:12px"><b>Faltam ${missing.length} migraç${missing.length > 1 ? 'ões' : 'ão'} no banco.</b> Rode no SQL Editor do Supabase, nesta ordem, cada uma numa consulta nova:<ol style="margin:6px 0 0">${missing.map(m => `<li><code>${esc(m.file)}</code></li>`).join('')}</ol>Os arquivos estão na pasta <code>supabase/migrations</code> do GitHub. Enquanto faltarem, algumas telas mostram erro.</div>`
+      : `<p class="mut" style="margin:-8px 0 16px">✓ Banco de dados em dia (${sch.length} migrações).</p>`;
     app.innerHTML = `<h2>Plataforma</h2><p class="lead">Todas as empresas assinantes. Novas empresas se cadastram sozinhas em <a href="/entrar/cadastro" data-link>/entrar/cadastro</a>.</p>
+    ${dbBox}
     <div class="kpis"><div class="kpi"><span class="mut">Empresas</span><b>${o.tenants.length}</b><span class="mut">${o.paying ?? 0} pagando · ${o.trials ?? 0} em teste</span></div><div class="kpi"><span class="mut">Receita mensal (MRR)</span><b class="price">${brl(o.mrr)}</b><span class="mut">+ ${brl(o.potentialMrr || 0)} se os testes virarem assinatura</span></div>
       <div class="kpi"><span class="mut">Vendido pelas lojas</span><b class="price">${brl(o.gmv)}</b></div><div class="kpi"><span class="mut">Pedidos</span><b>${o.orders}</b></div></div>
     <div class="panel"><h3>Empresas</h3><div class="scroll"><table class="stack"><thead><tr><th>Empresa</th><th>Segmento</th><th>Dono</th><th>Plano</th><th>Assinatura</th><th class="n">Pedidos</th><th class="n">Vendas</th><th></th></tr></thead><tbody>
