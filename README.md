@@ -26,6 +26,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    13. `20261125000000_cartao_dominio_unidades.sql` (cartão de crédito online, domínio próprio por loja e várias unidades)
    14. `20261126000000_seguranca.sql` (correções do teste de segurança e de carga: limite de tentativas, privacidade e cupom sob concorrência)
    15. `20261127000000_mesa_servico_pedidos_antigos.sql` (taxa de serviço na mesa e encerramento de pedidos esquecidos)
+   16. `20261128000000_vitrine_previsao_mesas.sql` (mais pedidos, previsão de entrega, categorias com horário e conta da mesa)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -217,7 +218,7 @@ O que já está pronto:
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 75 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 79 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;

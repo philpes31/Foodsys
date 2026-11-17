@@ -177,6 +177,18 @@ function promoActive(pm, tz, at) {
   const a = toMin(pm.start_time.slice(0, 5)), b = toMin(pm.end_time.slice(0, 5));
   return a < b ? min >= a && min < b : min >= a || min < b;
 }
+// Categoria com horário (ex.: café da manhã das 06:00 às 11:00): mesma regra do banco.
+function catOpen(S, cat, at) {
+  const h = (S.category_hours || {})[cat]; if (!h) return true;
+  const { dow, min } = localParts(S.timezone, at);
+  if (h.days?.length && !h.days.includes(dow)) return false;
+  if (!h.from || !h.to || h.from === h.to) return true;
+  const a = toMin(h.from), b = toMin(h.to);
+  return a < b ? min >= a && min < b : min >= a || min < b;
+}
+const catHoursText = (S, cat) => { const h = (S.category_hours || {})[cat]; if (!h) return '';
+  return `das ${h.from} às ${h.to}${h.days?.length && h.days.length < 7 ? ` (${[...h.days].sort().map(d => DAYS.at(d).slice(0, 3).toLowerCase()).join(', ')})` : ''}`; };
+const etaTxt = m => m >= 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}` : `${m} min`;
 const promoMatches = (pm, prod) => (!pm.product_id || pm.product_id === prod.id) && (!pm.category || pm.category === prod.category);
 function promoDiscount(promos, lines, byId, tz, at) {
   let total = 0; const names = [];
@@ -466,7 +478,7 @@ const bySort = (a, b) => a.sort - b.sort || a.id - b.id;
 const sortMenu = prods => prods.sort(bySort).map(p => ({ ...p,
   groups: (p.option_groups || []).sort(bySort).map(g => ({ ...g, options: (g.options || []).sort(bySort) })) }));
 // Colunas públicas da loja (os dados internos de cobrança não são lidos pelo site).
-const TENANT_BASE = 'id, slug, name, segment, color, plan, min_order, is_open, allow_pickup, eta_text, phone, timezone, active, created_at, hours, auto_hours, pix_online, billing_status, trial_ends_at, paid_until, delivery_mode, lat, lng, distance_tiers, loyalty_enabled, loyalty_every, loyalty_percent, allow_tables, tables_count, allow_scheduling, schedule_days, schedule_lead_minutes, schedule_slot_minutes, description, address, instagram, banner_path, free_delivery_above, card_online, custom_domain, service_percent';
+const TENANT_BASE = 'id, slug, name, segment, color, plan, min_order, is_open, allow_pickup, eta_text, phone, timezone, active, created_at, hours, auto_hours, pix_online, billing_status, trial_ends_at, paid_until, delivery_mode, lat, lng, distance_tiers, loyalty_enabled, loyalty_every, loyalty_percent, allow_tables, tables_count, allow_scheduling, schedule_days, schedule_lead_minutes, schedule_slot_minutes, description, address, instagram, banner_path, free_delivery_above, card_online, custom_domain, service_percent, category_hours';
 let TENANT_COLS = TENANT_BASE;
 // Banco sem alguma migração nova: tira da lista a coluna que ainda não existe e tenta de novo.
 async function tenantsQuery(build) {
@@ -524,7 +536,8 @@ async function vShop(slug) {
     q(sb.from('zones').select('id, name, fee').eq('tenant_id', S.id).order('name'))]);
   const products = sortMenu(rawP), OS = openState(S), DIST = S.delivery_mode === 'distance';
   const RV = await rpc('store_reviews', { p_slug: slug, p_limit: 10 }).catch(() => null);
-  const PROMOS = await q(sb.from('promotions').select('*').eq('tenant_id', S.id).eq('active', true)).catch(() => []);
+  const [PROMOS, POP, ETA] = await Promise.all([q(sb.from('promotions').select('*').eq('tenant_id', S.id).eq('active', true)).catch(() => []),
+    rpc('popular_products', { p_slug: slug }).catch(() => []), rpc('store_eta', { p_slug: slug }).catch(() => null)]);
   const byId = Object.fromEntries(products.map(p => [p.id, p]));
   // Pedido na mesa: o QR Code da mesa abre /loja/<loja>?mesa=7
   const mesaParam = (new URLSearchParams(location.search).get('mesa') || '').toUpperCase().trim();
@@ -538,7 +551,9 @@ async function vShop(slug) {
   setColor(S.color); $('#bName').textContent = S.name; header('', false); document.title = `${S.name} — pedido online`; setManifest(S);
   const cartKey = `cart:${slug}`;
   let cart = local.get(cartKey, []).filter(c => products.some(p => p.id === c.productId)), cat = null, coupon = null;
-  const cats = [...new Set(products.map(p => p.category))];
+  // "Mais pedidos": vitrine dos campeões de venda (aparece quando há 3 ou mais)
+  const TOP = '★ Mais pedidos', popular = (POP || []).map(id => products.find(p => p.id === id)).filter(Boolean);
+  const cats = [...(popular.length >= 3 ? [TOP] : []), ...new Set(products.map(p => p.category))];
   const saveCart = () => local.set(cartKey, cart);
   // "Pedir de novo": guarda o último pedido neste aparelho e remonta com os preços de hoje.
   const lastKey = `last:${slug}`;
@@ -581,21 +596,23 @@ async function vShop(slug) {
   };
   const paint = () => {
     cat = cats.includes(cat) ? cat : cats[0];
-    const list = products.filter(p => p.category === cat), count = cart.reduce((t, c) => t + c.qty, 0);
+    const list = cat === TOP ? popular : products.filter(p => p.category === cat), count = cart.reduce((t, c) => t + c.qty, 0);
+    const catNow = c => catOpen(S, c, new Date());
     app.innerHTML = `${TABLE ? `<div class="banner" style="margin:-24px calc(-1 * max(4vw,16px)) 16px">Você está pedindo para a <b>Mesa ${esc(TABLE)}</b>. O pedido vai direto para a cozinha.</div>` : ''}${S.banner_path ? `<div class="hero-banner" style="background-image:linear-gradient(0deg,#000a,#0000 60%),url('${esc(imgUrl(S.banner_path))}')"><h1>${esc(S.name)}</h1></div>` : `<h2>${esc(S.name)}</h2>`}
     ${S.description ? `<p class="desc">${esc(S.description)}</p>` : ''}
     ${ACTIVE ? `<a class="activeorder" href="/pedido/${esc(ACTIVE.code)}" data-link>Seu pedido <b>#${ACTIVE.number}</b> está <b>${esc((SLABEL[ACTIVE.status] || ACTIVE.status).toLowerCase())}</b> · Acompanhar →</a>` : ''}
-    <p class="lead">${myOrders().length ? '<a href="/meus-pedidos" data-link>Meus pedidos</a> · ' : ''}${SCHED_ONLY ? '<span class="badge b-a">Fechado agora · agende seu pedido</span> · ' : ''}${RV?.count ? `<button class="rating" id="seeReviews">★ ${String(RV.avg).replace('.', ',')} <span class="mut">(${RV.count} avaliaç${RV.count > 1 ? 'ões' : 'ão'})</span></button> · ` : ''}${esc(S.seg?.name)} · ${OS.open ? `<span class="badge b-g">Aberto${OS.label ? ' ' + OS.label : ' agora'}</span>` : `<span class="badge b-r">${esc(OS.label || 'Fechado')}</span>`} · entrega em ${esc(S.eta_text)}${S.min_order ? ` · pedido mínimo ${brl(S.min_order)}` : ''}${S.phone ? ` · ${esc(S.phone)}` : ''}
+    <p class="lead">${myOrders().length ? '<a href="/meus-pedidos" data-link>Meus pedidos</a> · ' : ''}${SCHED_ONLY ? '<span class="badge b-a">Fechado agora · agende seu pedido</span> · ' : ''}${RV?.count ? `<button class="rating" id="seeReviews">★ ${String(RV.avg).replace('.', ',')} <span class="mut">(${RV.count} avaliaç${RV.count > 1 ? 'ões' : 'ão'})</span></button> · ` : ''}${esc(S.seg?.name)} · ${OS.open ? `<span class="badge b-g">Aberto${OS.label ? ' ' + OS.label : ' agora'}</span>` : `<span class="badge b-r">${esc(OS.label || 'Fechado')}</span>`} · ${TABLE ? '' : ETA?.delivery ? `entrega em ~${etaTxt(ETA.delivery)} <span class="mut">(média da loja)</span>` : `entrega em ${esc(S.eta_text)}`}${S.min_order ? ` · pedido mínimo ${brl(S.min_order)}` : ''}${S.phone ? ` · ${esc(S.phone)}` : ''}
       ${waLink(S.phone, `Olá, ${S.name}!`) ? ` · <a href="${esc(waLink(S.phone, `Olá, ${S.name}!`))}" target="_blank" rel="noopener">Falar no WhatsApp</a>` : ''}
       ${S.instagram ? ` · <a href="https://instagram.com/${esc(S.instagram)}" target="_blank" rel="noopener">@${esc(S.instagram)}</a>` : ''}
       ${S.address ? `<br><a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(S.address)}" target="_blank" rel="noopener">${esc(S.address)}</a>` : ''}</p>
     ${S.auto_hours && Object.keys(S.hours || {}).length ? `<details class="hours-pub"><summary class="mut">Horário de funcionamento</summary><table>${DAYS.map((d, i) => `<tr><td>${d}</td><td>${((S.hours || {})[i] || []).map(r => r.join(' às ')).join(' · ') || 'Fechado'}</td></tr>`).join('')}</table></details>` : ''}
     ${PROMOS.length || S.free_delivery_above ? `<div class="promos">${S.free_delivery_above ? `<span class="promo">Frete grátis acima de ${brl(S.free_delivery_above)}</span>` : ''}${PROMOS.map(pm => `<span class="promo ${promoActive(pm, S.timezone) ? '' : 'off'}">${esc(promoLabel(pm, byId))}${promoActive(pm, S.timezone) ? '' : ' (fora do horário)'}</span>`).join('')}</div>` : ''}
     <div class="shop"><section>
-      <div class="cats">${cats.map(c => `<button class="${c === cat ? 'on' : ''}" data-cat="${esc(c)}">${esc(c)}</button>`).join('')}</div>
+      <div class="cats">${cats.map(c => `<button class="${c === cat ? 'on' : ''}" data-cat="${esc(c)}">${esc(c)}${c !== TOP && !catNow(c) ? ` <span class="mut" style="font-weight:400">· ${esc(catHoursText(S, c))}</span>` : ''}</button>`).join('')}</div>
+      ${cat !== TOP && !catNow(cat) ? `<p class="banner" style="text-align:left;border-radius:12px;margin:0 0 12px">${esc(cat)}: disponível ${esc(catHoursText(S, cat))}.${SLOTS.length ? ' Dá para agendar um pedido para esse horário.' : ''}</p>` : ''}
       <div class="menu">${list.map(p => `<article class="item">${picture(p, S.color)}<div class="b">${PROMOS.some(pm => promoActive(pm, S.timezone) && promoMatches(pm, p)) ? '<span class="badge b-g">Em promoção</span>' : ''}<h3>${esc(p.name)}</h3><span class="mut">${esc(p.description)}</span>
         <div class="foot"><span class="price">${p.groups.some(g => g.min_sel && g.options.some(o => o.price)) ? '<span class="mut">a partir de </span>' : ''}<b>${brl(p.price)}</b></span>
-        ${p.stock === 0 ? '<span class="badge b-r">Esgotado</span>' : `<button class="pri sm" data-add="${p.id}" ${CAN_ORDER ? '' : 'disabled'}>Adicionar</button>`}</div>${p.stock > 0 && p.stock <= 5 ? `<span class="badge b-a">Últimas ${p.stock} unidade${p.stock > 1 ? 's' : ''}</span>` : ''}</div></article>`).join('') || '<p class="empty">Cardápio vazio.</p>'}</div>
+        ${p.stock === 0 ? '<span class="badge b-r">Esgotado</span>' : `<button class="pri sm" data-add="${p.id}" ${CAN_ORDER && (catNow(p.category) || SLOTS.length) ? '' : 'disabled'}>Adicionar</button>`}</div>${p.stock > 0 && p.stock <= 5 ? `<span class="badge b-a">Últimas ${p.stock} unidade${p.stock > 1 ? 's' : ''}</span>` : ''}</div></article>`).join('') || '<p class="empty">Cardápio vazio.</p>'}</div>
     </section>
     <aside class="cart" aria-label="Carrinho"><h3>Seu pedido</h3>
       ${cart.length ? cart.map((x, i) => `<div class="ci"><div><b>${x.qty}× ${esc(x.name)}</b>${x.optText ? `<br><span class="mut">${esc(x.optText)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}<br><button class="ghost sm" data-dec="${i}" aria-label="Diminuir">−</button> <button class="ghost sm" data-inc="${i}" aria-label="Aumentar">+</button></div><span class="price">${brl(x.qty * x.unit)}</span></div>`).join('') : `<p class="empty">Carrinho vazio.</p>${againItems().length ? `<button class="ghost" id="again" style="width:100%">↻ Pedir de novo<br><span class="mut" style="font-weight:400">${esc(againItems().map(x => `${x.qty}× ${x.name}`).join(', ').slice(0, 90))}</span></button>` : ''}`}
@@ -746,6 +763,7 @@ async function vTrack(code) {
       ${o.paymentStatus === 'paid' ? '<span class="badge b-g">Pagamento confirmado</span>' : ''}
       ${o.status === 'cancelado' ? `<span class="badge b-r">${o.paymentStatus === 'expired' ? 'Pedido cancelado: o Pix não foi pago dentro do prazo.' : 'Pedido cancelado pela loja.'}${S.phone ? ' Contato: ' + esc(S.phone) : ''}</span>` :
       `<div class="steps">${flow.map((s, i) => `<span class="${i <= idx ? 'on' : ''}">${s === 'pronto' && o.fulfillment === 'pickup' ? 'Pronto p/ retirar' : s === 'entregue' && o.fulfillment === 'table' ? 'Servido' : SLABEL[s]}${at[s] ? `<br><small>${hhmm(at[s])}</small>` : ''}</span>`).join('')}</div>`}
+      ${o.etaAt && !['entregue', 'cancelado', 'pagamento'].includes(o.status) && !(o.fulfillment !== 'delivery' && o.status === 'pronto') ? `<p class="eta">${o.fulfillment === 'delivery' ? 'Previsão de entrega' : o.fulfillment === 'table' ? 'Previsão para servir' : 'Previsão para ficar pronto'}: <b>por volta das ${hhmm(new Date(Math.max(new Date(o.etaAt), Date.now() + 5 * 60000)).toISOString())}</b> <span class="mut">· tempo médio da loja</span></p>` : ''}
       ${o.courier ? `<p><b>${esc(o.courier)}</b> está a caminho de ${esc(o.address)}, ${esc(o.zone)}.</p>` : ''}
       <table><tbody>${o.items.map(x => `<tr><td>${x.qty}× ${esc(x.product_name)}${x.options_text ? `<br><span class="mut">${esc(x.options_text)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}</td><td class="n price">${brl(x.qty * x.unit_price)}</td></tr>`).join('')}
       <tr><td>${o.fulfillment === 'pickup' ? 'Retirada na loja' : o.fulfillment === 'table' ? esc(o.zone) : `Entrega (${esc(o.zone)})`}</td><td class="n price">${brl(o.fee)}</td></tr>
@@ -814,12 +832,12 @@ async function vTrack(code) {
 async function vPanel(tab) {
   const S = ME.tenant, owner = ME.role === 'owner';
   setColor(S.color); $('#bName').textContent = S.name;
-  const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ['cardapio', 'Cardápio'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['unidades', 'Unidades'], ['config', 'Configurações']] : [])];
+  const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ...(S.allow_tables ? [['mesas', 'Mesas']] : []), ['cardapio', 'Cardápio'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['unidades', 'Unidades'], ['config', 'Configurações']] : [])];
   if (tab === 'kds') return pKitchenScreen(S);
   if (!tabs.some(t => t[0] === tab) && tab !== 'novo') tab = 'pedidos';
   $('#banner').innerHTML = billingBanner(S, owner);
   header(tabs.map(([k, n]) => `<a href="/painel/${k}" data-link class="${k === tab ? 'on' : ''}">${esc(n)}</a>`).join('') + `<a href="/loja/${S.slug}" target="_blank" rel="noopener">Ver loja ↗</a>` + (ME.isAdmin ? '<a href="/plataforma" data-link>Plataforma</a>' : ''));
-  await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, caixa: pCash, novo: pNewOrder, clientes: pCustomers, relatorios: pReports, unidades: pUnits, config: pConfig })[tab](S, owner);
+  await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, caixa: pCash, novo: pNewOrder, clientes: pCustomers, relatorios: pReports, unidades: pUnits, config: pConfig, mesas: pTables })[tab](S, owner);
 }
 
 function billingBanner(t, owner) {
@@ -1008,7 +1026,7 @@ async function pMenu(S, owner) {
   const draw = () => {
     const cats = [...new Set(prods.map(p => p.category))];
     app.innerHTML = `<div class="row between"><div><h2>Cardápio</h2><p class="lead">${owner ? 'Crie produtos com grupos de opções: tamanhos, sabores, adicionais, combos.' : 'Marque itens esgotados ou ajuste o estoque.'} Estoque em branco = sem controle; com número, baixa a cada pedido e volta se o pedido for cancelado.</p></div>${owner ? '<button class="pri" id="newP">Novo produto</button>' : ''}</div>
-    ${cats.map(c => `<div class="panel" style="margin-bottom:16px"><h3>${esc(c)}</h3><div class="scroll"><table class="stack"><thead><tr><th>Produto</th><th>Opções</th><th class="n">Preço</th><th>Estoque</th><th>Disponível</th><th></th></tr></thead><tbody>
+    ${cats.map(c => `<div class="panel" style="margin-bottom:16px"><div class="row between"><h3>${esc(c)}${(S.category_hours || {})[c] ? ` <span class="badge b-a">${esc(catHoursText(S, c))}</span>` : ''}</h3>${owner && 'category_hours' in S ? `<button class="ghost sm" data-chours="${esc(c)}">Horário da categoria</button>` : ''}</div><div class="scroll"><table class="stack"><thead><tr><th>Produto</th><th>Opções</th><th class="n">Preço</th><th>Estoque</th><th>Disponível</th><th></th></tr></thead><tbody>
       ${prods.filter(p => p.category === c).map(p => `<tr><td data-l="Produto"><span class="row" style="flex-wrap:nowrap"><span class="thumb">${picture(p, S.color)}</span><span><b>${esc(p.name)}</b><br><span class="mut">${esc(p.description)}</span></span></span></td>
         <td data-l="Opções"><span class="mut">${p.groups.map(g => `${esc(g.name)} (${g.options.length})`).join(', ') || '—'}</span></td><td data-l="Preço" class="n price">${brl(p.price)}</td>
         <td data-l="Estoque"><input class="stockin" type="number" min="0" inputmode="numeric" data-stock="${p.id}" value="${p.stock ?? ''}" placeholder="sem controle" aria-label="Estoque de ${esc(p.name)}">${p.stock === 0 ? ' <span class="badge b-r">zerado</span>' : ''}</td>
@@ -1070,8 +1088,28 @@ async function pMenu(S, owner) {
       closeDlg(); toast('Produto salvo'); await load();
     });
   };
+  // Horário da categoria (ex.: café da manhã só de manhã). Vazio = vende o dia todo.
+  const hoursEditor = c => {
+    const h = (S.category_hours || {})[c] || {};
+    dialog(`<h2>Horário: ${esc(c)}</h2><p class="mut" style="margin:0">Fora desse horário os produtos aparecem na loja, mas não podem ser pedidos (a não ser agendando para dentro do horário).</p>
+      <form id="fCh"><div class="two" style="gap:10px"><label>Das<input id="chF" type="time" value="${esc(h.from || '')}"></label><label>Até<input id="chT" type="time" value="${esc(h.to || '')}"></label></div>
+      <p class="mut" style="margin:0">Dias (nenhum marcado = todos os dias)</p><div class="row">${DAYS.map((d, i) => `<label class="chk"><input type="checkbox" data-chd="${i}" ${h.days?.includes(i) ? 'checked' : ''}> ${d.slice(0, 3)}</label>`).join('')}</div>
+      <div class="row"><button class="pri">Salvar</button>${h.from ? '<button type="button" class="ghost" id="chClear">Vender o dia todo</button>' : ''}<button type="button" class="ghost" data-close>Cancelar</button></div></form>`);
+    const save = async v => {
+      const all = { ...(S.category_hours || {}) }; if (v) all[c] = v; else delete all[c];
+      await q(sb.from('tenants').update({ category_hours: all }).eq('id', S.id)); S.category_hours = all; closeDlg(); toast('Horário salvo'); draw();
+    };
+    $('#dlgBody').onclick = attempt(async ev => { if (ev.target.closest('#chClear')) await save(null); });
+    $('#dlgBody').onsubmit = attempt(async ev => {
+      ev.preventDefault(); const from = $('#chF').value, to = $('#chT').value;
+      if (!from || !to || from === to) return toast('Informe o horário de início e de fim');
+      const days = [...document.querySelectorAll('[data-chd]')].filter(x => x.checked).map(x => +x.dataset.chd);
+      await save({ from, to, ...(days.length && days.length < 7 ? { days } : {}) });
+    });
+  };
   app.onclick = attempt(async e => {
     const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.chours) return hoursEditor(b.dataset.chours);
     if (b.id === 'newP') editor(null);
     if (b.dataset.ed) editor(prods.find(p => p.id === +b.dataset.ed));
     if (b.dataset.av) { const p = prods.find(x => x.id === +b.dataset.av); await rpc('set_product_availability', { p_product: p.id, p_available: !p.available }); await load(); }
@@ -1290,6 +1328,55 @@ async function pCustomers(S) {
     }
   });
   cleanup = () => { app.oninput = app.onclick = app.onchange = null; clearTimeout(tmr); };
+  await load();
+}
+
+/* ---------- mesas: conta de cada mesa ---------- */
+function printBill(S, m) {
+  // junta itens iguais (mesmo produto, opções e preço) de todos os pedidos da mesa
+  const agg = []; for (const i of m.items) { const k = agg.find(x => x.name === i.name && x.options === i.options && x.unit === i.unit); k ? k.qty += i.qty : agg.push({ ...i }); }
+  $('#print').innerHTML = `<div class="tkt"><b class="big">${esc(S.name)}</b><div>CONTA · <b class="big">MESA ${esc(m.table)}</b></div>
+    <div>${new Date().toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })} · pedidos ${m.orders.map(o => '#' + o.number).join(', ')}</div><hr>
+    ${agg.map(x => `<div class="li"><span>${x.qty}x ${esc(x.name)}</span><span>${brl(x.qty * x.unit)}</span></div>${x.options ? `<div class="sub">${esc(x.options)}</div>` : ''}`).join('')}<hr>
+    <div class="li"><span>Subtotal</span><span>${brl(m.subtotal)}</span></div>
+    ${m.discount ? `<div class="li"><span>Descontos</span><span>-${brl(m.discount)}</span></div>` : ''}${m.service ? `<div class="li"><span>Serviço (opcional)</span><span>${brl(m.service)}</span></div>` : ''}
+    <div class="li big"><b>TOTAL</b><b>${brl(m.total)}</b></div>${m.paidOnline ? `<div class="li"><span>Já pago online</span><span>-${brl(m.paidOnline)}</span></div><div class="li big"><b>A PAGAR</b><b>${brl(m.total - m.paidOnline)}</b></div>` : ''}
+    <div class="sub">Não é documento fiscal.</div></div>`;
+  window.print();
+}
+async function pTables(S) {
+  let tables = [];
+  const load = async () => { tables = await rpc('open_tables', { p_tenant: S.id }); draw(); };
+  const draw = () => {
+    app.innerHTML = `<h2>Mesas</h2><p class="lead">Contas abertas: todos os pedidos de cada mesa somados até o fechamento. ${tables.length ? `${tables.length} mesa(s) ocupada(s) · ${brl(tables.reduce((a, m) => a + m.total, 0))} em aberto.` : ''}</p>
+    <div class="tables">${tables.map(m => { const due = m.total - m.paidOnline; return `<div class="panel tablecard"><div class="row between"><h3 style="margin:0">Mesa ${esc(m.table)}</h3><span class="mut">desde ${hhmm(m.since)} · ${mins(m.since)} min</span></div>
+      <p class="mut" style="margin:4px 0">${m.orders.map(o => `#${o.number} <span class="badge ${o.status === 'entregue' ? 'b-g' : o.status === 'pronto' ? 'b-a' : ''}">${o.status === 'entregue' ? 'servido' : esc((SLABEL[o.status] || o.status).toLowerCase())}</span>`).join(' ')}</p>
+      <div class="li"><span>${m.items.reduce((a, i) => a + i.qty, 0)} itens</span><span class="price">${brl(m.subtotal)}</span></div>
+      ${m.service ? `<div class="li"><span class="mut">Serviço</span><span class="price">${brl(m.service)}</span></div>` : ''}${m.discount ? `<div class="li"><span class="mut">Descontos</span><span class="price">−${brl(m.discount)}</span></div>` : ''}
+      <div class="tot"><span>${m.paidOnline ? 'A pagar' : 'Total'}</span><span class="price">${brl(due)}</span></div>
+      ${m.pending ? `<p class="mut" style="margin:0">⚠ ${m.pending} pedido(s) ainda na cozinha</p>` : ''}
+      <div class="row"><button class="ghost sm" data-bill="${esc(m.table)}">Imprimir conta</button><button class="pri sm" data-close-t="${esc(m.table)}">Fechar conta</button></div></div>`; }).join('') || '<p class="empty">Nenhuma mesa com conta aberta.</p>'}</div>`;
+  };
+  app.onclick = attempt(async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    const m = tables.find(x => x.table === (b.dataset.bill || b.dataset.closeT)); if (!m) return;
+    if (b.dataset.bill) return printBill(S, m);
+    const due = m.total - m.paidOnline;
+    dialog(`<h2>Fechar conta · Mesa ${esc(m.table)}</h2>
+      <div class="tot"><span>A pagar</span><span class="price">${brl(due)}</span></div>
+      <label>Dividir por<input id="tSplit" type="number" min="1" max="30" value="1" style="width:100px"> pessoa(s) <b id="tEach"></b></label>
+      <p class="mut" style="margin:0">Como foi pago?</p>
+      <div class="row">${[['Dinheiro', 'Dinheiro'], ['Pix', 'Pix'], ['Cartão na entrega', 'Cartão']].map(([v, l]) => `<button class="pri" data-pay="${v}">${l}</button>`).join('')}<button class="ghost" data-close>Cancelar</button></div>
+      ${m.pending ? `<p class="mut">⚠ ${m.pending} pedido(s) ainda na cozinha. Ao fechar, eles saem da fila como servidos.</p>` : ''}`);
+    const each = () => { const n = Math.max(1, Math.min(30, +$('#tSplit').value || 1)); $('#tEach').textContent = n > 1 ? `= ${brl(Math.ceil(due / n))} cada` : ''; };
+    $('#dlgBody').oninput = each; each();
+    $('#dlgBody').onclick = attempt(async ev => {
+      const pb = ev.target.closest('button[data-pay]'); if (!pb) return; pb.disabled = true;
+      try { await rpc('close_table', { p_tenant: S.id, p_table: m.table, p_payment: pb.dataset.pay }); closeDlg(); toast(`Conta da mesa ${m.table} fechada`); await load(); } finally { pb.disabled = false; }
+    });
+  });
+  const stop = live(S.id, () => load().catch(() => {}));
+  cleanup = () => { stop(); app.onclick = null; };
   await load();
 }
 
@@ -1685,7 +1772,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql',
   '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql',
   '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql',
-  '20261127000000_mesa_servico_pedidos_antigos.sql'];
+  '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };

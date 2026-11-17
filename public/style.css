@@ -202,3 +202,7 @@ body.kds-on main{max-width:none;padding:0}
 .stuck{background:#d6282826;border:1px solid #d6282866;border-radius:12px;padding:10px 14px;margin-bottom:14px;font-weight:600;display:grid;gap:4px}
 .stops{margin:12px 0;padding-left:22px;display:grid;gap:8px}
 .activeorder{display:block;background:color-mix(in srgb,var(--red) 14%,transparent);border:1px solid color-mix(in srgb,var(--red) 40%,transparent);border-radius:12px;padding:10px 14px;margin:0 0 12px;color:var(--ink);text-decoration:none}
+.tables{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
+.tablecard{display:grid;gap:6px;margin:0}
+.eta{margin:6px 0 10px}
+.tablecard .li{display:flex;justify-content:space-between;gap:8px}
