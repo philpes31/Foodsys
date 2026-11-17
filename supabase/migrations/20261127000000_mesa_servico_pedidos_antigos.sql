@@ -4,10 +4,10 @@
 -- =====================================================================
 
 -- 1. Taxa de serviço (garçom) nos pedidos de mesa: % por loja, opcional para o cliente.
-alter table public.tenants add column service_percent integer not null default 0 check (service_percent between 0 and 20);
+alter table public.tenants add column if not exists service_percent integer not null default 0 check (service_percent between 0 and 20);
 grant select (service_percent) on public.tenants to anon, authenticated;
 grant update (service_percent) on public.tenants to authenticated;
-alter table public.orders add column service_fee integer not null default 0 check (service_fee >= 0);
+alter table public.orders add column if not exists service_fee integer not null default 0 check (service_fee >= 0);
 
 CREATE OR REPLACE FUNCTION public._create_order(t tenants, p jsonb, p_check_min boolean DEFAULT true, p_status text DEFAULT 'novo'::text, p_channel text DEFAULT 'online'::text)
  RETURNS orders
