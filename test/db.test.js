@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -617,7 +617,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 18);
+  assert.equal(st.length, 19);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -889,4 +889,53 @@ test('bloqueio de cliente: telefone bloqueado não pede pela loja; só o dono bl
   assert.equal(sql(`select count(*) from blocked_phones where tenant_id = '${pizzaId}'`, U.pizza), '1');
   sql(`select set_blocked('${pizzaId}', '11965432100', false, null)`, U.pizza);
   assert.ok(order('forno-da-vila', base).code);
+});
+
+test('insumos: ficha técnica baixa na venda, volta no cancelamento, entrada recalcula custo médio', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', min_order = 0, allow_pickup = true, paused_until = null, closed_dates = '[]', category_hours = '{}' where id = '${pizzaId}'`);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  fails(`insert into ingredients (tenant_id, name, unit) values ('${pizzaId}', 'Garrafa', 'un')`, U.staff, /row-level security/);
+  const g = sql(`insert into ingredients (tenant_id, name, unit, min_stock, unit_cost) values ('${pizzaId}', 'Garrafa', 'un', 5, 150) returning id`, U.pizza);
+  const t = sql(`insert into ingredients (tenant_id, name, unit, unit_cost) values ('${pizzaId}', 'Tampa', 'un', 10) returning id`, U.pizza);
+  const other = sql(`insert into ingredients (tenant_id, name, unit) select id, 'Pão', 'un' from tenants where id <> '${pizzaId}' limit 1 returning id`);
+  fails(`select set_recipe(${p.id}, '[{"ingredientId":${g},"qty":1}]')`, U.staff, /Sem permissão/);
+  fails(`select set_recipe(${p.id}, '[{"ingredientId":${other},"qty":1}]')`, U.pizza, /inválida/);
+  assert.equal(+sql(`select set_recipe(${p.id}, '[{"ingredientId":${g},"qty":1},{"ingredientId":${t},"qty":1}]')`, U.pizza), 2);
+  // entrada: 10 garrafas por R$ 20,00 → custo médio sobre estoque 0 = 200 centavos/un
+  assert.equal(+json(`ingredient_move(${g}, 'entrada', 10, 2000, 'compra')`, U.staff).unit_cost, 200);
+  sql(`select ingredient_move(${t}, 'entrada', 10, null, null)`, U.staff);
+  const r = order('forno-da-vila', { customer: { name: 'Insumo', phone: '11933221100' }, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 3 }] });
+  assert.equal(+sql(`select stock from ingredients where id = ${g}`), 7);
+  assert.equal(+sql(`select stock from ingredients where id = ${t}`), 7);
+  const oid = sql(`select id from orders where public_code = '${r.code}'`);
+  sql(`update orders set status = 'cancelado' where id = ${oid}`);
+  assert.equal(+sql(`select stock from ingredients where id = ${g}`), 10);
+  sql(`update orders set status = 'novo' where id = ${oid}`);          // voltou (Pix pago depois)
+  assert.equal(+sql(`select stock from ingredients where id = ${g}`), 7);
+  sql(`update orders set status = 'cancelado' where id = ${oid}`);
+  assert.equal(+sql(`select stock from ingredients where id = ${g}`), 10);
+  // ajuste pela contagem: há 9 de fato
+  assert.equal(+json(`ingredient_move(${g}, 'ajuste', 9, null, 'contagem')`, U.staff).stock, 9);
+  fails(`select ingredient_move(${g}, 'entrada', 5, 100, null)`, U.burger, /Sem permissão/);
+  assert.equal(sql(`select count(*) from ingredient_moves where ingredient_id = ${g}`, U.burger), '0');
+  sql(`select set_recipe(${p.id}, '[]')`, U.pizza);
+});
+
+test('financeiro: despesas só do dono; resultado = faturamento − insumos − despesas', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const g = sql(`select id from ingredients where tenant_id = '${pizzaId}' and name = 'Garrafa'`);
+  sql(`select set_recipe(${p.id}, '[{"ingredientId":${g},"qty":2}]')`, U.pizza);
+  const before = json(`profit_report('${pizzaId}', null)`, U.pizza);
+  const r = order('forno-da-vila', { customer: { name: 'Fin', phone: '11933221199' }, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 1 }] });
+  fails(`insert into expenses (tenant_id, day, category, amount) values ('${pizzaId}', current_date, 'Aluguel', 100000)`, U.staff, /row-level security/);
+  sql(`insert into expenses (tenant_id, day, category, description, amount) values ('${pizzaId}', current_date, 'Aluguel', 'novembro', 100000)`, U.pizza);
+  const after = json(`profit_report('${pizzaId}', null)`, U.pizza);
+  assert.equal(after.revenue - before.revenue, r.total);
+  assert.equal(after.ingredients - before.ingredients, 2 * 200);             // 2 garrafas × R$ 2,00
+  assert.equal(after.expenses - before.expenses, 100000);
+  assert.equal(after.result, after.revenue - after.ingredients - after.expenses);
+  assert.ok(after.byCategory.some(c => c.category === 'Aluguel'));
+  fails(`select profit_report('${pizzaId}', null)`, U.staff, /Sem permissão/);
+  assert.equal(sql(`select count(*) from expenses`, U.staff), '0');
+  sql(`select set_recipe(${p.id}, '[]')`, U.pizza);
 });

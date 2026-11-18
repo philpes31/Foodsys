@@ -862,12 +862,12 @@ async function vTrack(code) {
 async function vPanel(tab) {
   const S = ME.tenant, owner = ME.role === 'owner';
   setColor(S.color); $('#bName').textContent = S.name;
-  const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ...(S.allow_tables ? [['mesas', 'Mesas']] : []), ['cardapio', 'Cardápio'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['unidades', 'Unidades'], ['config', 'Configurações']] : [])];
+  const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ...(S.allow_tables ? [['mesas', 'Mesas']] : []), ['cardapio', 'Cardápio'], ['estoque', 'Estoque'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['unidades', 'Unidades'], ['config', 'Configurações']] : [])];
   if (tab === 'kds') return pKitchenScreen(S);
   if (!tabs.some(t => t[0] === tab) && tab !== 'novo') tab = 'pedidos';
   $('#banner').innerHTML = billingBanner(S, owner);
   header(tabs.map(([k, n]) => `<a href="/painel/${k}" data-link class="${k === tab ? 'on' : ''}">${esc(n)}</a>`).join('') + `<a href="/loja/${S.slug}" target="_blank" rel="noopener">Ver loja ↗</a>` + (ME.isAdmin ? '<a href="/plataforma" data-link>Plataforma</a>' : ''));
-  await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, caixa: pCash, novo: pNewOrder, clientes: pCustomers, relatorios: pReports, unidades: pUnits, config: pConfig, mesas: pTables })[tab](S, owner);
+  await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, caixa: pCash, novo: pNewOrder, clientes: pCustomers, relatorios: pReports, unidades: pUnits, config: pConfig, mesas: pTables, estoque: pStock })[tab](S, owner);
 }
 
 function billingBanner(t, owner) {
@@ -906,7 +906,9 @@ async function pOrders(S) {
     markPrinted(fresh.map(o => o.id));
     fresh.forEach((o, i) => setTimeout(() => printOrder(S, o), i * 3000));
   };
-  const load = async () => { orders = await fetchOrders(S.id, ['novo', 'preparo', 'pronto']); draw(); printArrivals(); };
+  let lowIng = [];
+  const loadLow = () => q(sb.from('ingredients').select('name, stock, min_stock').eq('tenant_id', S.id).gt('min_stock', 0)).then(r => { lowIng = r.filter(i => +i.stock <= +i.min_stock); }).catch(() => {});
+  const load = async () => { [orders] = await Promise.all([fetchOrders(S.id, ['novo', 'preparo', 'pronto']), loadLow()]); draw(); printArrivals(); };
   // Aviso de pedido parado: novo sem aceitar há 5+ min, ou pronto esperando há 15+ min.
   let lastNag = 0;
   const stuck = () => {
@@ -928,6 +930,7 @@ async function pOrders(S) {
     ${later.length ? `<div class="panel sched"><h3>Agendados para mais tarde (${later.length})</h3><div class="row">${later.map(o => `<span class="badge b-a" title="${esc(o.customer_name)}">${esc(fmtWhen(o.scheduled_for, S.timezone))} · #${o.number} · ${esc(where(o))}</span>`).join('')}</div>
       <p class="mut" style="margin:0">Eles entram nas colunas 1 hora antes do horário marcado.</p></div>` : ''}
     <div class="stuck" id="stuck" role="alert" hidden></div>
+    ${lowIng.length ? `<a class="activeorder" href="/painel/estoque" data-link style="margin-bottom:12px">⚠ ${lowIng.length} insumo(s) acabando: <b>${lowIng.slice(0, 4).map(i => esc(i.name)).join(', ')}</b>${lowIng.length > 4 ? '…' : ''} · ver estoque →</a>` : ''}
     ${'paused_until' in S ? `<div class="pausebar">${S.paused_until && new Date(S.paused_until) > Date.now()
         ? `<span class="badge b-r">⏸ Loja pausada até ${hhmm(S.paused_until)}</span><button class="ok sm" data-pause="store" data-min="0">Retomar agora</button>`
         : `<span class="mut">Pausar loja:</span>${[15, 30, 60].map(m => `<button class="ghost sm" data-pause="store" data-min="${m}">${m} min</button>`).join('')}`}
@@ -1440,6 +1443,107 @@ async function pCustomers(S) {
   await load();
 }
 
+/* ---------- estoque de insumos e ficha técnica ---------- */
+const UNITS = { un: 'un', g: 'g', kg: 'kg', ml: 'ml', l: 'L' };
+const num = v => { const n = Number(String(v ?? '').trim().replace(/\./g, '').replace(',', '.')); return Number.isFinite(n) ? n : NaN; };
+const fmtQ = (q, u) => `${Number(q).toLocaleString('pt-BR', { maximumFractionDigits: 3 })} ${UNITS[u] || u}`;
+const fmtCost = c => (Number(c) / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: 2, maximumFractionDigits: Number(c) < 100 ? 4 : 2 });
+async function pStock(S, owner) {
+  let ings = [], recipes = [], prods = [], moves = [];
+  const load = async () => {
+    [ings, recipes, prods, moves] = await Promise.all([
+      q(sb.from('ingredients').select('*').eq('tenant_id', S.id).order('name')),
+      q(sb.from('product_ingredients').select('product_id, ingredient_id, qty').eq('tenant_id', S.id)),
+      q(sb.from('products').select('id, name, category, price').eq('tenant_id', S.id).order('category').order('sort')),
+      q(sb.from('ingredient_moves').select('ingredient_id, delta, reason, note, at, order_id').eq('tenant_id', S.id).order('at', { ascending: false }).limit(30))]);
+    draw();
+  };
+  const ing = id => ings.find(i => i.id === id);
+  const unitCost = pid => recipes.filter(r => r.product_id === pid).reduce((a, r) => a + r.qty * (ing(r.ingredient_id)?.unit_cost || 0), 0);
+  const low = () => ings.filter(i => +i.min_stock > 0 && +i.stock <= +i.min_stock);
+  const draw = () => {
+    const value = ings.reduce((a, i) => a + Math.max(0, +i.stock) * +i.unit_cost, 0);
+    app.innerHTML = `<div class="row between"><div><h2>Estoque</h2><p class="lead">Insumos baixam sozinhos a cada venda, pela ficha técnica de cada produto, e voltam se o pedido for cancelado.</p></div>
+      ${owner ? '<button class="pri" id="iNew">+ Novo insumo</button>' : ''}</div>
+    <div class="kpis"><div class="kpi"><span class="mut">Insumos</span><b>${ings.length}</b></div><div class="kpi"><span class="mut">Acabando</span><b class="${low().length ? 'neg' : ''}">${low().length}</b><span class="mut">no mínimo ou abaixo</span></div>
+      <div class="kpi"><span class="mut">Valor em estoque</span><b class="price">${brl(Math.round(value))}</b></div><div class="kpi"><span class="mut">Produtos com ficha</span><b>${new Set(recipes.map(r => r.product_id)).size}</b><span class="mut">de ${prods.length}</span></div></div>
+    ${low().length ? `<p class="stuck" style="display:block">⚠ Acabando: ${low().map(i => `<b>${esc(i.name)}</b> (${fmtQ(i.stock, i.unit)})`).join(', ')}</p>` : ''}
+    <div class="panel" style="margin-bottom:16px"><h3>Insumos</h3><div class="scroll"><table class="stack"><thead><tr><th>Insumo</th><th class="n">Estoque</th><th class="n">Mínimo</th><th class="n">Custo</th><th class="n">Valor</th><th></th></tr></thead><tbody>
+      ${ings.map(i => `<tr><td data-l="Insumo"><b>${esc(i.name)}</b></td><td data-l="Estoque" class="n ${+i.min_stock > 0 && +i.stock <= +i.min_stock ? 'neg' : ''}">${fmtQ(i.stock, i.unit)}</td><td data-l="Mínimo" class="n">${+i.min_stock ? fmtQ(i.min_stock, i.unit) : '—'}</td>
+        <td data-l="Custo" class="n">${fmtCost(i.unit_cost)}/${UNITS[i.unit]}</td><td data-l="Valor" class="n price">${brl(Math.round(Math.max(0, +i.stock) * +i.unit_cost))}</td>
+        <td data-l=""><span class="row"><button class="ok sm" data-in="${i.id}">Entrada</button><button class="ghost sm" data-count="${i.id}">Contagem</button>${owner ? `<button class="ghost sm" data-edit="${i.id}">Editar</button>` : ''}</span></td></tr>`).join('') || '<tr><td class="mut" colspan="6">Nenhum insumo ainda. Comece pelos que mais pesam no custo: queijo, carne, massa, embalagens.</td></tr>'}</tbody></table></div></div>
+    <div class="panel" style="margin-bottom:16px"><h3>Ficha técnica e margem</h3><p class="mut" style="margin:0 0 8px">Quanto de cada insumo vai em 1 unidade do produto. Com isso o sistema calcula o custo e a margem de cada item.</p>
+      <div class="scroll"><table class="stack"><thead><tr><th>Produto</th><th>Ficha</th><th class="n">Preço</th><th class="n">Custo</th><th class="n">Margem</th><th></th></tr></thead><tbody>
+      ${prods.map(p => { const rs = recipes.filter(r => r.product_id === p.id), c = unitCost(p.id), mg = p.price ? (p.price - c) / p.price : 0; return `<tr><td data-l="Produto"><b>${esc(p.name)}</b><br><span class="mut">${esc(p.category)}</span></td>
+        <td data-l="Ficha">${rs.length ? rs.map(r => `${esc(ing(r.ingredient_id)?.name || '?')} ${fmtQ(r.qty, ing(r.ingredient_id)?.unit)}`).join(', ') : '<span class="mut">sem ficha</span>'}</td>
+        <td data-l="Preço" class="n price">${brl(p.price)}</td><td data-l="Custo" class="n price">${rs.length ? brl(Math.round(c)) : '—'}</td>
+        <td data-l="Margem" class="n">${rs.length ? `<b class="${mg < 0.5 ? 'neg' : ''}">${Math.round(mg * 100)}%</b>` : '—'}</td>
+        <td data-l="">${owner ? `<button class="ghost sm" data-recipe="${p.id}">${rs.length ? 'Editar ficha' : 'Montar ficha'}</button>` : ''}</td></tr>`; }).join('')}</tbody></table></div>
+      <p class="mut" style="margin:6px 0 0">Margem abaixo de 50% fica em vermelho. Preço considerado: o preço base, sem adicionais.</p></div>
+    <div class="panel"><h3>Últimos movimentos</h3>${moves.map(m => `<div class="ci"><span>${new Date(m.at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })} · <b>${esc(ing(m.ingredient_id)?.name || '?')}</b> · ${({ pedido: 'venda', cancelamento: 'cancelamento', entrada: 'entrada', ajuste: 'contagem' })[m.reason]}${m.note ? ` · ${esc(m.note)}` : ''}</span><span class="${m.delta < 0 ? 'neg' : ''}">${m.delta > 0 ? '+' : ''}${fmtQ(m.delta, ing(m.ingredient_id)?.unit)}</span></div>`).join('') || '<p class="empty">Nenhum movimento ainda.</p>'}</div>`;
+  };
+  const ingForm = i => dialog(`<h2>${i ? 'Editar insumo' : 'Novo insumo'}</h2><form id="fIng">
+      <label>Nome<input id="inN" required maxlength="60" value="${esc(i?.name || '')}" placeholder="Mussarela, massa, caixa de pizza…"></label>
+      <div class="two" style="gap:10px"><label>Unidade<select id="inU">${Object.entries(UNITS).map(([k, l]) => `<option value="${k}" ${(i?.unit || 'g') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label>Estoque mínimo (aviso)<input id="inM" inputmode="decimal" value="${i ? String(+i.min_stock).replace('.', ',') : ''}" placeholder="0"></label></div>
+      <label>Custo por unidade de medida (R$)<input id="inC" inputmode="decimal" value="${i ? String(+i.unit_cost / 100).replace('.', ',') : ''}" placeholder="ex.: 0,045 por grama"></label>
+      <p class="mut" style="margin:0">Dica: o custo também se ajusta sozinho quando você registra uma entrada com o valor pago.</p>
+      <div class="row"><button class="pri">Salvar</button>${i ? '<button type="button" class="ghost" id="inDel">Excluir insumo</button>' : ''}<button type="button" class="ghost" data-close>Cancelar</button></div></form>`);
+  app.onclick = attempt(async e => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.id === 'iNew' || b.dataset.edit) {
+      const i = b.dataset.edit ? ing(+b.dataset.edit) : null; ingForm(i);
+      $('#dlgBody').onclick = attempt(async ev => { if (!ev.target.closest('#inDel') || !sure(ev.target.closest('#inDel'))) return; await q(sb.from('ingredients').delete().eq('id', i.id)); closeDlg(); toast('Insumo excluído'); await load(); });
+      $('#dlgBody').onsubmit = attempt(async ev => {
+        ev.preventDefault(); const m = num($('#inM').value || '0'), c = num($('#inC').value || '0');
+        if (!(m >= 0) || !(c >= 0)) throw new Error('Confira o mínimo e o custo');
+        const row = { name: $('#inN').value.trim(), unit: $('#inU').value, min_stock: m, unit_cost: Math.round(c * 100 * 10000) / 10000 };
+        await q(i ? sb.from('ingredients').update(row).eq('id', i.id) : sb.from('ingredients').insert({ ...row, tenant_id: S.id }));
+        closeDlg(); toast('Insumo salvo'); await load();
+      });
+      return;
+    }
+    if (b.dataset.in || b.dataset.count) {
+      const i = ing(+(b.dataset.in || b.dataset.count)), entry = !!b.dataset.in;
+      dialog(`<h2>${entry ? 'Entrada' : 'Contagem'}: ${esc(i.name)}</h2><p class="mut" style="margin:0">Estoque atual no sistema: <b>${fmtQ(i.stock, i.unit)}</b>.</p><form id="fMv">
+        <label>${entry ? 'Quantidade comprada' : 'Quantidade que há de fato'} (${UNITS[i.unit]})<input id="mvQ" inputmode="decimal" required autofocus></label>
+        ${entry ? '<label>Valor pago no total (R$, opcional)<input id="mvC" inputmode="decimal" placeholder="atualiza o custo médio"></label>' : ''}
+        <label>Observação (opcional)<input id="mvN" maxlength="120" placeholder="${entry ? 'fornecedor, nota…' : 'contagem de sexta…'}"></label>
+        <div class="row"><button class="pri">Registrar</button><button type="button" class="ghost" data-close>Cancelar</button></div></form>`);
+      $('#dlgBody').onsubmit = attempt(async ev => {
+        ev.preventDefault(); const qv = num($('#mvQ').value), cv = entry && $('#mvC').value.trim() ? toCents($('#mvC').value) : null;
+        if (!(qv >= 0)) throw new Error('Quantidade inválida');
+        await rpc('ingredient_move', { p_ingredient: i.id, p_kind: entry ? 'entrada' : 'ajuste', p_qty: qv, p_total_cost: cv, p_note: $('#mvN').value });
+        closeDlg(); toast(entry ? 'Entrada registrada' : 'Estoque ajustado'); await load();
+      });
+      return;
+    }
+    if (b.dataset.recipe) {
+      const p = prods.find(x => x.id === +b.dataset.recipe); if (!ings.length) return toast('Cadastre os insumos primeiro');
+      let rows = recipes.filter(r => r.product_id === p.id).map(r => ({ id: r.ingredient_id, qty: +r.qty }));
+      if (!rows.length) rows = [{ id: ings[0].id, qty: '' }];
+      const paintR = () => { $('#rRows').innerHTML = rows.map((r, k) => `<div class="row" style="flex-wrap:nowrap"><select data-ri="${k}" style="flex:2">${ings.map(i => `<option value="${i.id}" ${i.id === r.id ? 'selected' : ''}>${esc(i.name)} (${UNITS[i.unit]})</option>`).join('')}</select>
+        <input data-rq="${k}" inputmode="decimal" value="${String(r.qty).replace('.', ',')}" placeholder="qtd" style="flex:1"><button type="button" class="ghost sm" data-rdel="${k}" aria-label="Remover">✕</button></div>`).join('');
+        paintCost(); };
+      const paintCost = () => { const c = rows.reduce((a, r) => a + (num(r.qty) || 0) * (ing(r.id)?.unit_cost || 0), 0); $('#rCost').textContent = `Custo: ${brl(Math.round(c))} · margem ${p.price ? Math.round((p.price - c) / p.price * 100) : 0}%`; };
+      dialog(`<h2>Ficha técnica: ${esc(p.name)}</h2><p class="mut" style="margin:0">Quanto vai em <b>1 unidade</b> (ex.: mussarela 200 g, caixa 1 un).</p>
+        <form id="fRec"><div id="rRows" style="display:grid;gap:8px"></div><button type="button" class="ghost sm" id="rAdd">+ Insumo</button><p id="rCost" class="mut" style="margin:0"></p>
+        <div class="row"><button class="pri">Salvar ficha</button><button type="button" class="ghost" data-close>Cancelar</button></div></form>`);
+      paintR();
+      $('#dlgBody').oninput = ev => { const k = ev.target.dataset.rq; if (k != null) { rows[+k].qty = ev.target.value; paintCost(); } };
+      $('#dlgBody').onchange = ev => { const k = ev.target.dataset.ri; if (k != null) { rows[+k].id = +ev.target.value; paintR(); } };
+      $('#dlgBody').onclick = ev => { if (ev.target.closest('#rAdd')) { rows.push({ id: ings[0].id, qty: '' }); paintR(); } const d = ev.target.closest('[data-rdel]'); if (d) { rows.splice(+d.dataset.rdel, 1); paintR(); } };
+      $('#dlgBody').onsubmit = attempt(async ev => {
+        ev.preventDefault(); const items = rows.filter(r => String(r.qty).trim() !== '').map(r => ({ ingredientId: r.id, qty: num(r.qty) }));
+        if (items.some(x => !(x.qty > 0))) throw new Error('Quantidade inválida');
+        await rpc('set_recipe', { p_product: p.id, p_items: items }); closeDlg(); toast('Ficha salva'); await load();
+      });
+    }
+  });
+  cleanup = () => { app.onclick = null; };
+  await load();
+}
+
 /* ---------- mesas: conta de cada mesa ---------- */
 function printBill(S, m) {
   // junta itens iguais (mesmo produto, opções e preço) de todos os pedidos da mesa
@@ -1565,14 +1669,35 @@ function heatmap(cells, days) {
 }
 
 /* ---------- relatórios ---------- */
+const nextMonth = ym => { const [y, m] = ym.split('-').map(Number); return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`; };
 async function pReports(S) {
   let days = 7;
+  // Financeiro do mês: faturamento − custo dos insumos vendidos − despesas = resultado
+  let month = new Date().toLocaleDateString('en-CA', { timeZone: S.timezone || 'America/Sao_Paulo' }).slice(0, 7);
+  const CATS = ['Aluguel', 'Salários', 'Energia', 'Água', 'Gás', 'Embalagens', 'Ingredientes avulsos', 'Marketing', 'Taxas e impostos', 'Aplicativos', 'Manutenção', 'Outros'];
+  const drawFin = async () => {
+    const box = $('#fin'); if (!box) return;
+    let f, ex;
+    try { [f, ex] = await Promise.all([rpc('profit_report', { p_tenant: S.id, p_month: month + '-01' }),
+      q(sb.from('expenses').select('id, day, category, description, amount').eq('tenant_id', S.id).gte('day', month + '-01').lt('day', nextMonth(month) + '-01').order('day', { ascending: false }))]); }
+    catch { box.innerHTML = ''; return; }
+    const pct = v => f.revenue ? Math.round(v / f.revenue * 100) + '%' : '—';
+    box.innerHTML = `<div class="panel" style="margin-bottom:16px"><div class="row between"><h3 style="margin:0">Resultado do mês</h3><span class="row"><input type="month" id="finM" value="${month}" style="width:auto"><button class="pri sm" id="expNew">+ Despesa</button></span></div>
+      <div class="kpis" style="margin:10px 0"><div class="kpi"><span class="mut">Faturamento</span><b class="price">${brl(f.revenue)}</b><span class="mut">${f.orders} pedidos</span></div>
+        <div class="kpi"><span class="mut">Insumos vendidos</span><b class="price">${brl(f.ingredients)}</b><span class="mut">${pct(f.ingredients)} · pela ficha técnica</span></div>
+        <div class="kpi"><span class="mut">Despesas</span><b class="price">${brl(f.expenses)}</b><span class="mut">${pct(f.expenses)}</span></div>
+        <div class="kpi"><span class="mut">Resultado</span><b class="price ${f.result < 0 ? 'neg' : ''}">${brl(f.result)}</b><span class="mut">${f.revenue ? `margem ${pct(f.result)}` : ''}</span></div></div>
+      ${!f.ingredients ? '<p class="mut" style="margin:0 0 8px">O custo dos insumos aparece quando os produtos têm ficha técnica (aba Estoque).</p>' : ''}
+      ${ex.length ? `<details><summary class="mut">${ex.length} despesa(s) lançada(s) · ${f.byCategory.slice(0, 3).map(c => `${esc(c.category)} ${brl(c.amount)}`).join(' · ')}</summary>
+        ${ex.map(x => `<div class="ci"><span>${x.day.split('-').reverse().join('/')} · <b>${esc(x.category)}</b>${x.description ? ` · ${esc(x.description)}` : ''}</span><span class="row"><span class="price">${brl(x.amount)}</span><button class="ghost sm" data-expdel="${x.id}">Excluir</button></span></div>`).join('')}</details>` : '<p class="mut" style="margin:0">Nenhuma despesa lançada neste mês.</p>'}</div>`;
+  };
   const draw = async () => {
     const [r, hm, rv] = await Promise.all([rpc('store_report', { p_tenant: S.id, p_days: days }), rpc('sales_heatmap', { p_tenant: S.id, p_days: Math.max(days, 7) }).catch(() => null),
       q(sb.from('order_reviews').select('order_id, rating, comment, reply, created_at, order:orders(number, customer_name)').eq('tenant_id', S.id).order('created_at', { ascending: false }).limit(30)).catch(() => [])]);
     const bars = (rows, label, val, fmt, color) => { const m = Math.max(1, ...rows.map(val)); return rows.map(x => `<div class="bar"><span>${esc(label(x))}</span><i style="width:${val(x) / m * 100}%;${color ? `background:${color}` : ''}"></i><span class="price">${fmt(x)}</span></div>`).join('') || '<p class="empty">Sem dados no período</p>'; };
     app.innerHTML = `<div class="row between"><div><h2>Relatórios</h2><p class="lead">Pedidos não cancelados no período escolhido.</p></div>
       <span class="row">${[1, 7, 30, 90].map(d => `<button class="sm ${d === days ? 'pri' : 'ghost'}" data-days="${d}">${d === 1 ? 'Hoje' : d + ' dias'}</button>`).join('')}<button class="ghost sm" id="ordersCsv">Baixar pedidos (CSV)</button></span></div>
+    <div id="fin"></div>
     <div class="kpis"><div class="kpi"><span class="mut">Faturamento</span><b class="price">${brl(r.revenue)}</b></div><div class="kpi"><span class="mut">Pedidos</span><b>${r.orders}</b><span class="mut">${r.cancelled} cancelado(s)</span></div>
       <div class="kpi"><span class="mut">Ticket médio</span><b class="price">${brl(r.avgTicket)}</b></div><div class="kpi"><span class="mut">Tempo médio até entregar</span><b>${r.avgDeliveryMin ?? '—'}${r.avgDeliveryMin != null ? ' min' : ''}</b></div></div>
     <div class="two"><div class="panel"><h3>Faturamento por dia</h3><div class="bars">${bars(r.byDay, x => x.d.split('-').reverse().slice(0, 2).join('/'), x => x.revenue, x => brl(x.revenue))}</div></div>
@@ -1585,14 +1710,31 @@ async function pReports(S) {
         ${x.comment ? `<p style="margin:0">${esc(x.comment)}</p>` : ''}
         <form class="row" data-reply="${x.order_id}" style="flex-wrap:nowrap"><input name="reply" maxlength="500" placeholder="Responder publicamente" value="${esc(x.reply || '')}"><button class="ghost sm">${x.reply ? 'Atualizar' : 'Responder'}</button></form>
         <span class="mut" style="font-size:13px">${new Date(x.created_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</span></div>`).join('') || '<p class="mut" style="margin:0">Nenhuma avaliação ainda. Depois da entrega, o cliente pode avaliar pela página do pedido.</p>'}</div>`;
+    drawFin().catch(() => {});
   };
   app.onclick = attempt(async e => {
+    const xd = e.target.closest('button[data-expdel]');
+    if (xd) { if (!sure(xd)) return; await q(sb.from('expenses').delete().eq('id', +xd.dataset.expdel)); toast('Despesa excluída'); return drawFin(); }
+    if (e.target.closest('#expNew')) {
+      dialog(`<h2>Nova despesa</h2><form id="fExp"><div class="two" style="gap:10px"><label>Data<input id="exD" type="date" required value="${new Date().toLocaleDateString('en-CA', { timeZone: S.timezone || 'America/Sao_Paulo' })}"></label>
+        <label>Valor (R$)<input id="exV" inputmode="decimal" required></label></div>
+        <label>Categoria<input id="exC" list="expCats" required maxlength="40" placeholder="Aluguel, salários…"><datalist id="expCats">${CATS.map(c => `<option value="${c}">`).join('')}</datalist></label>
+        <label>Descrição (opcional)<input id="exT" maxlength="120"></label>
+        <div class="row"><button class="pri">Lançar</button><button type="button" class="ghost" data-close>Cancelar</button></div></form>`);
+      $('#dlgBody').onsubmit = attempt(async ev => {
+        ev.preventDefault(); const v = toCents($('#exV').value); if (!(v > 0)) throw new Error('Valor inválido');
+        await q(sb.from('expenses').insert({ tenant_id: S.id, day: $('#exD').value, category: $('#exC').value.trim(), description: $('#exT').value.trim() || null, amount: v }));
+        closeDlg(); toast('Despesa lançada'); await drawFin();
+      });
+      return;
+    }
     const ex = e.target.closest('#ordersCsv');
     if (ex) { ex.disabled = true; try { await exportOrders(S, days); } finally { ex.disabled = false; } return; }
     const b = e.target.closest('button[data-days]'); if (b) { days = +b.dataset.days; await draw(); }
   });
   app.onsubmit = attempt(async e => { const f = e.target.closest('form[data-reply]'); if (!f) return; e.preventDefault(); await rpc('reply_review', { p_order: +f.dataset.reply, p_reply: f.reply.value }); toast('Resposta salva'); await draw(); });
-  cleanup = () => { app.onclick = app.onsubmit = null; };
+  app.onchange = e => { if (e.target.id === 'finM' && e.target.value) { month = e.target.value; drawFin().catch(() => {}); } };
+  cleanup = () => { app.onclick = app.onsubmit = app.onchange = null; };
   await draw();
 }
 
@@ -1905,7 +2047,8 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql',
   '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql',
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
-  '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql'];
+  '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
+  '20261201000000_insumos_financeiro.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };

@@ -29,6 +29,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    16. `20261128000000_vitrine_previsao_mesas.sql` (mais pedidos, previsão de entrega, categorias com horário e conta da mesa)
    17. `20261129000000_pausa_feriados_estacoes.sql` (pausa rápida, feriados, estações cozinha/bar e mapa de horários)
    18. `20261130000000_caixa_acerto_bloqueio.sql` (caixa por turno, acerto do entregador e bloqueio de clientes)
+   19. `20261201000000_insumos_financeiro.sql` (estoque de insumos com ficha técnica, despesas e resultado do mês)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -220,7 +221,7 @@ O que já está pronto:
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 85 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 87 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;
