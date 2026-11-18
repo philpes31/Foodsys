@@ -211,3 +211,5 @@ body.kds-on main{max-width:none;padding:0}
 .heat{border-collapse:separate;border-spacing:3px;font-size:12px}
 .heat th{font-weight:500;color:var(--mut);padding:0 2px;text-align:center}
 .heat td{width:28px;height:26px;border-radius:5px;text-align:center;color:#fff;font-weight:600;background:color-mix(in srgb,var(--red) calc(var(--a) * 100%),transparent);outline:1px solid var(--line)}
+.shift{margin-bottom:16px}
+.neg{color:var(--red)}

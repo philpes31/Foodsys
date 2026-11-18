@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -617,7 +617,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 17);
+  assert.equal(st.length, 18);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -838,4 +838,55 @@ test('mapa de horários e estações: só o dono vê o mapa; estações são gra
   sql(`update tenants set stations = '{"Bebidas":"Bar"}' where id = '${pizzaId}'`, U.pizza);
   assert.equal(sql(`select stations->>'Bebidas' from tenants where id = '${pizzaId}'`, null), 'Bar');
   fails(`update tenants set paused_until = null where id = '${pizzaId}'`, U.pizza, /permission denied/);
+});
+
+test('caixa por turno: abre com troco, soma vendas em dinheiro, sangria e reforço, fecha com diferença', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', min_order = 0, allow_pickup = true, paused_until = null, delivery_paused_until = null, closed_dates = '[]' where id = '${pizzaId}'`);
+  sql(`delete from cash_sessions where tenant_id = '${pizzaId}'`);
+  fails(`select cash_open('${pizzaId}', 10000)`, U.burger, /Sem permissão/);
+  fails(`select cash_move('${pizzaId}', 'sangria', 100, null)`, U.staff, /Abra o caixa/);
+  assert.equal(json(`cash_open('${pizzaId}', 10000)`, U.staff).expected, 10000);
+  fails(`select cash_open('${pizzaId}', 5000)`, U.staff, /Já existe um caixa aberto/);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const r = order('forno-da-vila', { customer: { name: 'Caixa', phone: '11988112233' }, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 2 }] });
+  order('forno-da-vila', { customer: { name: 'Caixa Pix', phone: '11988112234' }, fulfillment: 'pickup', payment: 'Pix', items: [{ productId: p.id, qty: 5 }] });
+  sql(`select cash_move('${pizzaId}', 'suprimento', 2000, 'moedas')`, U.staff);
+  const st = json(`cash_move('${pizzaId}', 'sangria', 5000, 'depósito')`, U.pizza);
+  assert.equal(st.cashSales, r.total);
+  assert.equal(st.expected, 10000 + r.total + 2000 - 5000);
+  assert.equal(st.moves.length, 2);
+  fails(`select cash_move('${pizzaId}', 'roubo', 100, null)`, U.staff, /Tipo inválido/);
+  const closed = json(`cash_close('${pizzaId}', ${st.expected - 300}, 'faltou troco')`, U.staff);
+  assert.equal(closed.open, false);
+  assert.equal(closed.last.diff, -300);
+  fails(`select cash_close('${pizzaId}', 0, null)`, U.staff, /Nenhum caixa aberto/);
+  assert.equal(sql(`select count(*) from cash_sessions where tenant_id = '${pizzaId}'`, U.burger), '0');
+});
+
+test('acerto do entregador: entregas, taxas e dinheiro a devolver no dia', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const z = json(`(select to_jsonb(z) from zones z where tenant_id = '${pizzaId}' order by id limit 1)`);
+  const cid = sql(`insert into couriers (tenant_id, name, phone) values ('${pizzaId}', 'Zé Acerto', '11955550000') returning id`);
+  const mk = pay => order('forno-da-vila', { customer: { name: 'Ac', phone: `119777${Math.floor(Math.random() * 1e5).toString().padStart(5, '0')}` }, fulfillment: 'delivery', zoneId: z.id, address: 'Rua B, 2', payment: pay, items: [{ productId: p.id, qty: 1 }] });
+  const a = mk('Dinheiro'), b = mk('Cartão na entrega'), c = mk('Dinheiro');
+  sql(`update orders set courier_id = ${cid}, status = 'entregue' where public_code in ('${a.code}', '${b.code}');
+       update orders set courier_id = ${cid}, status = 'rota' where public_code = '${c.code}'`);
+  fails(`select courier_settlement('${pizzaId}', null)`, U.burger, /Sem permissão/);
+  const z1 = json(`courier_settlement('${pizzaId}', null)`, U.staff).find(x => x.name === 'Zé Acerto');
+  assert.deepEqual([z1.deliveries, z1.onRoute, z1.cash, z1.card], [2, 1, a.total, b.total]);
+  assert.equal(z1.fees, z.fee * 2);
+  assert.equal(z1.orders.length, 3);
+});
+
+test('bloqueio de cliente: telefone bloqueado não pede pela loja; só o dono bloqueia', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const base = { customer: { name: 'Trote', phone: '(11) 96543-2100' }, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 1 }] };
+  fails(`select set_blocked('${pizzaId}', '11965432100', true, 'trote')`, U.staff, /Sem permissão/);
+  fails(`select set_blocked('${pizzaId}', '123', true, null)`, U.pizza, /Telefone inválido/);
+  sql(`select set_blocked('${pizzaId}', '+55 11 96543-2100', true, 'trote')`, U.pizza);
+  assert.throws(() => order('forno-da-vila', base), /Fale com a loja/);
+  assert.equal(sql(`select count(*) from blocked_phones`, U.staff), '0');
+  assert.equal(sql(`select count(*) from blocked_phones where tenant_id = '${pizzaId}'`, U.pizza), '1');
+  sql(`select set_blocked('${pizzaId}', '11965432100', false, null)`, U.pizza);
+  assert.ok(order('forno-da-vila', base).code);
 });

@@ -1000,11 +1000,16 @@ const routeUrl = (S, os) => { const pts = os.map(stopOf), origin = S.lat != null
   return `https://www.google.com/maps/dir/?api=1&travelmode=driving${origin ? `&origin=${encodeURIComponent(origin)}` : ''}&destination=${encodeURIComponent(pts.at(-1))}${pts.length > 1 ? `&waypoints=${encodeURIComponent(pts.slice(0, -1).join('|'))}` : ''}`; };
 const routeMsg = (S, os) => `Rota com ${os.length} entregas — ${S.name}\n\n${os.map((o, i) => `${i + 1}) #${o.number} · ${o.customer_name} · ${o.customer_phone}\n${o.address} — ${o.zone_name}\n${o.payment_status === 'paid' ? `JÁ PAGO (${o.payment}) · não cobrar` : `Cobrar: ${o.payment} · ${brl(o.total)}${o.change_for ? ` (troco p/ ${brl(o.change_for)})` : ''}`}`).join('\n\n')}\n\nRota no mapa: ${routeUrl(S, os)}`;
 
+// Mensagem de acerto para o entregador (WhatsApp): entregas, taxas e dinheiro a devolver.
+const settleMsg = (S, c, day) => `Acerto ${S.name} — ${day.split('-').reverse().join('/')}\n${c.name}\n\nEntregas: ${c.deliveries}${c.onRoute ? ` (+${c.onRoute} em rota)` : ''}\nTaxas de entrega: ${brl(c.fees)}\nDinheiro recebido dos clientes: ${brl(c.cash)}\n${c.cash >= c.fees ? `Devolver à loja: ${brl(c.cash - c.fees)}` : `A loja paga: ${brl(c.fees - c.cash)}`}\n\nPedidos: ${c.orders.map(o => `#${o.number} ${o.status === 'rota' ? '(em rota)' : ''}${o.payment === 'Dinheiro' && o.status === 'entregue' ? ` dinheiro ${brl(o.total)}` : ''}`).join(', ')}`;
 async function pDelivery(S) {
-  let ready = [], route = [], couriers = [];
+  let ready = [], route = [], couriers = [], settle = null;
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: S.timezone || 'America/Sao_Paulo' });
+  let sday = today;
   const picked = new Set();
   const load = async () => {
-    [ready, route, couriers] = await Promise.all([fetchOrders(S.id, ['pronto']), fetchOrders(S.id, ['rota']), q(sb.from('couriers').select('id, tenant_id, name, phone, active').eq('tenant_id', S.id).order('id'))]);
+    [ready, route, couriers, settle] = await Promise.all([fetchOrders(S.id, ['pronto']), fetchOrders(S.id, ['rota']), q(sb.from('couriers').select('id, tenant_id, name, phone, active').eq('tenant_id', S.id).order('id')),
+      rpc('courier_settlement', { p_tenant: S.id, p_day: sday }).catch(() => null)]);
     draw();
   };
   const draw = () => {
@@ -1019,6 +1024,11 @@ async function pDelivery(S) {
     </div><div class="panel"><h3>Em rota (${route.length})</h3>
       ${route.map(o => `<div class="tk go"><div class="top"><span>#${o.number} · ${esc(o.courier?.name || '—')}</span><span class="price">${mins(o.updated_at)} min</span></div><span class="mut">${esc(o.address)} — ${esc(o.zone_name)} · ${esc(o.payment)}</span>
         <span class="row"><button class="ok sm" data-st="entregue" data-id="${o.id}">Confirmar entrega</button>${waBtn(waLink(couriers.find(c => c.id === o.courier_id)?.phone, courierMsg(o)), 'Enviar ao entregador')}${waBtn(waLink(o.customer_phone, customerMsg(o, S.name)), 'Avisar cliente')}</span></div>`).join('') || '<p class="empty">Ninguém na rua agora</p>'}
+      ${settle ? `<div class="row between" style="margin-top:8px"><h3 style="margin:0">Acerto do dia</h3><input type="date" id="sDay" value="${sday}" max="${today}" style="width:auto"></div>
+        <p class="mut" style="margin:4px 0 8px">Taxas = o que a loja repassa ao entregador. Dinheiro = o que ele recebeu dos clientes e devolve. Considera o modelo comum, em que o entregador fica com a taxa.</p>
+        ${settle.length ? `<div class="scroll"><table class="stack"><thead><tr><th>Entregador</th><th class="n">Entregas</th><th class="n">Taxas</th><th class="n">Dinheiro</th><th class="n">Acerto</th><th></th></tr></thead><tbody>
+        ${settle.map(c => `<tr><td data-l="Entregador"><b>${esc(c.name)}</b>${c.onRoute ? ` <span class="badge b-a">${c.onRoute} em rota</span>` : ''}</td><td data-l="Entregas" class="n">${c.deliveries}</td><td data-l="Taxas" class="n price">${brl(c.fees)}</td><td data-l="Dinheiro" class="n price">${brl(c.cash)}</td>
+          <td data-l="Acerto" class="n"><b class="price">${c.cash >= c.fees ? `devolve ${brl(c.cash - c.fees)}` : `receber ${brl(c.fees - c.cash)}`}</b></td><td data-l="">${waBtn(waLink(c.phone, settleMsg(S, c, sday)), 'Enviar acerto')}</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty" style="margin:0">Nenhuma entrega com entregador nesse dia.</p>'}` : ''}
       <h3>Entregadores</h3><table><tbody>${couriers.map(c => `<tr><td>${esc(c.name)}<br><span class="mut">${esc(c.phone)}</span></td><td>${route.some(o => o.courier_id === c.id) ? '<span class="badge b-a">Em rota</span>' : c.active ? '<span class="badge b-g">Disponível</span>' : '<span class="badge">Folga</span>'}</td><td class="n"><button class="ghost sm" data-cour="${c.id}">${c.active ? 'Dar folga' : 'Ativar'}</button></td></tr>`).join('') || '<tr><td class="mut">Cadastre entregadores em Configurações.</td></tr>'}</tbody></table>
     </div></div>`;
   };
@@ -1043,7 +1053,9 @@ async function pDelivery(S) {
       go.outerHTML = wa ? `<a class="btn pri" href="${esc(wa)}" target="_blank" rel="noopener">Enviar rota ao entregador no WhatsApp</a>` : '<span class="mut">O entregador não tem WhatsApp válido cadastrado.</span>';
     });
   };
-  app.onchange = e => { const id = e.target.dataset.pick; if (!id) return; e.target.checked ? picked.add(+id) : picked.delete(+id); draw(); };
+  app.onchange = e => {
+    if (e.target.id === 'sDay' && e.target.value) { sday = e.target.value; return load().catch(err => toast(err.message)); }
+    const id = e.target.dataset.pick; if (!id) return; e.target.checked ? picked.add(+id) : picked.delete(+id); draw(); };
   app.onclick = attempt(async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.id === 'pickAll') { const dels = ready.filter(o => o.fulfillment === 'delivery'); picked.size === dels.length ? picked.clear() : dels.forEach(o => picked.add(o.id)); return draw(); }
@@ -1294,10 +1306,21 @@ async function pCash(S) {
   const today = new Date().toLocaleDateString('en-CA', { timeZone: S.timezone || 'America/Sao_Paulo' });
   let day = today, r = null;
   const rows = (arr, label) => arr.map(x => `<tr><td>${esc(label(x))}</td><td class="n">${x.count}</td><td class="n price">${brl(x.total)}</td></tr>`).join('') || '<tr><td class="mut" colspan="3">Sem vendas</td></tr>';
+  let cs = null; // turno do caixa (abre com troco, sangrias/reforços, fecha contando a gaveta)
+  const shiftBox = () => {
+    if (!cs) return '';
+    if (!cs.open) return `<div class="panel shift"><div class="row between"><div><h3 style="margin:0">Caixa fechado</h3>${cs.last ? `<p class="mut" style="margin:4px 0 0">Último turno: ${new Date(cs.last.opened_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })} a ${hhmm(cs.last.closed_at)} · esperado ${brl(cs.last.expected_amount)} · contado ${brl(cs.last.counted_amount)} · <b class="${cs.last.diff < 0 ? 'neg' : ''}">${cs.last.diff === 0 ? 'bateu certinho' : (cs.last.diff > 0 ? 'sobrou ' : 'faltou ') + brl(Math.abs(cs.last.diff))}</b>${cs.last.note ? ` · ${esc(cs.last.note)}` : ''}</p>` : '<p class="mut" style="margin:4px 0 0">Abra o caixa no começo do turno com o troco que está na gaveta.</p>'}</div>
+      <form class="row" id="fOpen"><label>Troco inicial (R$)<input id="csOpen" inputmode="decimal" placeholder="100,00" style="width:120px" required></label><button class="pri" style="align-self:end">Abrir caixa</button></form></div></div>`;
+    return `<div class="panel shift"><div class="row between"><h3 style="margin:0">Caixa aberto <span class="badge b-g">desde ${hhmm(cs.openedAt)}</span></h3><span class="row"><button class="ghost sm" data-move="suprimento">+ Reforço</button><button class="ghost sm" data-move="sangria">− Sangria</button><button class="pri sm" id="csClose">Fechar caixa</button></span></div>
+      <div class="kpis" style="margin:10px 0 0"><div class="kpi"><span class="mut">Troco inicial</span><b class="price">${brl(cs.opening)}</b></div><div class="kpi"><span class="mut">Vendas em dinheiro</span><b class="price">${brl(cs.cashSales)}</b></div>
+        <div class="kpi"><span class="mut">Reforços − sangrias</span><b class="price">${brl(cs.supplies - cs.withdrawals)}</b></div><div class="kpi"><span class="mut">Deve ter na gaveta</span><b class="price">${brl(cs.expected)}</b></div></div>
+      ${cs.moves.length ? `<p class="mut" style="margin:8px 0 0">${cs.moves.map(m => `${hhmm(m.at)} ${m.kind === 'sangria' ? 'sangria' : 'reforço'} ${brl(m.amount)}${m.note ? ` (${esc(m.note)})` : ''}`).join(' · ')}</p>` : ''}</div>`;
+  };
   const draw = async () => {
-    r = await rpc('cash_report', { p_tenant: S.id, p_day: day });
+    [r, cs] = await Promise.all([rpc('cash_report', { p_tenant: S.id, p_day: day }), rpc('cash_status', { p_tenant: S.id }).catch(() => null)]);
     app.innerHTML = `<div class="row between"><div><h2>Caixa</h2><p class="lead">Fechamento do dia: confira os valores por forma de pagamento com a maquininha e a gaveta.</p></div>
       <span class="row"><input type="date" id="cDay" value="${day}" max="${today}" style="width:auto"><button class="pri" id="cPrint">Imprimir fechamento</button></span></div>
+    ${shiftBox()}
     <div class="kpis"><div class="kpi"><span class="mut">Total do dia</span><b class="price">${brl(r.total)}</b><span class="mut">${r.orders} pedido(s)</span></div>
       <div class="kpi"><span class="mut">Taxas de entrega</span><b class="price">${brl(r.fees)}</b>${r.serviceFees ? `<span class="mut">+ ${brl(r.serviceFees)} de taxa de serviço</span>` : ''}</div>
       <div class="kpi"><span class="mut">Descontos</span><b class="price">${brl(r.discounts)}</b></div>
@@ -1319,9 +1342,30 @@ async function pCash(S) {
       ${r.paidOnline ? `<div class="li"><span>Recebido online</span><span>${brl(r.paidOnline)}</span></div>` : ''}<hr><div>Conferido por: ____________________</div></div>`;
     window.print();
   };
-  app.onclick = attempt(async e => { if (e.target.closest('#cPrint')) printCash(); });
+  const money = (id, label) => { const v = toCents($(id).value || '0'); if (!Number.isFinite(v) || v < 0) throw new Error(`${label}: valor inválido`); return v; };
+  app.onsubmit = attempt(async e => { if (e.target.id !== 'fOpen') return; e.preventDefault(); await rpc('cash_open', { p_tenant: S.id, p_amount: money('#csOpen', 'Troco') }); toast('Caixa aberto'); await draw(); });
+  app.onclick = attempt(async e => {
+    if (e.target.closest('#cPrint')) return printCash();
+    const mv = e.target.closest('button[data-move]');
+    if (mv) {
+      const kind = mv.dataset.move;
+      dialog(`<h2>${kind === 'sangria' ? 'Sangria (tirar dinheiro da gaveta)' : 'Reforço (colocar dinheiro na gaveta)'}</h2><form id="fMove"><label>Valor (R$)<input id="mvV" inputmode="decimal" required autofocus></label>
+        <label>Motivo (opcional)<input id="mvN" maxlength="120" placeholder="${kind === 'sangria' ? 'depósito, pagamento de fornecedor…' : 'mais moedas…'}"></label><div class="row"><button class="pri">Registrar</button><button type="button" class="ghost" data-close>Cancelar</button></div></form>`);
+      $('#dlgBody').onsubmit = attempt(async ev => { ev.preventDefault(); const v = money('#mvV', 'Valor'); if (!v) throw new Error('Informe o valor');
+        await rpc('cash_move', { p_tenant: S.id, p_kind: kind, p_amount: v, p_note: $('#mvN').value }); closeDlg(); toast(kind === 'sangria' ? 'Sangria registrada' : 'Reforço registrado'); await draw(); });
+      return;
+    }
+    if (e.target.closest('#csClose')) {
+      dialog(`<h2>Fechar caixa</h2><p class="mut" style="margin:0">Conte o dinheiro da gaveta e digite o total. O sistema compara com o esperado (${brl(cs.expected)}).</p>
+        <form id="fClose"><label>Dinheiro contado (R$)<input id="clV" inputmode="decimal" required autofocus></label><p id="clDiff" class="mut" style="margin:0"></p>
+        <label>Observação (opcional)<input id="clN" maxlength="300"></label><div class="row"><button class="pri">Fechar caixa</button><button type="button" class="ghost" data-close>Cancelar</button></div></form>`);
+      $('#dlgBody').oninput = () => { const v = toCents($('#clV').value || 'x'); $('#clDiff').textContent = Number.isFinite(v) ? (v === cs.expected ? 'Bateu certinho.' : v > cs.expected ? `Sobrando ${brl(v - cs.expected)}.` : `Faltando ${brl(cs.expected - v)}.`) : ''; };
+      $('#dlgBody').onsubmit = attempt(async ev => { ev.preventDefault(); const st = await rpc('cash_close', { p_tenant: S.id, p_counted: money('#clV', 'Valor'), p_note: $('#clN').value }); closeDlg();
+        toast(st.last?.diff ? `Caixa fechado: ${st.last.diff > 0 ? 'sobrou' : 'faltou'} ${brl(Math.abs(st.last.diff))}` : 'Caixa fechado: bateu certinho'); await draw(); });
+    }
+  });
   app.onchange = attempt(async e => { if (e.target.id === 'cDay' && e.target.value) { day = e.target.value; await draw(); } });
-  cleanup = () => { app.onclick = app.onchange = null; };
+  cleanup = () => { app.onclick = app.onchange = app.onsubmit = null; };
   await draw();
 }
 
@@ -1335,18 +1379,24 @@ async function pCustomers(S) {
   const msgFor = c => camp.msg.replaceAll('{nome}', c.name.split(' ')[0]).replaceAll('{loja}', S.name)
     .replaceAll('{cupom}', cupTxt(coupons.find(x => x.code === camp.coupon))).replaceAll('{link}', `${storeLink(S)}?repetir=1`);
   const saveCamp = () => local.set(`camp:${S.id}`, camp);
-  const load = async () => { list = await rpc('store_customers', { p_tenant: S.id, p_search: term || null, p_limit: gone ? 1000 : 200 }); draw(); };
+  const pkey = ph => String(ph || '').replace(/\D/g, '').slice(-11);
+  let blocked = new Map();
+  const load = async () => {
+    const [l, bl] = await Promise.all([rpc('store_customers', { p_tenant: S.id, p_search: term || null, p_limit: gone ? 1000 : 200 }),
+      q(sb.from('blocked_phones').select('phone_key, note').eq('tenant_id', S.id)).catch(() => null)]);
+    list = l; blocked = new Map((bl || []).map(b => [b.phone_key, b.note || ''])); draw();
+  };
   const shown = () => gone ? list.filter(c => mins(c.lastOrder) > gone * 1440 && c.orders > 0) : list;
   const draw = () => {
     const box = $('#custList'), rows = shown();
     const html = `${gone ? `<p class="mut" style="margin:0 0 8px">${rows.length} cliente(s) sem pedir há mais de ${gone} dias · ${rows.filter(c => sent[c.phone]).length} já contatado(s)</p>` : ''}
       <div class="scroll"><table class="stack"><thead><tr><th>Cliente</th><th class="n">Pedidos</th><th class="n">Total gasto</th><th>Último pedido</th><th></th></tr></thead><tbody>
-      ${rows.map(c => `<tr><td data-l="Cliente"><b>${esc(c.name)}</b><br><span class="mut">${esc(c.phone)}${c.address ? ' · ' + esc(c.address) : ''}</span></td>
+      ${rows.map(c => `<tr><td data-l="Cliente"><b>${esc(c.name)}</b>${blocked.has(pkey(c.phone)) ? ` <span class="badge b-r" title="${esc(blocked.get(pkey(c.phone)))}">bloqueado</span>` : ''}<br><span class="mut">${esc(c.phone)}${c.address ? ' · ' + esc(c.address) : ''}</span></td>
         <td data-l="Pedidos" class="n">${c.orders}${S.loyalty_enabled && c.stamps != null ? `<br><span class="mut">${Math.min(c.stamps, S.loyalty_every)}/${S.loyalty_every} selos</span>` : ''}</td><td data-l="Total gasto" class="n price">${brl(c.spent)}</td>
         <td data-l="Último pedido">${new Date(c.lastOrder).toLocaleDateString('pt-BR')}${mins(c.lastOrder) > 30 * 1440 ? ` <span class="badge b-a">sumido há ${Math.floor(mins(c.lastOrder) / 1440)} dias</span>` : ''}</td>
         <td data-l=""><span class="row">${gone
           ? (waLink(c.phone, '') ? `<a class="btn ${sent[c.phone] ? 'ghost' : 'pri'} sm" data-send="${esc(c.phone)}" href="${esc(waLink(c.phone, msgFor(c)))}" target="_blank" rel="noopener">${sent[c.phone] ? `Enviado em ${new Date(sent[c.phone]).toLocaleDateString('pt-BR')} · reenviar` : 'Enviar no WhatsApp'}</a>` : '<span class="mut">telefone inválido</span>')
-          : `${waBtn(waLink(c.phone, `Olá, ${c.name.split(' ')[0]}! Aqui é da ${S.name}.`))}<button class="ghost sm" data-anon="${esc(c.phone)}">Excluir dados</button>`}</span></td></tr>`).join('') || `<tr><td class="mut">${gone ? 'Nenhum cliente sumido. Ótimo sinal!' : 'Nenhum cliente encontrado.'}</td></tr>`}</tbody></table></div>`;
+          : `${waBtn(waLink(c.phone, `Olá, ${c.name.split(' ')[0]}! Aqui é da ${S.name}.`))}${blocked.has(pkey(c.phone)) ? `<button class="ghost sm" data-unblock="${esc(c.phone)}">Desbloquear</button>` : `<button class="ghost sm" data-block="${esc(c.phone)}">Bloquear</button>`}<button class="ghost sm" data-anon="${esc(c.phone)}">Excluir dados</button>`}</span></td></tr>`).join('') || `<tr><td class="mut">${gone ? 'Nenhum cliente sumido. Ótimo sinal!' : 'Nenhum cliente encontrado.'}</td></tr>`}</tbody></table></div>`;
     if (box) { box.innerHTML = html; return; }
     app.innerHTML = `<div class="row between"><div><h2>Clientes</h2><p class="lead">Quem já pediu na sua loja, montado a partir dos pedidos.</p></div>
       <span class="row"><button class="ghost" id="csv">Baixar planilha (CSV)</button></span></div>
@@ -1371,6 +1421,13 @@ async function pCustomers(S) {
     if (l) { sent[l.dataset.send] = new Date().toISOString(); local.set(`sent:${S.id}`, sent); setTimeout(draw, 300); return; }
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.gone != null) { const was = gone; gone = +b.dataset.gone; app.innerHTML = ''; if (!was !== !gone) await load(); else draw(); return; }
+    if (b.dataset.block) {
+      dialog(`<h2>Bloquear cliente</h2><p class="mut" style="margin:0">Pedidos pela loja online com o telefone <b>${esc(b.dataset.block)}</b> serão recusados com a mensagem "Fale com a loja". Pelo balcão e telefone vocês continuam lançando normalmente.</p>
+        <form id="fBlock"><label>Motivo (só a loja vê)<input id="bkN" maxlength="120" placeholder="trote, golpe, não pagou…"></label><div class="row"><button class="pri">Bloquear</button><button type="button" class="ghost" data-close>Cancelar</button></div></form>`);
+      $('#dlgBody').onsubmit = attempt(async ev => { ev.preventDefault(); await rpc('set_blocked', { p_tenant: S.id, p_phone: b.dataset.block, p_blocked: true, p_note: $('#bkN').value }); closeDlg(); toast('Cliente bloqueado'); await load(); });
+      return;
+    }
+    if (b.dataset.unblock) { await rpc('set_blocked', { p_tenant: S.id, p_phone: b.dataset.unblock, p_blocked: false }); toast('Cliente desbloqueado'); return load(); }
     if (b.dataset.anon) { if (!sure(b)) return; const n = await rpc('anonymize_customer', { p_tenant: S.id, p_phone: b.dataset.anon }); toast(`Dados removidos de ${n} pedido(s)`); await load(); }
     if (b.id === 'csv') {
       const rows = [['Nome', 'Telefone', 'Endereço', 'Pedidos', 'Total gasto', 'Primeiro pedido', 'Último pedido'],
@@ -1848,7 +1905,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql',
   '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql',
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
-  '20261129000000_pausa_feriados_estacoes.sql'];
+  '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };
