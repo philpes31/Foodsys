@@ -206,3 +206,8 @@ body.kds-on main{max-width:none;padding:0}
 .tablecard{display:grid;gap:6px;margin:0}
 .eta{margin:6px 0 10px}
 .tablecard .li{display:flex;justify-content:space-between;gap:8px}
+.pausebar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 14px;font-size:14px}
+.pausebar .sep{width:1px;height:22px;background:var(--line);margin:0 6px}
+.heat{border-collapse:separate;border-spacing:3px;font-size:12px}
+.heat th{font-weight:500;color:var(--mut);padding:0 2px;text-align:center}
+.heat td{width:28px;height:26px;border-radius:5px;text-align:center;color:#fff;font-weight:600;background:color-mix(in srgb,var(--red) calc(var(--a) * 100%),transparent);outline:1px solid var(--line)}

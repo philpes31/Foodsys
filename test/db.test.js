@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -617,7 +617,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 16);
+  assert.equal(st.length, 17);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -795,4 +795,47 @@ test('conta da mesa: soma os pedidos, fecha com a forma de pagamento e some da l
   assert.ok(!json(`open_tables('${pizzaId}')`, U.staff).some(x => x.table === '12'));
   fails(`select close_table('${pizzaId}', '12', 'Pix')`, U.staff, /Nenhum pedido aberto/);
   sql(`update tenants set service_percent = 0 where id = '${pizzaId}'`);
+});
+
+test('pausa rápida: loja pausada não recebe pedido; entregas pausadas aceitam retirada; volta sozinho', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', min_order = 0, allow_pickup = true, closed_dates = '[]', category_hours = '{}' where id = '${pizzaId}'`);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const z = json(`(select to_jsonb(z) from zones z where tenant_id = '${pizzaId}' order by id limit 1)`);
+  const pick = { customer: { name: 'Pausa', phone: '11977771111' }, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 1 }] };
+  const del = { ...pick, fulfillment: 'delivery', zoneId: z.id, address: 'Rua A, 1' };
+  fails(`select set_pause('${pizzaId}', 'store', 30)`, U.burger, /Sem permissão/);
+  fails(`select set_pause('${pizzaId}', 'tudo', 30)`, U.pizza, /store ou delivery/);
+  assert.ok(json(`set_pause('${pizzaId}', 'delivery', 30)`, U.staff).deliveryPausedUntil);
+  assert.throws(() => order('forno-da-vila', del), /Entregas pausadas até as/);
+  assert.ok(order('forno-da-vila', pick).code);
+  // no balcão (telefone) a loja ainda consegue lançar entrega
+  assert.ok(json(`staff_place_order('${pizzaId}', '${JSON.stringify({ ...del, channel: 'telefone' })}'::jsonb)`, U.staff).code);
+  sql(`select set_pause('${pizzaId}', 'delivery', 0)`, U.staff);
+  assert.ok(order('forno-da-vila', del).code);
+  sql(`select set_pause('${pizzaId}', 'store', 15)`, U.pizza);
+  assert.throws(() => order('forno-da-vila', pick), /fechada/);
+  sql(`update tenants set paused_until = now() - interval '1 minute' where id = '${pizzaId}'`);
+  assert.ok(order('forno-da-vila', pick).code, 'pausa vencida libera sozinha');
+});
+
+test('fechamentos especiais: dia fechado recusa pedido agora e agendado para aquele dia', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const pick = { customer: { name: 'Feriado', phone: '11977772222' }, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 1 }] };
+  sql(`update tenants set closed_dates = jsonb_build_array(jsonb_build_object('date', to_char(now() at time zone timezone, 'YYYY-MM-DD'), 'note', 'Feriado')) where id = '${pizzaId}'`);
+  assert.throws(() => order('forno-da-vila', pick), /fechada/);
+  sql(`update tenants set allow_scheduling = true, schedule_days = 3, schedule_lead_minutes = 30,
+       closed_dates = jsonb_build_array(jsonb_build_object('date', to_char((now() + interval '1 day') at time zone timezone, 'YYYY-MM-DD'))) where id = '${pizzaId}'`);
+  const when = sql(`select to_char((now() + interval '1 day') at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`);
+  assert.throws(() => order('forno-da-vila', { ...pick, scheduledFor: when }), /fechada nesse dia/);
+  assert.ok(order('forno-da-vila', pick).code, 'hoje não está mais fechado');
+  sql(`update tenants set closed_dates = '[]', allow_scheduling = false where id = '${pizzaId}'`);
+});
+
+test('mapa de horários e estações: só o dono vê o mapa; estações são gravadas pelo dono', () => {
+  fails(`select sales_heatmap('${pizzaId}', 30)`, U.staff, /Sem permissão/);
+  const h = json(`sales_heatmap('${pizzaId}', 30)`, U.pizza);
+  assert.ok(h.length > 0 && h.every(c => c.dow >= 0 && c.dow <= 6 && c.hour >= 0 && c.hour <= 23 && c.orders > 0));
+  sql(`update tenants set stations = '{"Bebidas":"Bar"}' where id = '${pizzaId}'`, U.pizza);
+  assert.equal(sql(`select stations->>'Bebidas' from tenants where id = '${pizzaId}'`, null), 'Bar');
+  fails(`update tenants set paused_until = null where id = '${pizzaId}'`, U.pizza, /permission denied/);
 });
