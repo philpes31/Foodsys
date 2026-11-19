@@ -244,12 +244,12 @@ body.kds-on main{max-width:none;padding:0}
 .cbcols section{background:#1c1c1c;border-radius:2vw;padding:2vw}
 .cbcols section.ok{background:color-mix(in srgb,#2f9e44 30%,#111)}
 .cbcols h2{font-size:3vw;margin:0 0 1.5vw}
-.nums{display:flex;flex-wrap:wrap;gap:1.2vw 3vw}
-.nums span{font-size:6vw;font-weight:800;min-width:9vw;text-align:center;display:flex;flex-direction:column;align-items:center;line-height:1.05}
-.nums span small{font-size:1.8vw;font-weight:600;opacity:.9;margin-top:.4vw;max-width:22vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nums.prep span small{font-size:1.4vw}
-.nums.prep span{font-size:4vw;color:#bbb}
-.nums span.new{animation:pulse 1s ease-in-out 6;color:#fff;background:#2f9e44;border-radius:1vw;padding:.4vw 1.4vw .6vw}
+.nums{display:flex;flex-direction:column;flex-wrap:wrap;align-content:flex-start;gap:1vw 4vw;max-height:calc(100vh - 16vw)}
+.nums span{font-size:5vw;font-weight:800;display:flex;align-items:baseline;gap:1.6vw;line-height:1.1;padding:.2vw 1.2vw;border-radius:1vw}
+.nums span small{font-size:2.6vw;font-weight:600;opacity:.92;max-width:30vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nums.prep span{font-size:3.4vw;color:#bbb}
+.nums.prep span small{font-size:2vw}
+.nums span.new{animation:pulse 1s ease-in-out 6;color:#fff;background:#2f9e44}
 .nums em{font-size:3vw;color:#666}
 @keyframes pulse{50%{transform:scale(1.15)}}
 .goal{display:grid;gap:4px;margin:0 0 12px}
