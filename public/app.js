@@ -477,8 +477,8 @@ async function vCallBoard(slug) {
     if (fresh.length) { last = fresh[0].n; try { beep(); setTimeout(beep, 400); } catch {} }
     known = ids;
     app.innerHTML = `<div class="cb"><div class="cbh"><b class="cbname">${b.store.logo ? `<img src="${esc(imgUrl(b.store.logo))}" alt="">` : ''}${esc(b.store.name)}</b><span>${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span></div>
-      <div class="cbcols"><section><h2>Preparando</h2><div class="nums prep">${prep.map(x => `<span>${x.n}</span>`).join('') || '<em>—</em>'}</div></section>
-      <section class="ok"><h2>Pronto! Pode retirar</h2><div class="nums">${ready.map(x => `<span class="${x.n === last ? 'new' : ''}">${x.n}</span>`).join('') || '<em>—</em>'}</div></section></div></div>`;
+      <div class="cbcols"><section><h2>Preparando</h2><div class="nums prep">${prep.map(x => `<span>${x.n}${x.name ? `<small>${esc(x.name)}</small>` : ''}</span>`).join('') || '<em>—</em>'}</div></section>
+      <section class="ok"><h2>Pronto! Pode retirar</h2><div class="nums">${ready.map(x => `<span class="${x.n === last ? 'new' : ''}">${x.n}${x.name ? `<small>${esc(x.name)}</small>` : ''}</span>`).join('') || '<em>—</em>'}</div></section></div></div>`;
   };
   await draw();
   const tick = setInterval(draw, 8000);
@@ -2045,6 +2045,10 @@ async function pConfig(S) {
     <form class="panel" id="fAuto" hidden><h3>Aceite automático</h3><p class="mut" style="margin:0">Pedidos novos entram direto em <b>Em preparo</b>, sem precisar tocar em Aceitar. Pedidos com Pix ou cartão online só entram quando o pagamento é confirmado; agendados continuam esperando a hora. Se a impressão estiver ligada no Preparo, a comanda sai assim que o pedido chega.</p>
       <label class="chk"><input type="checkbox" id="aaOn"> Aceitar pedidos automaticamente</label>
       <button class="pri">Salvar</button></form>
+    <form class="panel" id="fCall" hidden><h3>Painel de chamada</h3><p class="mut" style="margin:0">Tela para TV voltada aos clientes, com os pedidos de retirada sendo preparados e prontos. <a href="/chamada/${esc(st.slug)}" target="_blank" rel="noopener">Abrir o painel</a></p>
+      <label class="chk"><input type="checkbox" id="cnOn"> Mostrar o nome do cliente junto do número</label>
+      <p class="mut" style="margin:0">Aparece só o primeiro nome e a inicial do sobrenome (ex.: <b>Maria S.</b>). Telefone e endereço nunca aparecem.</p>
+      <button class="pri">Salvar</button></form>
     <form class="panel" id="fGoals"><h3>Metas de vendas</h3><p class="mut" style="margin:0">A meta do dia aparece para a equipe no Preparo, com uma barra de progresso. A do mês aparece no Resultado do mês, em Relatórios. Deixe em branco para não usar.</p>
       <div class="two" style="gap:10px"><label>Meta do dia (R$)<input id="gD" inputmode="decimal" placeholder="ex.: 1.500,00"></label><label>Meta do mês (R$)<input id="gM" inputmode="decimal" placeholder="ex.: 40.000,00"></label></div>
       <button class="pri">Salvar metas</button></form>
@@ -2160,6 +2164,7 @@ async function pConfig(S) {
     q(sb.from('tenants').select('daily_goal, monthly_goal').eq('id', S.id).single()).then(g => { if ($('#gD')) { $('#gD').value = g.daily_goal ? fromCents(g.daily_goal) : ''; $('#gM').value = g.monthly_goal ? fromCents(g.monthly_goal) : ''; } })
       .catch(() => { const f = $('#fGoals'); if (f) f.hidden = true; });
     q(sb.from('tenants').select('auto_accept').eq('id', S.id).single()).then(r => { if ($('#fAuto')) { $('#aaOn').checked = !!r.auto_accept; $('#fAuto').hidden = false; } }).catch(() => {});
+    q(sb.from('tenants').select('call_names').eq('id', S.id).single()).then(r => { if ($('#fCall')) { $('#cnOn').checked = !!r.call_names; $('#fCall').hidden = false; } }).catch(() => {});
   };
   const refreshBrand = async () => { await loadMe(); setColor(ME.tenant.color); brand(ME.tenant.name, ME.tenant.logo_path); };
   app.onclick = attempt(async e => {
@@ -2237,6 +2242,7 @@ async function pConfig(S) {
       await q(sb.from('tenants').update({ name: $('#sN').value.trim(), phone: $('#sPh').value.trim(), eta_text: $('#sEta').value.trim(), min_order, color: $('#sC').value, is_open: $('#sOpen').checked, allow_pickup: $('#sPick').checked }).eq('id', S.id));
       await refreshBrand();
     }
+    if (id === 'fCall') await q(sb.from('tenants').update({ call_names: $('#cnOn').checked }).eq('id', S.id));
     if (id === 'fAuto') await q(sb.from('tenants').update({ auto_accept: $('#aaOn').checked }).eq('id', S.id));
     if (id === 'fGoals') {
       const g = id => $(id).value.trim() ? toCents($(id).value) : 0, d = g('#gD'), m = g('#gM');
@@ -2353,7 +2359,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
   '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql',
-  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql'];
+  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };
