@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -617,7 +617,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 25);
+  assert.equal(st.length, 26);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1152,4 +1152,84 @@ test('painel de chamada com nome: só se a loja ligar, e só primeiro nome + ini
   assert.equal(sql(`select coalesce(_short_name('123 !!'), 'null')`), 'null');
   fails(`select _short_name('x')`, null, /permission denied/);
   sql(`update tenants set call_names = false where id = '${pizzaId}'`, U.pizza);
+});
+
+test('sugestões no carrinho: dono marca, equipe não, loja online enxerga', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  sql(`select set_product_suggest(${p.id}, true)`, U.pizza);
+  assert.equal(sql(`select suggest from products where id = ${p.id}`, null), 't');
+  fails(`select set_product_suggest(${p.id}, false)`, U.staff, /Sem permissão/);
+  fails(`select set_product_suggest(${p.id}, false)`, U.burger, /Sem permissão/);
+  sql(`select set_product_suggest(${p.id}, false)`, U.pizza);
+});
+
+test('conta de mesa dividida: soma tem que fechar; caixa e relatório contam cada forma', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', allow_tables = true, service_percent = 0, min_order = 0, auto_accept = false where id = '${pizzaId}'`);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const t = { customer: { name: 'Mesa Div', phone: '11944441111' }, fulfillment: 'table', table: '19', payment: 'Pagar no caixa', items: [{ productId: p.id, qty: 3 }] };
+  const a = order('forno-da-vila', t), b = order('forno-da-vila', { ...t, items: [{ productId: p.id, qty: 1 }] });
+  const due = a.total + b.total;
+  if (json(`cash_status('${pizzaId}')`, U.staff).open !== true) sql(`select cash_open('${pizzaId}', 0)`, U.staff);
+  const cash0 = json(`cash_status('${pizzaId}')`, U.staff).cashSales;
+  const rep0 = json(`cash_report('${pizzaId}')`, U.pizza).byPayment;
+  const pays = x => `'${JSON.stringify(x)}'::jsonb`;
+  fails(`select close_table_split('${pizzaId}', '19', ${pays([{ method: 'Pix', amount: due - 1 }, { method: 'Dinheiro', amount: 2 }])})`, U.staff, /diferente do total/);
+  fails(`select close_table_split('${pizzaId}', '19', ${pays([{ method: 'Cheque', amount: due }])})`, U.staff, /Forma de pagamento inválida/);
+  fails(`select close_table_split('${pizzaId}', '19', ${pays([{ method: 'Pix', amount: 1.5 }])})`, U.staff, /Valor de pagamento inválido/);
+  fails(`select close_table_split('${pizzaId}', '19', ${pays([{ method: 'Pix', amount: due }])})`, U.burger, /Sem permissão/);
+  const cashPart = 1000, pixPart = due - cashPart;
+  assert.equal(+sql(`select close_table_split('${pizzaId}', '19', ${pays([{ method: 'Pix', amount: pixPart - 300 }, { method: 'Dinheiro', amount: cashPart }, { method: 'Pix', amount: 300 }])})`, U.staff), 2);
+  assert.equal(sql(`select string_agg(distinct payment, ',') from orders where public_code in ('${a.code}', '${b.code}')`), 'Dividido');
+  assert.equal(sql(`select count(*) from orders where public_code in ('${a.code}', '${b.code}') and settled_at is not null and status = 'entregue'`), '2');
+  assert.deepEqual(json(`(select jsonb_agg(jsonb_build_object('m', method, 'a', amount) order by method) from table_payments where table_label = '19')`, U.staff), [{ m: 'Dinheiro', a: cashPart }, { m: 'Pix', a: pixPart }]);
+  assert.equal(json(`cash_status('${pizzaId}')`, U.staff).cashSales - cash0, cashPart);
+  const rep = json(`cash_report('${pizzaId}')`, U.pizza).byPayment, tot = (r, m) => r.find(x => x.payment === m)?.total || 0;
+  assert.equal(tot(rep, 'Pix') - tot(rep0, 'Pix'), pixPart);
+  assert.equal(tot(rep, 'Dinheiro') - tot(rep0, 'Dinheiro'), cashPart);
+  assert.ok(!rep.some(x => x.payment === 'Dividido'));
+  // uma forma só: fecha como antes
+  const c = order('forno-da-vila', { ...t, table: '18' });
+  sql(`select close_table_split('${pizzaId}', '18', ${pays([{ method: 'Pix', amount: c.total - 100 }, { method: 'Pix', amount: 100 }])})`, U.staff);
+  assert.equal(sql(`select payment from orders where public_code = '${c.code}'`), 'Pix');
+  fails(`select * from table_payments`, null, /permission denied/);
+  assert.equal(sql(`select count(*) from table_payments`, U.burger), '0');
+});
+
+test('avisos no celular: inscrição pelo código do pedido, fila ao mudar status, só o serviço lê', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const r = order('forno-da-vila', { customer: { name: 'Push', phone: '11944442222' }, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 1 }] });
+  const sub = { endpoint: 'https://fcm.googleapis.com/fcm/send/abc123', keys: { p256dh: 'B'.repeat(87), auth: 'a'.repeat(22) } };
+  const S = x => `'${JSON.stringify(x)}'::jsonb`;
+  assert.equal(sql(`select push_subscribe('${r.code}', ${S(sub)})`, null), 't');
+  assert.equal(sql(`select push_subscribe('${r.code}', ${S(sub)})`, null), 't');   // repetida não duplica
+  fails(`select push_subscribe('${r.code}', ${S({ ...sub, endpoint: 'http://inseguro' })})`, null, /Inscrição inválida/);
+  fails(`select push_subscribe('${r.code}', ${S({ ...sub, keys: { p256dh: 'x', auth: 'y' } })})`, null, /Inscrição inválida/);
+  fails(`select push_subscribe('NAOEXISTE', ${S(sub)})`, null, /não encontrado/);
+  fails(`select * from push_subscriptions`, null, /permission denied/);
+  fails(`select * from push_queue`, U.pizza, /permission denied/);
+  const id = sql(`select id from orders where public_code = '${r.code}'`);
+  sql(`update orders set status = 'preparo' where id = ${id}`);
+  sql(`update orders set status = 'pronto' where id = ${id}`);
+  const qs = json(`(select jsonb_agg(jsonb_build_object('id', id, 'body', body, 'url', url) order by id) from push_queue where order_id = ${id})`);
+  assert.equal(qs.length, 2);
+  assert.match(qs[0].body, /aceito/); assert.match(qs[1].body, /pronto! Pode retirar/);
+  assert.equal(qs[1].url, `/pedido/${r.code}`);
+  fails(`select push_take(${qs[1].id})`, null, /permission denied/);
+  fails(`select push_take(${qs[1].id})`, U.pizza, /permission denied/);
+  const t = json(`push_take(${qs[1].id})`, 'service');
+  assert.equal(t.title, 'Forno da Vila'); assert.equal(t.subs.length, 1); assert.equal(t.subs[0].endpoint, sub.endpoint);
+  assert.equal(sql(`select coalesce(push_take(${qs[1].id})::text, 'null')`, 'service'), 'null');   // não envia duas vezes
+  sql(`select push_drop(${t.subs[0].id})`, 'service');
+  sql(`update orders set status = 'entregue' where id = ${id}`);
+  assert.equal(sql(`select count(*) from push_queue where order_id = ${id}`), '2');   // sem inscrição, sem aviso
+  assert.equal(sql(`select push_subscribe('${r.code}', ${S(sub)})`, null), 'f');       // pedido encerrado não aceita
+  // configuração: só a administração da plataforma
+  const key = 'B' + 'x'.repeat(86), url = 'https://proj.supabase.co/functions/v1/push';
+  fails(`select push_setup('${key}', '${'s'.repeat(40)}', '${url}')`, U.pizza, /Sem permissão/);
+  fails(`select push_setup('curta', '${'s'.repeat(40)}', '${url}')`, U.admin, /Chave pública inválida/);
+  const st = json(`push_setup('${key}', '${'s'.repeat(40)}', '${url}')`, U.admin);
+  assert.equal(st.configured, true); assert.equal(st.url, url);
+  assert.equal(sql(`select push_public_key()`, null), key);
+  fails(`select * from platform_settings`, U.admin, /permission denied/);
+  sql(`delete from platform_settings`);
 });

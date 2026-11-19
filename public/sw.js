@@ -1,7 +1,7 @@
 // Service worker do Balcão: deixa o app instalável e abre a última versão das telas mesmo com internet instável.
 // Estratégia "rede primeiro": sempre busca a versão nova; se a rede falhar, usa a cópia guardada.
 // Dados (Supabase, pagamentos) nunca são guardados aqui.
-const CACHE = 'balcao-v1';
+const CACHE = 'balcao-v2';
 const SHELL = ['/', '/index.html', '/app.js', '/legal.js', '/config.js', '/style.css', '/manifest.webmanifest', '/icons/icon-192.png'];
 
 self.addEventListener('install', e => {
@@ -24,4 +24,23 @@ self.addEventListener('fetch', e => {
       return res;
     }).catch(() => caches.match(isPage ? '/index.html' : req).then(r => r || caches.match('/index.html')))
   );
+});
+
+// Avisos do pedido (Web Push): a Edge Function "push" manda { title, body, url }
+self.addEventListener('push', e => {
+  let d = {}; try { d = e.data ? e.data.json() : {}; } catch { d = { body: e.data && e.data.text() }; }
+  e.waitUntil(self.registration.showNotification(d.title || 'Seu pedido', {
+    body: d.body || 'Seu pedido foi atualizado.', icon: '/icons/icon-192.png', badge: '/icons/icon-192.png',
+    tag: d.url || 'pedido', renotify: true, data: { url: d.url || '/' }
+  }));
+});
+
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  const url = new URL((e.notification.data && e.notification.data.url) || '/', self.location.origin).href;
+  e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+    const same = list.find(c => c.url === url);
+    if (same) return same.focus();
+    return self.clients.openWindow(url);
+  }));
 });

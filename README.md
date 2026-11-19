@@ -36,6 +36,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    23. `20261205000000_aceite_reajuste.sql` (aceite automático de pedidos, reajuste de preços em lote e esgotar categoria)
    24. `20261206000000_logotipo.sql` (logotipo da loja no cabeçalho, painel de chamada e cardápio impresso)
    25. `20261207000000_chamada_nomes.sql` (nome do cliente no painel de chamada, opcional: "Maria S.")
+   26. `20261208000000_sugestoes_garcom_avisos.sql` (sugestões escolhidas no carrinho, conta de mesa dividida, avisos no celular)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -138,6 +139,15 @@ Toda loja nova ganha **14 dias grátis**. Depois disso, a loja paga a mensalidad
 - **Para você, em `/plataforma`:** aparecem quantas lojas estão pagando e quantas estão em teste, a receita mensal real e a potencial, e o status de cada loja. Os botões **+30 dias**, **+7 dias teste** e **Grátis** servem para quem paga por fora (Pix, boleto) ou para parceiros.
 - O cliente da loja bloqueada vê "Temporariamente indisponível", e o banco recusa pedidos novos.
 
+### 8a. Avisos no celular do cliente (opcional)
+
+O cliente toca em **Me avise no celular** na página do pedido e recebe uma notificação quando o pedido é aceito, fica pronto, sai para entrega, é entregue ou cancelado. Funciona no Android e no computador; no iPhone, só com a loja adicionada à Tela de Início (iOS 16.4+). Não tem custo.
+
+1. Em **/plataforma → Avisos no celular do cliente**, clique em **Gerar chaves e ativar**. As chaves são geradas no seu navegador e o banco já fica configurado.
+2. Copie os três valores que aparecem para **Edge Functions → Secrets**: `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` e `PUSH_SECRET`. A chave privada não fica salva em lugar nenhum: se perder, gere de novo.
+3. Publique a Edge Function `push` (conteúdo de `supabase/functions/push/index.ts`) com **Enforce JWT verification desligado**. Pela CLI: `supabase functions deploy push --no-verify-jwt`.
+4. Em **Database → Extensions**, ative **pg_net** (é ela que deixa o banco chamar a função quando o status muda).
+
 ### 8b. Domínio próprio de uma loja (opcional)
 
 1. A loja informa o domínio em **Configurações → Domínio próprio** (por exemplo `pedidos.minhapizzaria.com.br`) e cria no DNS um **CNAME** apontando para `cname.vercel-dns.com`.
@@ -227,7 +237,7 @@ O que já está pronto:
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 99 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 105 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;
@@ -259,6 +269,7 @@ PGHOST=localhost PGPORT=5432 PGUSER=postgres npm test
 supabase/migrations/   esquema, RLS, funções e modelos por segmento (rodar em ordem)
 supabase/functions/pix      Edge Function do Pix dos pedidos (conta de cada loja)
 supabase/functions/billing  Edge Function da assinatura das lojas (sua conta)
+supabase/functions/push     Edge Function dos avisos no celular (Web Push com VAPID)
 public/                site estático: index.html, style.css, app.js, config.js
 scripts/serve.js       servidor local de desenvolvimento
 test/                  testes do banco e simulação do auth do Supabase

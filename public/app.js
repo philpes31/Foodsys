@@ -381,6 +381,7 @@ function header(nav = '', who = true) {
   $('#nav').innerHTML = nav;
   const multi = ME?.memberships.length > 1 ? `<select id="pickT" aria-label="Empresa" style="width:auto;background:#ffffff26;color:#fff;border-color:#ffffff55">${ME.memberships.map(m => `<option value="${m.tenant.id}" ${m.tenant.id === ME.tenant?.id ? 'selected' : ''}>${esc(m.tenant.name)}</option>`).join('')}</select>` : '';
   $('#who').innerHTML = !who ? '' : ME ? `${multi}<span>${esc(ME.user.email)}</span><button class="sm" id="logout">Sair</button>` : `<a class="btn sm" style="background:#ffffff26;color:#fff" href="/entrar" data-link>Entrar</a>`;
+  $('#nav a.on')?.scrollIntoView({ block: 'nearest', inline: 'center' });
   $('#logout')?.addEventListener('click', async () => { await sb.auth.signOut(); ME = null; go('/entrar'); });
   $('#pickT')?.addEventListener('change', e => { local.set('tenant', e.target.value); render(); });
 }
@@ -662,8 +663,13 @@ async function vShop(slug) {
     return { sub, fee, disc, promo, svc, promoNames: pr.names, total: Math.max(0, sub + fee - disc - promo) + svc, pickup, zone: z, freeShip, feeKnown: pickup || freeShip || !DIST || !!geo?.quote?.inArea };
   };
   // Sugestões no carrinho: o item mais barato de cada categoria que ainda não está no pedido (bebida, sobremesa, porção…).
+  // O dono pode escolher os produtos sugeridos (Cardápio → Sugerir no carrinho); sem escolha, vale a regra automática.
+  let SUGG = new Set();
+  q(sb.from('products').select('id').eq('tenant_id', S.id).eq('suggest', true)).then(r => { SUGG = new Set(r.map(x => x.id)); if (SUGG.size && cart.length) paint(); }).catch(() => {});
   const suggest = () => {
     if (!cart.length || !CAN_ORDER) return [];
+    const ids = new Set(cart.map(c => c.productId));
+    if (SUGG.size) return products.filter(p => SUGG.has(p.id) && !ids.has(p.id) && p.stock !== 0 && (catOpen(S, p.category, new Date()) || SLOTS.length)).slice(0, 4);
     const inCart = new Set(cart.map(c => products.find(p => p.id === c.productId)?.category));
     return cats.filter(c => !inCart.has(c)).map(c => products.filter(p => p.category === c && p.stock !== 0).sort((x, y) => x.price - y.price)[0])
       .filter(Boolean).sort((x, y) => x.price - y.price).slice(0, 3);
@@ -691,7 +697,7 @@ async function vShop(slug) {
     </section>
     <aside class="cart" aria-label="Carrinho"><h3>Seu pedido</h3>
       ${cart.length ? cart.map((x, i) => `<div class="ci"><div><b>${x.qty}× ${esc(x.name)}</b>${x.optText ? `<br><span class="mut">${esc(x.optText)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}<br><button class="ghost sm" data-dec="${i}" aria-label="Diminuir">−</button> <button class="ghost sm" data-inc="${i}" aria-label="Aumentar">+</button></div><span class="price">${brl(x.qty * x.unit)}</span></div>`).join('') : `<p class="empty">Carrinho vazio.</p>${againItems().length ? `<button class="ghost" id="again" style="width:100%">↻ Pedir de novo<br><span class="mut" style="font-weight:400">${esc(againItems().map(x => `${x.qty}× ${x.name}`).join(', ').slice(0, 90))}</span></button>` : ''}`}
-      ${suggest().length ? `<div class="sugg"><span class="mut">Que tal adicionar?</span>${suggest().map(p => `<button class="ghost sm" data-add="${p.id}">+ ${esc(p.name)} <span class="mut">${brl(p.price)}</span></button>`).join('')}</div>` : ''}
+      ${suggest().length ? `<div class="sugg"><span class="mut">Que tal adicionar?</span>${suggest().map(p => `<button class="ghost sm suggb" data-add="${p.id}"><span class="thumb">${picture(p, S.color)}</span><span>+ ${esc(p.name)} <span class="mut">${brl(p.price)}</span></span></button>`).join('')}</div>` : ''}
       ${TABLE ? `<p style="margin:0">Pedido para a <b>Mesa ${esc(TABLE)}</b></p>` : `<label>Como receber<select id="cMode"><option value="delivery" ${deliveryPaused(S) && !SLOTS.length ? 'disabled' : ''}>Entrega${deliveryPaused(S) ? ` (pausada até ${hhmm(S.delivery_paused_until)}${SLOTS.length ? ', só agendada' : ''})` : ''}</option>${S.allow_pickup ? `<option value="pickup" ${deliveryPaused(S) ? 'selected' : ''}>Retirar na loja</option>` : ''}</select></label>`}
       <label id="zWrap" ${DIST || TABLE ? 'hidden' : ''}>Bairro<select id="cZone">${zones.map(z => `<option value="${z.id}">${esc(z.name)} · ${z.fee ? brl(z.fee) : 'grátis'}</option>`).join('')}</select></label>
       <label>Cupom<span class="row" style="flex-wrap:nowrap"><input id="cCup" placeholder="Ex.: PRIMEIRA10" value="${esc(coupon?.code || '')}"><button class="ghost" id="cupBtn">Aplicar</button></span></label>
@@ -822,8 +828,27 @@ async function vShop(slug) {
 }
 
 /* ---------- acompanhamento do pedido ---------- */
+// Avisos no celular (Web Push): suporte do navegador e chave pública da plataforma
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) && !window.MSStream;
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+async function pushSubscribe(code, key) {
+  if (Notification.permission === 'denied') throw new Error('Os avisos estão bloqueados no navegador. Libere nas configurações do site.');
+  if (await Notification.requestPermission() !== 'granted') throw new Error('Sem permissão para avisos');
+  const reg = await navigator.serviceWorker.ready;
+  const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: Uint8Array.from(atob(key.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - key.length % 4) % 4)), c => c.charCodeAt(0)) });
+  const ok = await rpc('push_subscribe', { p_code: code, p_sub: sub.toJSON() });
+  if (!ok) throw new Error('Este pedido já foi encerrado');
+}
 async function vTrack(code) {
-  let lastSig = '', rating = 0;
+  let lastSig = '', rating = 0, pushKey = null;
+  if (pushSupported()) rpc('push_public_key').then(k => { pushKey = k || null; if (pushKey) draw(true).catch(() => {}); }).catch(() => {});
+  const pushBox = o => {
+    if (!pushKey || ['entregue', 'cancelado', 'pagamento'].includes(o.status)) return '';
+    if (local.get(`push:${code}`, false)) return '<p class="mut pushbox">🔔 Avisos ligados neste aparelho: você recebe uma notificação quando o pedido mudar.</p>';
+    if (isIOS() && !isStandalone()) return '<p class="mut pushbox">🔔 No iPhone, para receber avisos: toque em Compartilhar → <b>Adicionar à Tela de Início</b> e abra o pedido por lá.</p>';
+    return '<div class="pushbox"><button class="ghost" id="pushOn">🔔 Me avise no celular quando o pedido mudar</button></div>';
+  };
   const draw = async (force) => {
     const r = await rpc('track_order', { p_code: code });
     if (!r) throw new Error('Pedido não encontrado');
@@ -843,6 +868,7 @@ async function vTrack(code) {
       `<div class="steps">${flow.map((s, i) => `<span class="${i <= idx ? 'on' : ''}">${s === 'pronto' && o.fulfillment === 'pickup' ? 'Pronto p/ retirar' : s === 'entregue' && o.fulfillment === 'table' ? 'Servido' : SLABEL[s]}${at[s] ? `<br><small>${hhmm(at[s])}</small>` : ''}</span>`).join('')}</div>`}
       ${o.etaAt && !['entregue', 'cancelado', 'pagamento'].includes(o.status) && !(o.fulfillment !== 'delivery' && o.status === 'pronto') ? `<p class="eta">${o.fulfillment === 'delivery' ? 'Previsão de entrega' : o.fulfillment === 'table' ? 'Previsão para servir' : 'Previsão para ficar pronto'}: <b>por volta das ${hhmm(new Date(Math.max(new Date(o.etaAt), Date.now() + 5 * 60000)).toISOString())}</b> <span class="mut">· tempo médio da loja</span></p>` : ''}
       ${o.courier ? `<p><b>${esc(o.courier)}</b> está a caminho de ${esc(o.address)}, ${esc(o.zone)}.</p>` : ''}
+      ${pushBox(o)}
       <table><tbody>${o.items.map(x => `<tr><td>${x.qty}× ${esc(x.product_name)}${x.options_text ? `<br><span class="mut">${esc(x.options_text)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}</td><td class="n price">${brl(x.qty * x.unit_price)}</td></tr>`).join('')}
       <tr><td>${o.fulfillment === 'pickup' ? 'Retirada na loja' : o.fulfillment === 'table' ? esc(o.zone) : `Entrega (${esc(o.zone)})`}</td><td class="n price">${brl(o.fee)}</td></tr>
       ${o.serviceFee ? `<tr><td>Taxa de serviço</td><td class="n price">${brl(o.serviceFee)}</td></tr>` : ''}
@@ -893,6 +919,7 @@ async function vTrack(code) {
   app.onclick = attempt(async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.star) { rating = +b.dataset.star; document.querySelectorAll('[data-star]').forEach(x => { x.textContent = +x.dataset.star <= rating ? '★' : '☆'; x.classList.toggle('on', +x.dataset.star <= rating); }); $('#rvSend').disabled = false; return; }
+    if (b.id === 'pushOn') { b.disabled = true; try { await pushSubscribe(code, pushKey); local.set(`push:${code}`, true); toast('Pronto! Você vai receber os avisos deste pedido'); await draw(true); } finally { b.disabled = false; } return; }
     if (b.id === 'rvSend') { b.disabled = true; try { await rpc('review_order', { p_code: code, p_rating: rating, p_comment: $('#rvText').value }); toast('Obrigado pela avaliação!'); await draw(true); } finally { b.disabled = false; } return; }
     if (b.id === 'pixCopy') { const ta = $('#pixCode'); try { await navigator.clipboard.writeText(ta.value); } catch { ta.select(); document.execCommand('copy'); } toast('Código copiado. Cole no app do banco.'); }
     if (b.id === 'cardPay') { b.disabled = true; try { const c = await pixCall({ action: 'card', code, origin: location.origin }); if (c.url) location.href = c.url; else await draw(true); } finally { b.disabled = false; } return; }
@@ -915,12 +942,12 @@ async function vTrack(code) {
 async function vPanel(tab) {
   const S = ME.tenant, owner = ME.role === 'owner';
   setColor(S.color); brand(S.name, S.logo_path);
-  const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ...(S.allow_tables ? [['mesas', 'Mesas']] : []), ['cardapio', 'Cardápio'], ['estoque', 'Estoque'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['unidades', 'Unidades'], ['config', 'Configurações']] : [])];
+  const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ...(S.allow_tables ? [['garcom', 'Garçom'], ['mesas', 'Mesas']] : []), ['cardapio', 'Cardápio'], ['estoque', 'Estoque'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['unidades', 'Unidades'], ['config', 'Configurações']] : [])];
   if (tab === 'kds') return pKitchenScreen(S);
   if (!tabs.some(t => t[0] === tab) && tab !== 'novo') tab = 'pedidos';
   $('#banner').innerHTML = billingBanner(S, owner);
   header(tabs.map(([k, n]) => `<a href="/painel/${k}" data-link class="${k === tab ? 'on' : ''}">${esc(n)}</a>`).join('') + `<a href="/loja/${S.slug}" target="_blank" rel="noopener">Ver loja ↗</a>` + (ME.isAdmin ? '<a href="/plataforma" data-link>Plataforma</a>' : ''));
-  await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, caixa: pCash, novo: pNewOrder, clientes: pCustomers, relatorios: pReports, unidades: pUnits, config: pConfig, mesas: pTables, estoque: pStock })[tab](S, owner);
+  await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, caixa: pCash, novo: pNewOrder, clientes: pCustomers, relatorios: pReports, unidades: pUnits, config: pConfig, mesas: pTables, garcom: pWaiter, estoque: pStock })[tab](S, owner);
 }
 
 function billingBanner(t, owner) {
@@ -1199,7 +1226,12 @@ function menuRowsFromCsv(text) {
 }
 async function pMenu(S, owner) {
   let prods = []; local.set(`seen-menu:${S.id}`, true);
-  const load = async () => { prods = sortMenu(await q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id))); draw(); };
+  let sugg = null;   // ids marcados como sugestão no carrinho (null = migração ainda não rodou)
+  const load = async () => {
+    [prods] = await Promise.all([q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id)).then(sortMenu),
+      owner ? q(sb.from('products').select('id').eq('tenant_id', S.id).eq('suggest', true)).then(r => { sugg = new Set(r.map(x => x.id)); }).catch(() => { sugg = null; }) : null]);
+    draw();
+  };
   const draw = () => {
     const cats = [...new Set(prods.map(p => p.category))];
     app.innerHTML = `<div class="row between"><div><h2>Cardápio</h2><p class="lead">${owner ? 'Crie produtos com grupos de opções: tamanhos, sabores, adicionais, combos.' : 'Marque itens esgotados ou ajuste o estoque.'} Estoque em branco = sem controle; com número, baixa a cada pedido e volta se o pedido for cancelado.</p></div>${owner ? '<span class="row"><button class="ghost" id="menuPrint">Imprimir cardápio</button><button class="ghost" id="menuCsv">Baixar planilha</button><button class="ghost" id="menuRep">Reajustar preços</button><label class="btn ghost" style="cursor:pointer">Importar planilha<input type="file" id="menuImp" accept=".csv,text/csv" hidden></label><button class="pri" id="newP">Novo produto</button></span>' : ''}</div>
@@ -1208,7 +1240,7 @@ async function pMenu(S, owner) {
         <td data-l="Opções"><span class="mut">${p.groups.map(g => `${esc(g.name)} (${g.options.length})`).join(', ') || '—'}</span></td><td data-l="Preço" class="n price">${brl(p.price)}</td>
         <td data-l="Estoque"><input class="stockin" type="number" min="0" inputmode="numeric" data-stock="${p.id}" value="${p.stock ?? ''}" placeholder="sem controle" aria-label="Estoque de ${esc(p.name)}">${p.stock === 0 ? ' <span class="badge b-r">zerado</span>' : ''}</td>
         <td data-l="Disponível"><button class="sm ${p.available ? 'ok' : 'ghost'}" data-av="${p.id}">${p.available ? 'Sim' : 'Esgotado'}</button></td>
-        <td data-l="">${owner ? `<button class="ghost sm" data-ed="${p.id}">Editar</button>` : ''}</td></tr>`).join('')}</tbody></table></div></div>`).join('') || '<p class="empty">Nenhum produto ainda.</p>'}`;
+        <td data-l="">${owner ? `<span class="row" style="flex-wrap:nowrap;gap:6px">${sugg ? `<button class="sm ${sugg.has(p.id) ? 'ok' : 'ghost'}" data-sug="${p.id}" title="Aparece em &quot;Que tal adicionar?&quot; no carrinho da loja">${sugg.has(p.id) ? '★ Sugerido' : '☆ Sugerir'}</button>` : ''}<button class="ghost sm" data-ed="${p.id}">Editar</button></span>` : ''}</td></tr>`).join('')}</tbody></table></div></div>`).join('') || '<p class="empty">Nenhum produto ainda.</p>'}`;
   };
   const exportMenu = () => {
     const rows = [MENU_HEAD, ...prods.map(p => [p.category, p.name, p.description || '', fromCents(p.price), p.available ? 'sim' : 'não'])];
@@ -1343,6 +1375,11 @@ async function pMenu(S, owner) {
     if (b.id === 'menuCsv') return exportMenu();
     if (b.id === 'menuPrint') { toast('Preparando o cardápio…'); return printMenu(S, prods); }
     if (b.id === 'menuRep') return reprice();
+    if (b.dataset.sug) {
+      const id = +b.dataset.sug, on = !sugg.has(id);
+      await rpc('set_product_suggest', { p_product: id, p_on: on }); on ? sugg.add(id) : sugg.delete(id);
+      toast(on ? 'Vai aparecer em "Que tal adicionar?" no carrinho' : 'Removido das sugestões'); return draw();
+    }
     if (b.dataset.catav) {
       const c = b.dataset.catav, to = b.dataset.to === '1';
       if (!to && !sure(b)) return;
@@ -1416,21 +1453,22 @@ async function pNewOrder(S) {
     q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id).eq('available', true)),
     q(sb.from('zones').select('id, name, fee').eq('tenant_id', S.id).order('name'))]);
   const products = sortMenu(rawP), DIST = S.delivery_mode === 'distance';
-  let cart = [], st = { channel: 'balcao', ful: 'pickup', table: '1', name: '', phone: '', zone: zones[0]?.id || null, cep: '', rua: '', num: '', comp: '', pay: 'Pagar no caixa', change: '', term: '' }, geo = null, cepInfo = null;
+  const qs = new URLSearchParams(location.search), fromWaiter = qs.get('volta') === 'garcom', preTable = S.allow_tables ? qs.get('mesa') : null;
+  let cart = [], st = { channel: preTable ? 'mesa' : 'balcao', ful: preTable ? 'table' : 'pickup', table: preTable || '1', name: '', phone: '', zone: zones[0]?.id || null, cep: '', rua: '', num: '', comp: '', pay: 'Pagar no caixa', change: '', term: '' }, geo = null, cepInfo = null;
   const sub = () => cart.reduce((t, c) => t + c.qty * c.unit, 0);
   const fee = () => st.ful !== 'delivery' ? 0 : DIST ? (geo?.quote?.fee || 0) : (zones.find(z => z.id === +st.zone)?.fee || 0);
   const read = () => { for (const k of ['name', 'phone', 'table', 'zone', 'cep', 'rua', 'num', 'comp', 'pay', 'change', 'term']) { const el = $('#n_' + k); if (el) st[k] = el.value; } };
   const draw = () => {
     const list = products.filter(p => !st.term || (p.name + ' ' + p.category).toLowerCase().includes(st.term.toLowerCase()));
     const cats = [...new Set(list.map(p => p.category))];
-    app.innerHTML = `<div class="row between"><div><h2>Novo pedido</h2><p class="lead">Lance pedidos do balcão, do telefone ou da mesa. Eles entram direto em preparo.</p></div><a class="btn ghost" href="/painel" data-link>Voltar</a></div>
+    app.innerHTML = `<div class="row between"><div><h2>Novo pedido</h2><p class="lead">Lance pedidos do balcão, do telefone ou da mesa. Eles entram direto em preparo.</p></div><a class="btn ghost" href="${fromWaiter ? '/painel/garcom' : '/painel'}" data-link>Voltar</a></div>
     <div class="shop"><section class="panel">
       <input id="n_term" type="search" placeholder="Buscar produto" value="${esc(st.term)}">
       ${cats.map(c => `<h3>${esc(c)}</h3><div class="plist">${list.filter(p => p.category === c).map(p => `<button class="pbtn" data-p="${p.id}" ${p.stock === 0 ? 'disabled' : ''}><span>${esc(p.name)}${p.stock != null ? `<br><small class="mut">${p.stock === 0 ? 'esgotado' : `estoque: ${p.stock}`}</small>` : ''}</span><span class="price">${brl(p.price)}${p.groups.length ? ' +' : ''}</span></button>`).join('')}</div>`).join('') || '<p class="empty">Nenhum produto.</p>'}
     </section>
     <aside class="cart"><h3>Pedido</h3>
       <div class="segs" style="grid-template-columns:repeat(3,minmax(0,1fr))">${['balcao', 'telefone', ...(S.allow_tables ? ['mesa'] : [])].map(c => `<button type="button" data-ch="${c}" class="${st.channel === c ? 'on' : ''}" style="min-height:44px">${CHANNEL[c]}</button>`).join('')}</div>
-      ${st.channel === 'mesa' ? `<label>Mesa<select id="n_table">${Array.from({ length: S.tables_count || 10 }, (_, i) => `<option ${String(i + 1) === st.table ? 'selected' : ''}>${i + 1}</option>`).join('')}</select></label>` : ''}
+      ${st.channel === 'mesa' ? `<label>Mesa<select id="n_table">${[...new Set([...Array.from({ length: S.tables_count || 10 }, (_, i) => String(i + 1)), st.table])].map(t => `<option ${t === st.table ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>` : ''}
       ${st.channel === 'telefone' ? `<label>Como receber<select id="n_ful"><option value="delivery" ${st.ful === 'delivery' ? 'selected' : ''}>Entrega</option><option value="pickup" ${st.ful === 'pickup' ? 'selected' : ''}>Retirada</option></select></label>` : ''}
       <label>Nome do cliente${st.channel === 'balcao' ? ' (opcional)' : ''}<input id="n_name" value="${esc(st.name)}"></label>
       <label>Telefone${st.channel === 'telefone' ? '' : ' (opcional)'}<input id="n_phone" inputmode="tel" value="${esc(st.phone)}"></label>
@@ -1473,6 +1511,7 @@ async function pNewOrder(S) {
           items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: c.notes })) } });
         toast(`Pedido #${r.number} lançado · ${brl(r.total)}`);
         if (local.get('printMode', local.get('autoPrint', false) ? 'accept' : 'off') !== 'off') { const o = (await q(sb.from('orders').select(ORDER_COLS).eq('id', r.id)))[0]; if (o) printOrder(S, o); }
+        if (fromWaiter) return go('/painel/garcom');
         cart = []; st = { ...st, name: '', phone: '', rua: '', num: '', comp: '', cep: '', change: '' }; geo = null; draw();
       } finally { const x = $('#n_go'); if (x) x.disabled = !cart.length; }
     }
@@ -1764,6 +1803,43 @@ async function pStock(S, owner) {
 }
 
 /* ---------- mesas: conta de cada mesa ---------- */
+// Fechar a conta da mesa: uma forma de pagamento, ou dividida entre pessoas (cada parte com sua forma)
+function closeTableDialog(S, m, after) {
+  const due = m.total - m.paidOnline, PAY = [['Dinheiro', 'Dinheiro'], ['Pix', 'Pix'], ['Cartão na entrega', 'Cartão']];
+  let parts = null;   // null = uma forma só; senão [{ amount, method }]
+  const split = n => { n = Math.max(2, Math.min(30, n)); const base = Math.floor(due / n); return Array.from({ length: n }, (_, i) => ({ amount: base + (i < due - base * n ? 1 : 0), method: parts?.[i]?.method || 'Pix' })); };
+  const draw = () => {
+    const sum = parts ? parts.reduce((a, p) => a + (Number.isInteger(p.amount) ? p.amount : 0), 0) : 0, left = due - sum;
+    $('#dlgBody').innerHTML = `<h2>Fechar conta · Mesa ${esc(m.table)}</h2>
+      <div class="tot"><span>A pagar</span><span class="price">${brl(due)}</span></div>
+      ${due > 0 ? `<div class="segs" style="grid-template-columns:1fr 1fr"><button type="button" data-mode="one" class="${parts ? '' : 'on'}">Uma forma de pagamento</button><button type="button" data-mode="split" class="${parts ? 'on' : ''}">Dividir a conta</button></div>` : ''}
+      ${!parts ? `<p class="mut" style="margin:0">Como foi pago?</p>
+        <div class="row">${PAY.map(([v, l]) => `<button class="pri" data-pay="${v}">${l}</button>`).join('')}<button class="ghost" data-close>Cancelar</button></div>`
+      : `<label>Dividir por <span class="row" style="flex-wrap:nowrap;gap:6px"><button type="button" class="ghost sm" data-n="-1">−</button><b style="min-width:2ch;text-align:center">${parts.length}</b><button type="button" class="ghost sm" data-n="1">+</button> pessoas</span></label>
+        <div class="splits">${parts.map((p, i) => `<div class="row splitrow"><span class="mut" style="min-width:5.5em">Pessoa ${i + 1}</span>
+          <input data-amt="${i}" inputmode="decimal" value="${Number.isInteger(p.amount) ? fromCents(p.amount) : ''}" aria-label="Valor da pessoa ${i + 1}">
+          <select data-met="${i}" aria-label="Forma de pagamento da pessoa ${i + 1}">${PAY.map(([v, l]) => `<option value="${v}" ${p.method === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`).join('')}</div>
+        <p class="${left ? 'stuck' : 'mut'}" style="display:block;margin:0">${left === 0 ? '✓ A soma fecha com a conta.' : left > 0 ? `Faltam ${brl(left)} para fechar a conta.` : `Passou ${brl(-left)} do total da conta.`}</p>
+        <div class="row"><button class="pri" id="splitGo" ${left === 0 ? '' : 'disabled'}>Fechar conta dividida</button><button type="button" class="ghost" data-split-eq>Dividir igual</button><button class="ghost" data-close>Cancelar</button></div>`}
+      ${m.pending ? `<p class="mut">⚠ ${m.pending} pedido(s) ainda na cozinha. Ao fechar, eles saem da fila como servidos.</p>` : ''}`;
+  };
+  dialog(''); draw();
+  const done = n => { closeDlg(); toast(`Conta da mesa ${m.table} fechada`); return after(); };
+  $('#dlgBody').onclick = attempt(async ev => {
+    const b = ev.target.closest('button'); if (!b) return;
+    if (b.dataset.mode) { parts = b.dataset.mode === 'split' ? split(2) : null; return draw(); }
+    if (b.dataset.n) { parts = split(parts.length + +b.dataset.n); return draw(); }
+    if (b.hasAttribute('data-split-eq')) { parts = split(parts.length); return draw(); }
+    if (b.dataset.pay) { b.disabled = true; try { await rpc('close_table', { p_tenant: S.id, p_table: m.table, p_payment: b.dataset.pay }); await done(); } finally { b.disabled = false; } return; }
+    if (b.id === 'splitGo') { b.disabled = true; try { await rpc('close_table_split', { p_tenant: S.id, p_table: m.table, p_payments: parts.map(p => ({ method: p.method, amount: p.amount })) }); await done(); } finally { b.disabled = false; } }
+  });
+  $('#dlgBody').onchange = ev => {
+    const t = ev.target;
+    if (t.dataset.amt != null) { const v = toCents(t.value || '0'); parts[+t.dataset.amt].amount = Number.isInteger(v) && v >= 0 ? v : NaN; draw(); }
+    if (t.dataset.met != null) parts[+t.dataset.met].method = t.value;
+  };
+}
+
 function printBill(S, m) {
   // junta itens iguais (mesmo produto, opções e preço) de todos os pedidos da mesa
   const agg = []; for (const i of m.items) { const k = agg.find(x => x.name === i.name && x.options === i.options && x.unit === i.unit); k ? k.qty += i.qty : agg.push({ ...i }); }
@@ -1793,22 +1869,43 @@ async function pTables(S) {
     const b = e.target.closest('button'); if (!b) return;
     const m = tables.find(x => x.table === (b.dataset.bill || b.dataset.closeT)); if (!m) return;
     if (b.dataset.bill) return printBill(S, m);
-    const due = m.total - m.paidOnline;
-    dialog(`<h2>Fechar conta · Mesa ${esc(m.table)}</h2>
-      <div class="tot"><span>A pagar</span><span class="price">${brl(due)}</span></div>
-      <label>Dividir por<input id="tSplit" type="number" min="1" max="30" value="1" style="width:100px"> pessoa(s) <b id="tEach"></b></label>
-      <p class="mut" style="margin:0">Como foi pago?</p>
-      <div class="row">${[['Dinheiro', 'Dinheiro'], ['Pix', 'Pix'], ['Cartão na entrega', 'Cartão']].map(([v, l]) => `<button class="pri" data-pay="${v}">${l}</button>`).join('')}<button class="ghost" data-close>Cancelar</button></div>
-      ${m.pending ? `<p class="mut">⚠ ${m.pending} pedido(s) ainda na cozinha. Ao fechar, eles saem da fila como servidos.</p>` : ''}`);
-    const each = () => { const n = Math.max(1, Math.min(30, +$('#tSplit').value || 1)); $('#tEach').textContent = n > 1 ? `= ${brl(Math.ceil(due / n))} cada` : ''; };
-    $('#dlgBody').oninput = each; each();
-    $('#dlgBody').onclick = attempt(async ev => {
-      const pb = ev.target.closest('button[data-pay]'); if (!pb) return; pb.disabled = true;
-      try { await rpc('close_table', { p_tenant: S.id, p_table: m.table, p_payment: pb.dataset.pay }); closeDlg(); toast(`Conta da mesa ${m.table} fechada`); await load(); } finally { pb.disabled = false; }
-    });
+    closeTableDialog(S, m, load);
   });
   const stop = live(S.id, () => load().catch(() => {}));
   cleanup = () => { stop(); app.onclick = null; };
+  await load();
+}
+
+/* ---------- garçom: mapa das mesas no celular ---------- */
+async function pWaiter(S) {
+  let tables = [];
+  const load = async () => { tables = await rpc('open_tables', { p_tenant: S.id }); draw(); };
+  const labels = () => { const n = Array.from({ length: S.tables_count || 10 }, (_, i) => String(i + 1)); return [...n, ...tables.map(t => t.table).filter(t => !n.includes(t))]; };
+  const draw = () => {
+    const busy = Object.fromEntries(tables.map(t => [t.table, t]));
+    app.innerHTML = `<div class="row between"><div><h2>Garçom</h2><p class="lead">Toque na mesa para lançar itens, pedir a conta ou fechar. ${tables.length ? `${tables.length} ocupada(s).` : 'Todas livres.'}</p></div></div>
+      <div class="wgrid">${labels().map(l => { const m = busy[l]; return `<button class="wtable ${m ? (m.pending ? 'busy cook' : 'busy') : ''}" data-t="${esc(l)}"><b>${esc(l)}</b>${m ? `<span>${brl(m.total - m.paidOnline)}</span><small>${mins(m.since)} min${m.pending ? ' · cozinha' : ''}</small>` : '<small>livre</small>'}</button>`; }).join('')}</div>
+      <p class="mut" style="margin-top:12px"><span class="wdot busy"></span> ocupada · <span class="wdot cook"></span> com pedido na cozinha</p>`;
+  };
+  const sheet = l => {
+    const m = tables.find(t => t.table === l), add = `/painel/novo?mesa=${encodeURIComponent(l)}&volta=garcom`;
+    if (!m) return go(add);
+    const agg = []; for (const i of m.items) { const k = agg.find(x => x.name === i.name && x.options === i.options && x.unit === i.unit); k ? k.qty += i.qty : agg.push({ ...i }); }
+    dialog(`<h2>Mesa ${esc(l)}</h2><p class="mut" style="margin:0">Aberta desde ${hhmm(m.since)} · ${m.orders.length} pedido(s)${m.pending ? ` · ${m.pending} na cozinha` : ''}</p>
+      <div class="scroll" style="max-height:40vh"><div style="display:grid;gap:8px">${agg.map(x => `<div class="ci"><span>${x.qty}× ${esc(x.name)}${x.options ? `<br><small class="mut">${esc(x.options)}</small>` : ''}</span><span class="price">${brl(x.qty * x.unit)}</span></div>`).join('')}
+      ${m.service ? `<div class="ci"><span class="mut">Serviço</span><span class="price">${brl(m.service)}</span></div>` : ''}</div></div>
+      <div class="tot"><span>${m.paidOnline ? 'A pagar' : 'Total'}</span><span class="price">${brl(m.total - m.paidOnline)}</span></div>
+      <div class="wact"><a class="btn pri" href="${add}" data-link id="wAdd">+ Adicionar itens</a><button class="ghost" id="wBill">Imprimir conta</button><button class="pri" id="wClose">Fechar conta</button></div>`);
+    $('#dlgBody').onclick = attempt(async e => {
+      if (e.target.closest('#wAdd')) return closeDlg();
+      if (e.target.closest('#wBill')) return printBill(S, m);
+      if (e.target.closest('#wClose')) return closeTableDialog(S, m, load);
+    });
+  };
+  app.onclick = e => { const b = e.target.closest('[data-t]'); if (b) sheet(b.dataset.t); };
+  const stop = live(S.id, () => load().catch(() => {}));
+  const tick = setInterval(() => load().catch(() => {}), 60000);
+  cleanup = () => { stop(); clearInterval(tick); app.onclick = null; };
   await load();
 }
 
@@ -2359,10 +2456,29 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
   '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql',
-  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql'];
+  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };
+// Gera as chaves dos avisos no próprio navegador: a privada só aparece aqui, uma vez, para ir aos segredos da função
+async function pushSetupDialog(after) {
+  const b64u = a => btoa(String.fromCharCode(...new Uint8Array(a))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const k = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const pub = b64u(await crypto.subtle.exportKey('raw', k.publicKey)), priv = (await crypto.subtle.exportKey('jwk', k.privateKey)).d;
+  const secret = b64u(crypto.getRandomValues(new Uint8Array(32))), url = `${SUPABASE_URL}/functions/v1/push`;
+  await rpc('push_setup', { p_public: pub, p_secret: secret, p_url: url });
+  const row = (n, v) => `<label>${n}<span class="row" style="flex-wrap:nowrap"><input readonly value="${esc(v)}"><button type="button" class="ghost sm" data-copy="${esc(v)}">Copiar</button></span></label>`;
+  dialog(`<h2>Avisos no celular: falta só o Supabase</h2>
+    <p style="margin:0">As chaves foram geradas e o banco já está configurado. <b>Copie agora</b>: a chave privada não fica salva em nenhum lugar e não aparece de novo.</p>
+    <ol class="mut" style="margin:0;padding-left:18px">
+      <li>No Supabase, abra <b>Edge Functions → Secrets</b> e crie os três segredos abaixo.</li>
+      <li>Em <b>Edge Functions → Deploy a new function → Via Editor</b>, crie a função <b>push</b> com o conteúdo de <code>supabase/functions/push/index.ts</code> e, nas configurações dela, desligue <b>Verify JWT</b>.</li>
+      <li>Em <b>Database → Extensions</b>, ative <b>pg_net</b> (se ainda não estiver ativa).</li></ol>
+    ${row('VAPID_PUBLIC_KEY', pub)}${row('VAPID_PRIVATE_KEY', priv)}${row('PUSH_SECRET', secret)}
+    <div class="row"><button class="pri" data-close>Pronto, copiei</button></div>`, true);
+  $('#dlgBody').onclick = e => { const c = e.target.closest('[data-copy]'); if (c) navigator.clipboard?.writeText(c.dataset.copy).then(() => toast('Copiado')).catch(() => {}); };
+  after();
+}
 async function vPlatform() {
   let hDays = 30;
   setColor('#1d1716'); brand('Balcão');
@@ -2371,6 +2487,13 @@ async function vPlatform() {
   const draw = async () => {
     const [o, sch, h] = await Promise.all([rpc('platform_overview'), rpc('schema_status').catch(() => null), rpc('platform_health', { p_days: hDays }).catch(() => null)]);
     const doms = await rpc('platform_domains').catch(() => null);
+    const push = await rpc('push_status').catch(() => null);
+    const pushBox = !push ? '' : `<div class="panel" style="margin-bottom:20px"><div class="row between"><h3 style="margin:0">Avisos no celular do cliente</h3>
+        <span class="badge ${push.configured ? 'b-g' : 'b-a'}">${push.configured ? 'Ativados' : 'Não configurados'}</span></div>
+      <p class="mut" style="margin:6px 0">O cliente toca em "Me avise no celular" na página do pedido e recebe uma notificação quando o pedido é aceito, fica pronto, sai para entrega ou é cancelado.
+        ${push.configured ? `${push.subscriptions} aparelho(s) inscrito(s) · ${push.sent7d} aviso(s) enviados em 7 dias${push.pending ? ` · <b>${push.pending} na fila sem envio</b> (confira a função push e os segredos)` : ''}.` : ''}
+        ${push.configured && !push.pgNet ? '<br><b>A extensão pg_net não está ligada:</b> em Database → Extensions, ative <b>pg_net</b>.' : ''}</p>
+      <button class="${push.configured ? 'ghost' : 'pri'} sm" id="pushGen">${push.configured ? 'Gerar chaves novas' : 'Gerar chaves e ativar'}</button></div>`;
     const missing = sch ? MIGRATIONS.map((file, i) => ({ n: i + 1, file, ok: sch.find(m => m.file === file)?.ok ?? false })).filter(m => !m.ok) : null;
     const dbBox = !missing ? `<div class="banner warn" style="margin-bottom:16px;text-align:left;border:1px solid var(--line);border-radius:12px"><b>Não consegui conferir o banco.</b> Rode no SQL Editor do Supabase a migração <code>20261123000000_checagem.sql</code> (e as anteriores que faltarem). Depois recarregue esta página.</div>`
       : missing.length ? `<div class="banner warn" style="margin-bottom:16px;text-align:left;border:1px solid var(--line);border-radius:12px"><b>Faltam ${missing.length} migraç${missing.length > 1 ? 'ões' : 'ão'} no banco.</b> Rode no SQL Editor do Supabase, nesta ordem, cada uma numa consulta nova:<ol style="margin:6px 0 0">${missing.map(m => `<li><code>${esc(m.file)}</code></li>`).join('')}</ol>Os arquivos estão na pasta <code>supabase/migrations</code> do GitHub. Enquanto faltarem, algumas telas mostram erro.</div>`
@@ -2398,6 +2521,7 @@ async function vPlatform() {
     <div class="kpis"><div class="kpi"><span class="mut">Empresas</span><b>${o.tenants.length}</b><span class="mut">${o.paying ?? 0} pagando · ${o.trials ?? 0} em teste</span></div><div class="kpi"><span class="mut">Receita mensal (MRR)</span><b class="price">${brl(o.mrr)}</b><span class="mut">+ ${brl(o.potentialMrr || 0)} se os testes virarem assinatura</span></div>
       <div class="kpi"><span class="mut">Vendido pelas lojas</span><b class="price">${brl(o.gmv)}</b></div><div class="kpi"><span class="mut">Pedidos</span><b>${o.orders}</b></div></div>
     ${healthBox}
+    ${pushBox}
     ${doms?.length ? `<div class="panel" style="margin-bottom:20px"><h3>Domínios próprios (${doms.length})</h3>
       <p class="mut" style="margin:0 0 8px">Para ativar, adicione cada domínio na Vercel: projeto → <b>Settings → Domains → Add</b>. A Vercel confere o DNS da loja e cria o certificado sozinha.</p>
       ${doms.map(d => `<div class="ci"><span><b>${esc(d.domain)}</b><br><span class="mut">${esc(d.name)}</span></span><span class="row"><button class="ghost sm" data-copydom="${esc(d.domain)}">Copiar</button><a class="btn ghost sm" href="https://${esc(d.domain)}" target="_blank" rel="noopener">Testar</a></span></div>`).join('')}</div>` : ''}
@@ -2409,6 +2533,7 @@ async function vPlatform() {
   };
   app.onclick = attempt(async e => {
     const hd = e.target.closest('button[data-hdays]'); if (hd) { hDays = +hd.dataset.hdays; return draw(); }
+    if (e.target.closest('#pushGen')) return pushSetupDialog(draw);
     const cd = e.target.closest('button[data-copydom]'); if (cd) { try { await navigator.clipboard.writeText(cd.dataset.copydom); toast('Domínio copiado'); } catch { toast(cd.dataset.copydom); } return; }
     const bb = e.target.closest('button[data-bill]');
     if (bb) { await rpc('platform_set_billing', { p_tenant: bb.dataset.bill, p_status: bb.dataset.st, p_add_days: bb.dataset.days ? +bb.dataset.days : null }); toast('Assinatura atualizada'); return draw(); }
