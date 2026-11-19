@@ -388,6 +388,7 @@ async function render() {
     if (p[0] === 'entrar') return vAuth(p[1]);
     if (p[0] === 'termos' || p[0] === 'privacidade') return vLegal(p[0]);
     if (p[0] === 'meus-pedidos') return await vMyOrders();
+    if (p[0] === 'chamada' && p[1]) return await vCallBoard(p[1]);
     if (p[0] === 'entregador' && p[1]) return await vCourier(p[1]);
     if (!p.length) { const hs = await slugForHost(); if (hs) return await vShop(hs); }
     await loadMe();
@@ -454,6 +455,29 @@ function vHome() {
     <p>Loja online com a sua marca, fila de preparo em tempo real, despacho de entregadores e relatórios — para pizzaria, hamburgueria, açaí, mercado, farmácia e o que mais vender por entrega.</p>
     <div class="row"><a class="btn pri" href="${dest}" data-link>${ME ? 'Ir para o painel' : 'Criar minha loja'}</a>${ME ? '' : '<a class="btn ghost" href="/entrar" data-link>Já tenho conta</a>'}${myOrders().length ? '<a class="btn ghost" href="/meus-pedidos" data-link>Meus pedidos</a>' : ''}</div></div>
     <div class="menu" style="grid-template-columns:repeat(2,minmax(0,1fr))">${['pizza', 'burger', 'cup', 'box'].map((i, k) => `<div class="item">${art(i, ['#d62828', '#e85d04', '#6a2c91', '#2f8f46'][k])}</div>`).join('')}</div></section>`;
+}
+
+/* ---------- painel de chamada (TV do balcão, público) ---------- */
+async function vCallBoard(slug) {
+  document.body.classList.add('kds-on', 'callb');
+  let known = null, last = null;
+  const draw = async () => {
+    let b; try { b = await rpc('call_board', { p_slug: slug }); } catch { return; }
+    if (!b) { app.innerHTML = '<h2 style="padding:24px">Loja não encontrada.</h2>'; return; }
+    setColor(b.store.color);
+    const ready = b.ready.filter(x => !x.table), prep = b.preparing.filter(x => !x.table);
+    const ids = new Set(ready.map(x => x.n)), fresh = known ? ready.filter(x => !known.has(x.n)) : [];
+    if (fresh.length) { last = fresh[0].n; try { beep(); setTimeout(beep, 400); } catch {} }
+    known = ids;
+    app.innerHTML = `<div class="cb"><div class="cbh"><b>${esc(b.store.name)}</b><span>${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span></div>
+      <div class="cbcols"><section><h2>Preparando</h2><div class="nums prep">${prep.map(x => `<span>${x.n}</span>`).join('') || '<em>—</em>'}</div></section>
+      <section class="ok"><h2>Pronto! Pode retirar</h2><div class="nums">${ready.map(x => `<span class="${x.n === last ? 'new' : ''}">${x.n}</span>`).join('') || '<em>—</em>'}</div></section></div></div>`;
+  };
+  await draw();
+  const tick = setInterval(draw, 8000);
+  try { navigator.wakeLock?.request('screen').catch(() => {}); } catch {}
+  app.onclick = () => document.fullscreenElement ? null : document.documentElement.requestFullscreen?.().catch(() => {});
+  cleanup = () => { clearInterval(tick); app.onclick = null; document.body.classList.remove('kds-on', 'callb'); };
 }
 
 /* ---------- meus pedidos (cliente, sem login) ---------- */
@@ -945,7 +969,10 @@ async function pOrders(S, owner) {
   const loadLow = () => q(sb.from('ingredients').select('name, stock, min_stock').eq('tenant_id', S.id).gt('min_stock', 0)).then(r => { lowIng = r.filter(i => +i.stock <= +i.min_stock); }).catch(() => {});
   let steps = null;
   const loadSteps = () => owner && !local.get(`setup-done:${S.id}`, false) ? setupSteps(S).then(r => { steps = r.every(x => x.ok) ? null : r; }).catch(() => {}) : null;
-  const load = async () => { [orders] = await Promise.all([fetchOrders(S.id, ['novo', 'preparo', 'pronto']), loadLow(), steps === null && !load.once ? loadSteps() : null]); load.once = true; draw(); printArrivals(); };
+  let goal = null; // meta do dia: { goal, total }
+  const loadGoal = () => q(sb.from('tenants').select('daily_goal').eq('id', S.id).single())
+    .then(async g => { goal = g.daily_goal ? { goal: g.daily_goal, total: (await rpc('cash_report', { p_tenant: S.id })).total } : null; }).catch(() => { goal = null; });
+  const load = async () => { [orders] = await Promise.all([fetchOrders(S.id, ['novo', 'preparo', 'pronto']), loadLow(), loadGoal(), steps === null && !load.once ? loadSteps() : null]); load.once = true; draw(); printArrivals(); };
   // Aviso de pedido parado: novo sem aceitar há 5+ min, ou pronto esperando há 15+ min.
   let lastNag = 0;
   const stuck = () => {
@@ -963,10 +990,11 @@ async function pOrders(S, owner) {
     const isLater = o => o.scheduled_for && o.status === 'novo' && new Date(o.scheduled_for) - Date.now() > 60 * 60000;
     const later = orders.filter(isLater).sort((a, b) => new Date(a.scheduled_for) - new Date(b.scheduled_for)), soon = orders.filter(o => !isLater(o));
     app.innerHTML = `<div class="row between"><div><h2>${esc(S.seg?.prep || 'Preparo')}</h2><p class="lead">Pedidos chegam aqui na hora, com aviso sonoro. Tickets com mais de 25 min ficam em alerta.</p></div>
-      <span class="row"><label class="chk" style="gap:6px">Imprimir comanda <select id="printMode" style="width:auto;min-height:36px;padding:4px 8px">${[['off', 'só no botão'], ['accept', 'ao aceitar'], ['arrive', 'assim que chegar']].map(([v, t]) => `<option value="${v}" ${v === pmode ? 'selected' : ''}>${t}</option>`).join('')}</select></label>${stationList(S).length > 1 ? `<select id="printStation" aria-label="O que imprimir" style="width:auto;min-height:36px;padding:4px 8px">${[['all', 'pedido completo'], ['split', 'uma comanda por estação'], ...stationList(S).map(n => [n, 'só ' + n])].map(([v, t]) => `<option value="${esc(v)}" ${v === local.get('printStation', 'all') ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>` : ''}<button class="ghost sm" id="printHelp" title="Imprimir sem abrir a janela">?</button><a class="btn ghost" href="/painel/kds" data-link>Tela da cozinha</a><a class="btn pri" href="/painel/novo" data-link>+ Novo pedido</a></span></div>
+      <span class="row"><label class="chk" style="gap:6px">Imprimir comanda <select id="printMode" style="width:auto;min-height:36px;padding:4px 8px">${[['off', 'só no botão'], ['accept', 'ao aceitar'], ['arrive', 'assim que chegar']].map(([v, t]) => `<option value="${v}" ${v === pmode ? 'selected' : ''}>${t}</option>`).join('')}</select></label>${stationList(S).length > 1 ? `<select id="printStation" aria-label="O que imprimir" style="width:auto;min-height:36px;padding:4px 8px">${[['all', 'pedido completo'], ['split', 'uma comanda por estação'], ...stationList(S).map(n => [n, 'só ' + n])].map(([v, t]) => `<option value="${esc(v)}" ${v === local.get('printStation', 'all') ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>` : ''}<button class="ghost sm" id="printHelp" title="Imprimir sem abrir a janela">?</button><a class="btn ghost" href="/painel/kds" data-link>Tela da cozinha</a><a class="btn ghost" href="/chamada/${esc(S.slug)}" target="_blank" rel="noopener" title="Abra numa TV voltada para os clientes">Painel de chamada</a><a class="btn pri" href="/painel/novo" data-link>+ Novo pedido</a></span></div>
     ${later.length ? `<div class="panel sched"><h3>Agendados para mais tarde (${later.length})</h3><div class="row">${later.map(o => `<span class="badge b-a" title="${esc(o.customer_name)}">${esc(fmtWhen(o.scheduled_for, S.timezone))} · #${o.number} · ${esc(where(o))}</span>`).join('')}</div>
       <p class="mut" style="margin:0">Eles entram nas colunas 1 hora antes do horário marcado.</p></div>` : ''}
     <div class="stuck" id="stuck" role="alert" hidden></div>
+    ${goal ? `<div class="goal"><span>Meta do dia: <b class="price">${brl(goal.total)}</b> de ${brl(goal.goal)}${goal.total >= goal.goal ? ' 🎉 batida!' : ` · faltam ${brl(goal.goal - goal.total)}`}</span><div class="progress"><i style="width:${Math.min(100, goal.total / goal.goal * 100)}%"></i></div></div>` : ''}
     ${steps ? `<div class="panel setup"><div class="row between"><h3 style="margin:0">Primeiros passos · ${steps.filter(x => x.ok).length} de ${steps.length}</h3><button class="ghost sm" id="setupHide">Dispensar</button></div>
       <div class="progress"><i style="width:${steps.filter(x => x.ok).length / steps.length * 100}%"></i></div>
       <ol class="steps2">${steps.map(x => `<li class="${x.ok ? 'done' : ''}">${x.ok ? '✓' : '○'} ${x.share ? `<a href="#" data-share="1">${esc(x.t)}</a>` : `<a href="${esc(x.go)}" ${x.ext ? 'target="_blank" rel="noopener"' : 'data-link'}>${esc(x.t)}</a>`}</li>`).join('')}</ol></div>` : ''}
@@ -1478,8 +1506,25 @@ async function pCash(S) {
 
 /* ---------- clientes ---------- */
 async function pCustomers(S) {
-  let list = [], term = '', gone = 0; // gone = dias sem pedir (0 = todos os clientes)
-  const camp = local.get(`camp:${S.id}`, { msg: 'Olá, {nome}! Aqui é da {loja}. Sentimos sua falta! 😊{cupom}\nPeça por aqui: {link}', coupon: '' });
+  let list = [], term = '', gone = ''; // filtro/segmento ('' = todos os clientes); com filtro, a tela vira campanha de WhatsApp
+  const D = c => mins(c.lastOrder) / 1440, firstD = c => mins(c.firstOrder) / 1440;
+  // Segmentos (RFM simples): quem gasta mais, quem volta sempre, quem acabou de chegar, quem está sumindo
+  const vipCut = () => { const v = list.filter(c => c.orders > 0).map(c => c.spent).sort((a, b) => b - a); return v.length ? v[Math.max(0, Math.ceil(v.length * 0.1) - 1)] : Infinity; };
+  const SEGS = {
+    vip: { t: 'VIP', h: '10% que mais gastam e pediram nos últimos 60 dias', f: c => c.spent >= vipCut() && D(c) <= 60,
+      msg: 'Olá, {nome}! Você é um dos clientes mais especiais da {loja}. Preparamos um mimo para você 😊{cupom}\n{link}' },
+    fieis: { t: 'Fiéis', h: '4+ pedidos e pediram nos últimos 30 dias', f: c => c.orders >= 4 && D(c) <= 30,
+      msg: 'Olá, {nome}! Obrigado por pedir sempre na {loja}. 💛{cupom}\n{link}' },
+    novos: { t: 'Novos', h: 'primeiro pedido nos últimos 30 dias', f: c => firstD(c) <= 30 && c.orders <= 2,
+      msg: 'Olá, {nome}! Que bom ter você na {loja}. Que tal pedir de novo?{cupom}\n{link}' },
+    risco: { t: 'Em risco', h: '2+ pedidos, sem pedir há 31 a 60 dias', f: c => c.orders >= 2 && D(c) > 30 && D(c) <= 60,
+      msg: 'Olá, {nome}! Faz um tempinho que você não pede na {loja}. Sentimos sua falta!{cupom}\n{link}' },
+    perdidos: { t: 'Perdidos', h: 'sem pedir há mais de 60 dias', f: c => c.orders > 0 && D(c) > 60,
+      msg: 'Olá, {nome}! Aqui é da {loja}. Estamos com novidades no cardápio e queremos você de volta!{cupom}\n{link}' },
+    g30: { t: 'Sumidos 30+ dias', h: 'sem pedir há mais de 30 dias', f: c => c.orders > 0 && D(c) > 30 },
+  };
+  const DEFAULT_CAMP = 'Olá, {nome}! Aqui é da {loja}. Sentimos sua falta! 😊{cupom}\nPeça por aqui: {link}';
+  const camp = local.get(`camp:${S.id}`, { msg: DEFAULT_CAMP, coupon: '' });
   const sent = local.get(`sent:${S.id}`, {}); // telefone → data em que a mensagem da campanha foi aberta
   const coupons = await q(sb.from('coupons').select('code, percent, free_shipping, active').eq('tenant_id', S.id).eq('active', true).order('id')).catch(() => []);
   const cupTxt = c => c ? `\nUse o cupom *${c.code}*: ${[c.percent ? `${c.percent}% de desconto` : '', c.free_shipping ? 'entrega grátis' : ''].filter(Boolean).join(' e ')}.` : '';
@@ -1489,14 +1534,14 @@ async function pCustomers(S) {
   const pkey = ph => String(ph || '').replace(/\D/g, '').slice(-11);
   let blocked = new Map();
   const load = async () => {
-    const [l, bl] = await Promise.all([rpc('store_customers', { p_tenant: S.id, p_search: term || null, p_limit: gone ? 1000 : 200 }),
+    const [l, bl] = await Promise.all([rpc('store_customers', { p_tenant: S.id, p_search: term || null, p_limit: gone ? 2000 : 200 }),
       q(sb.from('blocked_phones').select('phone_key, note').eq('tenant_id', S.id)).catch(() => null)]);
     list = l; blocked = new Map((bl || []).map(b => [b.phone_key, b.note || ''])); draw();
   };
-  const shown = () => gone ? list.filter(c => mins(c.lastOrder) > gone * 1440 && c.orders > 0) : list;
+  const shown = () => gone ? list.filter(SEGS[gone].f) : list;
   const draw = () => {
     const box = $('#custList'), rows = shown();
-    const html = `${gone ? `<p class="mut" style="margin:0 0 8px">${rows.length} cliente(s) sem pedir há mais de ${gone} dias · ${rows.filter(c => sent[c.phone]).length} já contatado(s)</p>` : ''}
+    const html = `${gone ? `<p class="mut" style="margin:0 0 8px"><b>${rows.length} cliente(s)</b> · ${esc(SEGS[gone].h)} · ${rows.filter(c => sent[c.phone]).length} já contatado(s)</p>` : ''}
       <div class="scroll"><table class="stack"><thead><tr><th>Cliente</th><th class="n">Pedidos</th><th class="n">Total gasto</th><th>Último pedido</th><th></th></tr></thead><tbody>
       ${rows.map(c => `<tr><td data-l="Cliente"><b>${esc(c.name)}</b>${blocked.has(pkey(c.phone)) ? ` <span class="badge b-r" title="${esc(blocked.get(pkey(c.phone)))}">bloqueado</span>` : ''}<br><span class="mut">${esc(c.phone)}${c.address ? ' · ' + esc(c.address) : ''}</span></td>
         <td data-l="Pedidos" class="n">${c.orders}${S.loyalty_enabled && c.stamps != null ? `<br><span class="mut">${Math.min(c.stamps, S.loyalty_every)}/${S.loyalty_every} selos</span>` : ''}</td><td data-l="Total gasto" class="n price">${brl(c.spent)}</td>
@@ -1507,8 +1552,8 @@ async function pCustomers(S) {
     if (box) { box.innerHTML = html; return; }
     app.innerHTML = `<div class="row between"><div><h2>Clientes</h2><p class="lead">Quem já pediu na sua loja, montado a partir dos pedidos.</p></div>
       <span class="row"><button class="ghost" id="csv">Baixar planilha (CSV)</button></span></div>
-      <div class="row" style="margin-bottom:12px">${[[0, 'Todos'], [30, 'Sumidos há 30+ dias'], [60, '60+ dias'], [90, '90+ dias']].map(([d, t]) => `<button class="sm ${d === gone ? 'pri' : 'ghost'}" data-gone="${d}">${t}</button>`).join('')}</div>
-      ${gone ? `<div class="panel" style="margin-bottom:16px"><h3>Campanha "volte a pedir"</h3>
+      <div class="row" style="margin-bottom:12px">${[['', 'Todos'], ...Object.entries(SEGS).map(([k, v]) => [k, v.t])].map(([d, t]) => `<button class="sm ${d === gone ? 'pri' : 'ghost'}" data-gone="${d}" title="${esc(d ? SEGS[d].h : 'todos os clientes')}">${t}${d && gone && !term ? ` <span class="mut">${list.filter(SEGS[d].f).length}</span>` : ''}</button>`).join('')}</div>
+      ${gone ? `<div class="panel" style="margin-bottom:16px"><h3>Campanha: ${esc(SEGS[gone].t)}</h3>
         <p class="mut" style="margin:0">Escreva a mensagem uma vez e envie para cada cliente com um toque. O WhatsApp abre com o texto pronto; você só confirma o envio. Use {nome}, {loja}, {cupom} e {link} (o link já abre a loja com o último pedido no carrinho).</p>
         <label>Mensagem<textarea id="cMsg" rows="3" maxlength="600">${esc(camp.msg)}</textarea></label>
         <label>Cupom de volta<select id="cCupSel"><option value="">Sem cupom</option>${coupons.map(c => `<option value="${esc(c.code)}" ${c.code === camp.coupon ? 'selected' : ''}>${esc(c.code)} · ${[c.percent ? c.percent + '%' : '', c.free_shipping ? 'entrega grátis' : ''].filter(Boolean).join(' + ')}</option>`).join('')}</select></label>
@@ -1527,7 +1572,14 @@ async function pCustomers(S) {
     const l = e.target.closest('a[data-send]');
     if (l) { sent[l.dataset.send] = new Date().toISOString(); local.set(`sent:${S.id}`, sent); setTimeout(draw, 300); return; }
     const b = e.target.closest('button'); if (!b) return;
-    if (b.dataset.gone != null) { const was = gone; gone = +b.dataset.gone; app.innerHTML = ''; if (!was !== !gone) await load(); else draw(); return; }
+    if (b.dataset.gone != null) {
+      const was = gone; gone = b.dataset.gone;
+      // troca a mensagem pela sugerida do segmento, se a atual ainda é uma das sugestões
+      const presets = [...Object.values(SEGS).map(x => x.msg).filter(Boolean), DEFAULT_CAMP];
+      if (gone && SEGS[gone].msg && presets.includes(camp.msg)) { camp.msg = SEGS[gone].msg; saveCamp(); }
+      if (gone && !SEGS[gone].msg && presets.includes(camp.msg)) { camp.msg = DEFAULT_CAMP; saveCamp(); }
+      app.innerHTML = ''; if (!was !== !gone) await load(); else draw(); return;
+    }
     if (b.dataset.block) {
       dialog(`<h2>Bloquear cliente</h2><p class="mut" style="margin:0">Pedidos pela loja online com o telefone <b>${esc(b.dataset.block)}</b> serão recusados com a mensagem "Fale com a loja". Pelo balcão e telefone vocês continuam lançando normalmente.</p>
         <form id="fBlock"><label>Motivo (só a loja vê)<input id="bkN" maxlength="120" placeholder="trote, golpe, não pagou…"></label><div class="row"><button class="pri">Bloquear</button><button type="button" class="ghost" data-close>Cancelar</button></div></form>`);
@@ -1790,6 +1842,36 @@ async function pReports(S) {
   // Financeiro do mês: faturamento − custo dos insumos vendidos − despesas = resultado
   let month = new Date().toLocaleDateString('en-CA', { timeZone: S.timezone || 'America/Sao_Paulo' }).slice(0, 7);
   const CATS = ['Aluguel', 'Salários', 'Energia', 'Água', 'Gás', 'Embalagens', 'Ingredientes avulsos', 'Marketing', 'Taxas e impostos', 'Aplicativos', 'Manutenção', 'Outros'];
+  // Engenharia de cardápio: popularidade × margem (método Kasavana & Smith) + curva ABC da receita
+  const drawEng = async () => {
+    const box = $('#eng'); if (!box) return;
+    const d = Math.max(days, 30), all = await rpc('menu_engineering', { p_tenant: S.id, p_days: d }).catch(() => null);
+    if (!all) { box.innerHTML = ''; return; }
+    const sold = all.filter(x => x.qty > 0), totQ = sold.reduce((a, x) => a + x.qty, 0), totR = sold.reduce((a, x) => a + x.revenue, 0);
+    if (sold.length < 3) { box.innerHTML = ''; return; }
+    const withR = sold.filter(x => x.hasRecipe), unit = x => (x.revenue - x.cost) / x.qty;
+    const avgM = withR.length ? withR.reduce((a, x) => a + (x.revenue - x.cost), 0) / withR.reduce((a, x) => a + x.qty, 0) : null;
+    const popCut = 0.7 / sold.length;   // popular = vende pelo menos 70% da média de participação
+    let acc = 0; const abc = new Map(sold.map(x => { acc += x.revenue; return [x.id, acc / totR <= 0.8 ? 'A' : acc / totR <= 0.95 ? 'B' : 'C']; }));
+    const cls = x => { const pop = x.qty / totQ >= popCut; if (!x.hasRecipe || avgM === null) return pop ? 'pop' : 'low';
+      const hi = unit(x) >= avgM; return pop && hi ? 'estrela' : pop ? 'burro' : hi ? 'enigma' : 'abacaxi'; };
+    const Q = { estrela: ['★ Estrelas', 'vendem muito e dão boa margem', 'Mantenha em destaque, com boa foto. Evite mexer no preço.'],
+      burro: ['Burros de carga', 'vendem muito, mas a margem é baixa', 'Revise a ficha e a porção, negocie insumos ou suba um pouco o preço.'],
+      enigma: ['Quebra-cabeças', 'boa margem, mas vendem pouco', 'Divulgue: foto melhor, vitrine, promoção, sugestão no carrinho.'],
+      abacaxi: ['Abacaxis', 'vendem pouco e a margem é baixa', 'Repense a receita ou tire do cardápio.'] };
+    const groups = Object.keys(Q).map(k => [k, sold.filter(x => cls(x) === k)]);
+    const noRec = sold.filter(x => !x.hasRecipe), never = all.filter(x => !x.qty && x.available);
+    box.innerHTML = `<div class="panel" style="margin-bottom:16px"><h3>Engenharia de cardápio <span class="mut" style="font-weight:400">· últimos ${d} dias</span></h3>
+      <p class="mut" style="margin:0 0 10px">Cada produto é classificado pelo quanto vende e pela margem de cada unidade (preço menos o custo da ficha técnica). Margem média: ${avgM === null ? '— (monte as fichas na aba Estoque)' : brl(Math.round(avgM)) + ' por item'}.</p>
+      ${avgM === null ? '' : `<div class="quad">${groups.map(([k, xs]) => `<div class="q q-${k}"><b>${Q[k][0]} (${xs.length})</b><span class="mut">${Q[k][1]}</span>
+        <span>${xs.slice(0, 6).map(x => esc(x.name)).join(', ') || '—'}${xs.length > 6 ? ` e mais ${xs.length - 6}` : ''}</span><span class="tip">${Q[k][2]}</span></div>`).join('')}</div>`}
+      <details style="margin-top:10px"><summary class="mut">Tabela completa e curva ABC (A = produtos que fazem 80% da receita)</summary><div class="scroll"><table class="stack"><thead><tr><th>Produto</th><th class="n">Vendidos</th><th class="n">Receita</th><th>ABC</th><th class="n">Margem/un</th><th>Classe</th></tr></thead><tbody>
+        ${sold.map(x => `<tr><td data-l="Produto"><b>${esc(x.name)}</b><br><span class="mut">${esc(x.category)}</span></td><td data-l="Vendidos" class="n">${x.qty}</td><td data-l="Receita" class="n price">${brl(x.revenue)}</td>
+          <td data-l="ABC"><span class="badge ${abc.get(x.id) === 'A' ? 'b-g' : abc.get(x.id) === 'B' ? 'b-a' : ''}">${abc.get(x.id)}</span></td>
+          <td data-l="Margem/un" class="n">${x.hasRecipe ? brl(Math.round(unit(x))) : '<span class="mut">sem ficha</span>'}</td><td data-l="Classe">${Q[cls(x)]?.[0] || (cls(x) === 'pop' ? 'popular' : 'pouco vendido')}</td></tr>`).join('')}</tbody></table></div></details>
+      ${noRec.length && avgM !== null ? `<p class="mut" style="margin:8px 0 0">${noRec.length} produto(s) vendido(s) sem ficha técnica ficaram fora da matriz.</p>` : ''}
+      ${never.length ? `<p class="mut" style="margin:6px 0 0">Nenhuma venda no período: ${never.slice(0, 8).map(x => esc(x.name)).join(', ')}${never.length > 8 ? '…' : ''}.</p>` : ''}</div>`;
+  };
   // Atividades da equipe: quem mudou preço, cancelou pedido, mexeu no caixa, criou cupom…
   let actFilter = '';
   const drawActs = async () => {
@@ -1811,11 +1893,13 @@ async function pReports(S) {
       q(sb.from('expenses').select('id, day, category, description, amount').eq('tenant_id', S.id).gte('day', month + '-01').lt('day', nextMonth(month) + '-01').order('day', { ascending: false }))]); }
     catch { box.innerHTML = ''; return; }
     const pct = v => f.revenue ? Math.round(v / f.revenue * 100) + '%' : '—';
+    const mg = await q(sb.from('tenants').select('monthly_goal').eq('id', S.id).single()).then(x => x.monthly_goal).catch(() => 0);
     box.innerHTML = `<div class="panel" style="margin-bottom:16px"><div class="row between"><h3 style="margin:0">Resultado do mês</h3><span class="row"><input type="month" id="finM" value="${month}" style="width:auto"><button class="pri sm" id="expNew">+ Despesa</button></span></div>
       <div class="kpis" style="margin:10px 0"><div class="kpi"><span class="mut">Faturamento</span><b class="price">${brl(f.revenue)}</b><span class="mut">${f.orders} pedidos</span></div>
         <div class="kpi"><span class="mut">Insumos vendidos</span><b class="price">${brl(f.ingredients)}</b><span class="mut">${pct(f.ingredients)} · pela ficha técnica</span></div>
         <div class="kpi"><span class="mut">Despesas</span><b class="price">${brl(f.expenses)}</b><span class="mut">${pct(f.expenses)}</span></div>
         <div class="kpi"><span class="mut">Resultado</span><b class="price ${f.result < 0 ? 'neg' : ''}">${brl(f.result)}</b><span class="mut">${f.revenue ? `margem ${pct(f.result)}` : ''}</span></div></div>
+      ${mg ? `<div class="goal"><span>Meta do mês: <b class="price">${brl(f.revenue)}</b> de ${brl(mg)} (${Math.round(f.revenue / mg * 100)}%)${f.revenue >= mg ? ' 🎉 batida!' : ''}</span><div class="progress"><i style="width:${Math.min(100, f.revenue / mg * 100)}%"></i></div></div>` : ''}
       ${!f.ingredients ? '<p class="mut" style="margin:0 0 8px">O custo dos insumos aparece quando os produtos têm ficha técnica (aba Estoque).</p>' : ''}
       ${ex.length ? `<details><summary class="mut">${ex.length} despesa(s) lançada(s) · ${f.byCategory.slice(0, 3).map(c => `${esc(c.category)} ${brl(c.amount)}`).join(' · ')}</summary>
         ${ex.map(x => `<div class="ci"><span>${x.day.split('-').reverse().join('/')} · <b>${esc(x.category)}</b>${x.description ? ` · ${esc(x.description)}` : ''}</span><span class="row"><span class="price">${brl(x.amount)}</span><button class="ghost sm" data-expdel="${x.id}">Excluir</button></span></div>`).join('')}</details>` : '<p class="mut" style="margin:0">Nenhuma despesa lançada neste mês.</p>'}</div>`;
@@ -1826,7 +1910,7 @@ async function pReports(S) {
     const bars = (rows, label, val, fmt, color) => { const m = Math.max(1, ...rows.map(val)); return rows.map(x => `<div class="bar"><span>${esc(label(x))}</span><i style="width:${val(x) / m * 100}%;${color ? `background:${color}` : ''}"></i><span class="price">${fmt(x)}</span></div>`).join('') || '<p class="empty">Sem dados no período</p>'; };
     app.innerHTML = `<div class="row between"><div><h2>Relatórios</h2><p class="lead">Pedidos não cancelados no período escolhido.</p></div>
       <span class="row">${[1, 7, 30, 90].map(d => `<button class="sm ${d === days ? 'pri' : 'ghost'}" data-days="${d}">${d === 1 ? 'Hoje' : d + ' dias'}</button>`).join('')}<button class="ghost sm" id="ordersCsv">Baixar pedidos (CSV)</button></span></div>
-    <div id="fin"></div><div id="acts"></div>
+    <div id="fin"></div><div id="eng"></div><div id="acts"></div>
     <div class="kpis"><div class="kpi"><span class="mut">Faturamento</span><b class="price">${brl(r.revenue)}</b></div><div class="kpi"><span class="mut">Pedidos</span><b>${r.orders}</b><span class="mut">${r.cancelled} cancelado(s)</span></div>
       <div class="kpi"><span class="mut">Ticket médio</span><b class="price">${brl(r.avgTicket)}</b></div><div class="kpi"><span class="mut">Tempo médio até entregar</span><b>${r.avgDeliveryMin ?? '—'}${r.avgDeliveryMin != null ? ' min' : ''}</b></div></div>
     <div class="two"><div class="panel"><h3>Faturamento por dia</h3><div class="bars">${bars(r.byDay, x => x.d.split('-').reverse().slice(0, 2).join('/'), x => x.revenue, x => brl(x.revenue))}</div></div>
@@ -1839,7 +1923,7 @@ async function pReports(S) {
         ${x.comment ? `<p style="margin:0">${esc(x.comment)}</p>` : ''}
         <form class="row" data-reply="${x.order_id}" style="flex-wrap:nowrap"><input name="reply" maxlength="500" placeholder="Responder publicamente" value="${esc(x.reply || '')}"><button class="ghost sm">${x.reply ? 'Atualizar' : 'Responder'}</button></form>
         <span class="mut" style="font-size:13px">${new Date(x.created_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</span></div>`).join('') || '<p class="mut" style="margin:0">Nenhuma avaliação ainda. Depois da entrega, o cliente pode avaliar pela página do pedido.</p>'}</div>`;
-    drawFin().catch(() => {}); drawActs().catch(() => {});
+    drawFin().catch(() => {}); drawActs().catch(() => {}); drawEng().catch(() => {});
   };
   app.onclick = attempt(async e => {
     const xd = e.target.closest('button[data-expdel]');
@@ -1906,6 +1990,9 @@ async function pConfig(S) {
       <p class="mut" style="margin:0">Nesses dias a loja fica fechada o dia todo, e ninguém consegue agendar para eles. Para fechar só por alguns minutos, use a pausa rápida na tela de preparo.</p>
       ${(st.closed_dates || []).filter(d => d.date >= ymdIn(st.timezone, new Date())).sort((a, b) => a.date.localeCompare(b.date)).map(d => `<div class="ci"><span><b>${d.date.split('-').reverse().join('/')}</b> · ${esc(new Date(d.date + 'T12:00:00').toLocaleDateString('pt-BR', { weekday: 'long' }))}${d.note ? ` · ${esc(d.note)}` : ''}</span><button type="button" class="ghost sm" data-rmdate="${esc(d.date)}">Remover</button></div>`).join('') || '<p class="empty" style="margin:0">Nenhuma data marcada.</p>'}
       <div class="row"><label>Data<input id="cdD" type="date" min="${ymdIn(st.timezone, new Date())}"></label><label style="flex:1">Motivo (opcional)<input id="cdN" maxlength="60" placeholder="Natal, férias coletivas…"></label><button class="pri" style="align-self:end">Adicionar</button></div></form>` : ''}
+    <form class="panel" id="fGoals"><h3>Metas de vendas</h3><p class="mut" style="margin:0">A meta do dia aparece para a equipe no Preparo, com uma barra de progresso. A do mês aparece no Resultado do mês, em Relatórios. Deixe em branco para não usar.</p>
+      <div class="two" style="gap:10px"><label>Meta do dia (R$)<input id="gD" inputmode="decimal" placeholder="ex.: 1.500,00"></label><label>Meta do mês (R$)<input id="gM" inputmode="decimal" placeholder="ex.: 40.000,00"></label></div>
+      <button class="pri">Salvar metas</button></form>
     <form class="panel" id="fShow"><h3>Vitrine da loja</h3>
       <div class="banner-ed">${st.banner_path ? `<img src="${esc(imgUrl(st.banner_path))}" alt="Banner da loja">` : '<span class="mut">Sem banner</span>'}</div>
       <span class="row"><label>Banner (foto larga, ex.: fachada ou produtos)<input type="file" id="shBanner" accept="image/jpeg,image/png,image/webp"></label>${st.banner_path ? '<button type="button" class="ghost sm" id="shRm">Remover banner</button>' : ''}</span>
@@ -2012,6 +2099,8 @@ async function pConfig(S) {
     <form class="panel danger" id="fDel"><h3>Excluir loja</h3><p class="mut" style="margin:0">Apaga a loja e todos os dados dela (cardápio, pedidos, clientes, equipe). <b>Não tem volta.</b> Cancele a assinatura antes.</p>
       <label>Para confirmar, digite o endereço da loja: <b>${esc(st.slug)}</b><input id="delSlug" autocomplete="off"></label>
       <button class="ghost">Excluir loja definitivamente</button></form></div>`;
+    q(sb.from('tenants').select('daily_goal, monthly_goal').eq('id', S.id).single()).then(g => { if ($('#gD')) { $('#gD').value = g.daily_goal ? fromCents(g.daily_goal) : ''; $('#gM').value = g.monthly_goal ? fromCents(g.monthly_goal) : ''; } })
+      .catch(() => { const f = $('#fGoals'); if (f) f.hidden = true; });
   };
   const refreshBrand = async () => { await loadMe(); setColor(ME.tenant.color); $('#bName').textContent = ME.tenant.name; };
   app.onclick = attempt(async e => {
@@ -2077,6 +2166,11 @@ async function pConfig(S) {
       const min_order = toCents($('#sMin').value || '0'); if (!Number.isInteger(min_order) || min_order < 0) throw new Error('Pedido mínimo inválido');
       await q(sb.from('tenants').update({ name: $('#sN').value.trim(), phone: $('#sPh').value.trim(), eta_text: $('#sEta').value.trim(), min_order, color: $('#sC').value, is_open: $('#sOpen').checked, allow_pickup: $('#sPick').checked }).eq('id', S.id));
       await refreshBrand();
+    }
+    if (id === 'fGoals') {
+      const g = id => $(id).value.trim() ? toCents($(id).value) : 0, d = g('#gD'), m = g('#gM');
+      if (!Number.isInteger(d) || d < 0 || !Number.isInteger(m) || m < 0) throw new Error('Meta inválida');
+      await q(sb.from('tenants').update({ daily_goal: d, monthly_goal: m }).eq('id', S.id));
     }
     if (id === 'fClosed') {
       const date = $('#cdD').value; if (!date) throw new Error('Escolha a data');
@@ -2187,7 +2281,8 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql',
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
-  '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql'];
+  '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql',
+  '20261204000000_metas_cardapio_chamada.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };
