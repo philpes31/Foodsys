@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -617,7 +617,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 20);
+  assert.equal(st.length, 21);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -973,4 +973,63 @@ test('importar cardápio: cria, atualiza pelo nome e recusa planilha inválida i
   fails(`select import_menu('${pizzaId}', '[{"category":"A","name":"Ok","price":100},{"category":"A","name":"Ruim","price":"abc"}]')`, U.pizza, /Linha 3: Preço inválido/);
   assert.equal(sql(`select count(*) from products where tenant_id = '${pizzaId}' and name = 'Ok'`), '0');
   sql(`update products set price = ${p.price} where id = ${p.id}`);
+});
+
+test('cashback: ganha na entrega, usa no próximo pedido, cancelamento estorna; saldo não é público', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', min_order = 0, allow_pickup = true, paused_until = null, closed_dates = '[]',
+       category_hours = '{}', cashback_percent = 10, cashback_days = 30, loyalty_enabled = false where id = '${pizzaId}'`);
+  sql(`select set_recipe(id, '[]') from products where tenant_id = '${pizzaId}'`, U.pizza);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const cust = { name: 'Cashback', phone: '(11) 95555-1212' };
+  const base = { customer: cust, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 10 }] };
+  const a = order('forno-da-vila', base);
+  assert.equal(json(`track_order('${a.code}')`, null).order.cashback.willEarn, Math.round(p.price * 10 * 0.1));
+  sql(`update orders set status = 'entregue' where public_code = '${a.code}'`);
+  const earned = Math.round(p.price * 10 * 0.1);
+  assert.equal(json(`track_order('${a.code}')`, null).order.cashback.balance, earned);
+  assert.throws(() => sql(`select cashback_balance('${pizzaId}', '11955551212')`, null), /permission denied/);
+  // usa o saldo (até o valor dos produtos)
+  const b = order('forno-da-vila', { ...base, items: [{ productId: p.id, qty: 1 }], useCashback: true });
+  const used = Math.min(earned, p.price);
+  assert.equal(b.total, p.price - used);
+  assert.equal(json(`track_order('${b.code}')`, null).order.cashback.balance, earned - used);
+  // cancelou: o saldo volta
+  sql(`update orders set status = 'cancelado' where public_code = '${b.code}'`);
+  assert.equal(json(`track_order('${a.code}')`, null).order.cashback.balance, earned);
+  // o primeiro pedido cancelado depois de entregue: tira o que ganhou
+  sql(`update orders set status = 'cancelado' where public_code = '${a.code}'`);
+  assert.equal(json(`track_order('${a.code}')`, null).order.cashback.balance, 0);
+  // sem pedir para usar, não usa
+  assert.equal(order('forno-da-vila', { ...base, items: [{ productId: p.id, qty: 1 }] }).total, p.price);
+  assert.equal(sql(`select count(*) from cashback_ledger`, U.staff), '0');
+  sql(`update tenants set cashback_percent = 0 where id = '${pizzaId}'`);
+});
+
+test('pedido mínimo por bairro', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const z = json(`(select to_jsonb(z) from zones z where tenant_id = '${pizzaId}' order by id limit 1)`);
+  sql(`update zones set min_order = ${p.price * 3} where id = ${z.id}`, U.pizza);
+  const base = { customer: { name: 'Min', phone: '11944440000' }, fulfillment: 'delivery', zoneId: z.id, address: 'Rua C, 3', payment: 'Dinheiro', items: [{ productId: p.id, qty: 1 }] };
+  assert.throws(() => order('forno-da-vila', base), new RegExp(`O pedido mínimo para ${z.name} é R\\$`));
+  assert.ok(order('forno-da-vila', { ...base, items: [{ productId: p.id, qty: 3 }] }).code);
+  assert.ok(order('forno-da-vila', { ...base, fulfillment: 'pickup' }).code, 'retirada não tem mínimo do bairro');
+  sql(`update zones set min_order = 0 where id = ${z.id}`, U.pizza);
+});
+
+test('registro de atividades: o dono vê quem mudou preço, cancelou e mexeu no caixa; equipe não vê', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  sql(`delete from activity_log where tenant_id = '${pizzaId}'`);
+  sql(`select set_product_availability(${p.id}, false)`, U.staff);
+  sql(`select set_product_availability(${p.id}, true)`, U.staff);
+  const r = order('forno-da-vila', { customer: { name: 'Log', phone: '11944441111' }, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 1 }] });
+  sql(`select change_order_status((select id from orders where public_code = '${r.code}'), 'cancelado')`, U.staff);
+  sql(`delete from cash_sessions where tenant_id = '${pizzaId}'`);
+  sql(`select cash_open('${pizzaId}', 5000)`, U.staff);
+  sql(`select cash_move('${pizzaId}', 'sangria', 1000, 'banco')`, U.staff);
+  sql(`update orders set status = 'entregue' where public_code = '${r.code}'`);   // sistema (sem usuário): não registra
+  const log = json(`(select jsonb_agg(jsonb_build_object('a', action, 'e', email, 'd', detail) order by id) from activity_log where tenant_id = '${pizzaId}')`, U.pizza);
+  assert.deepEqual(log.map(x => x.a), ['Produto esgotado', 'Produto disponível', 'Pedido cancelado', 'Caixa aberto', 'Sangria']);
+  assert.ok(log.every(x => x.e === 'atendente@pizza.test'));
+  assert.match(log[2].d, /^#\d+ · Log · R\$ /);
+  assert.equal(sql(`select count(*) from activity_log`, U.staff), '0');
 });

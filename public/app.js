@@ -297,6 +297,20 @@ async function printTableQrs(base, count, storeName) {
   window.print();
 }
 
+// Cardápio impresso (A4) com QR Code para a loja online
+async function printMenu(S, prods) {
+  const link = storeLink(S), cats = [...new Set(prods.filter(p => p.available).map(p => p.category))];
+  const from = p => { const min = (p.groups || []).filter(g => g.min_sel > 0).reduce((a, g) => a + Math.min(...g.options.map(o => o.price)), 0); return p.price + min; };
+  const hasVar = p => (p.groups || []).some(g => g.min_sel > 0 && new Set(g.options.map(o => o.price)).size > 1);
+  $('#print').innerHTML = `<div class="menusheet"><header><div><h1>${esc(S.name)}</h1><div>${[S.phone, S.address].filter(Boolean).map(esc).join(' · ')}</div>
+      ${S.description ? `<div style="margin-top:2mm">${esc(S.description)}</div>` : ''}</div>
+      <div style="text-align:center"><img src="https://api.qrserver.com/v1/create-qr-code/?size=360x360&margin=4&data=${encodeURIComponent(link)}" alt="QR Code da loja"><div><b>Peça pelo celular</b></div></div></header>
+    <div class="cols">${cats.map(c => `<section><h2>${esc(c)}</h2>${prods.filter(p => p.category === c && p.available).map(p => `<div class="it"><span><b>${esc(p.name)}</b>${p.description ? `<small>${esc(p.description)}</small>` : ''}</span><b>${hasVar(p) ? 'a partir de ' : ''}${brl(from(p))}</b></div>`).join('')}</section>`).join('')}</div>
+    <footer>${esc(link.replace(/^https?:\/\//, ''))} · preços sujeitos a alteração</footer></div>`;
+  await Promise.all([...$('#print').querySelectorAll('img')].map(img => img.complete ? 0 : new Promise(ok => { img.onload = img.onerror = ok; })));
+  window.print();
+}
+
 // Estações (cozinha, bar…): cada categoria vai para uma estação; sem estação definida = Cozinha.
 const stationList = S => [...new Set(['Cozinha', ...Object.values(S.stations || {})])];
 const catMapCache = {};
@@ -507,7 +521,7 @@ const bySort = (a, b) => a.sort - b.sort || a.id - b.id;
 const sortMenu = prods => prods.sort(bySort).map(p => ({ ...p,
   groups: (p.option_groups || []).sort(bySort).map(g => ({ ...g, options: (g.options || []).sort(bySort) })) }));
 // Colunas públicas da loja (os dados internos de cobrança não são lidos pelo site).
-const TENANT_BASE = 'id, slug, name, segment, color, plan, min_order, is_open, allow_pickup, eta_text, phone, timezone, active, created_at, hours, auto_hours, pix_online, billing_status, trial_ends_at, paid_until, delivery_mode, lat, lng, distance_tiers, loyalty_enabled, loyalty_every, loyalty_percent, allow_tables, tables_count, allow_scheduling, schedule_days, schedule_lead_minutes, schedule_slot_minutes, description, address, instagram, banner_path, free_delivery_above, card_online, custom_domain, service_percent, category_hours, paused_until, delivery_paused_until, closed_dates, stations';
+const TENANT_BASE = 'id, slug, name, segment, color, plan, min_order, is_open, allow_pickup, eta_text, phone, timezone, active, created_at, hours, auto_hours, pix_online, billing_status, trial_ends_at, paid_until, delivery_mode, lat, lng, distance_tiers, loyalty_enabled, loyalty_every, loyalty_percent, allow_tables, tables_count, allow_scheduling, schedule_days, schedule_lead_minutes, schedule_slot_minutes, description, address, instagram, banner_path, free_delivery_above, card_online, custom_domain, service_percent, category_hours, paused_until, delivery_paused_until, closed_dates, stations, cashback_percent, cashback_days';
 let TENANT_COLS = TENANT_BASE;
 // Banco sem alguma migração nova: tira da lista a coluna que ainda não existe e tenta de novo.
 async function tenantsQuery(build) {
@@ -671,11 +685,13 @@ async function vShop(slug) {
       <label>Rua<input id="kRua" required minlength="3" autocomplete="address-line1" value="${esc(last.rua || '')}" placeholder="Rua, avenida…"></label>
       <label>Complemento / referência<input id="kComp" value="${esc(last.comp || '')}" placeholder="Apto, bloco, ponto de referência"></label>
       <p class="mut" id="kZone" style="margin:0">${DIST ? (geo?.quote ? zoneTxt() : 'Taxa de entrega: preencha o CEP e o número para calcular.') : `Bairro de entrega: <b>${esc(t.zone.name)}</b> · taxa ${t.fee ? brl(t.fee) : 'grátis'}`}</p>`}
+      ${S.cashback_percent ? `<p class="mut" style="margin:0">Cashback: <b>${S.cashback_percent}% de volta</b> em cada pedido entregue, para usar no próximo (vale ${S.cashback_days} dias).</p>` : ''}
       ${S.loyalty_enabled ? `<p class="mut" style="margin:0">Fidelidade: a cada ${S.loyalty_every} pedidos entregues, ${S.loyalty_percent}% de desconto no próximo, aplicado automaticamente.</p>` : ''}
       ${SLOTS.length ? `<label>Quando?<select id="kWhen">${SCHED_ONLY ? '' : `<option value="">O quanto antes (${esc(S.eta_text)})</option>`}${SLOTS.map(d => `<optgroup label="${esc(d.day)}">${d.slots.map(x => `<option value="${x.iso}">${esc(d.day)} às ${x.label}</option>`).join('')}</optgroup>`).join('')}</select></label>` : ''}
       <label>Pagamento<select id="kPay">${TABLE ? '<option value="Pagar no caixa" selected>Pagar no caixa / na mesa</option>' : ''}${S.pix_online ? `<option value="Pix online" ${TABLE ? '' : 'selected'}>Pix agora (QR Code, confirmação automática)</option>` : ''}${S.card_online && !TABLE ? `<option value="Cartão online" ${S.pix_online ? '' : 'selected'}>Cartão de crédito agora (pagamento online)</option>` : ''}${TABLE ? '' : '<option value="Pix">Pix na entrega</option><option>Cartão na entrega</option><option>Dinheiro</option>'}</select></label>
       <label id="kEm" ${S.pix_online ? '' : 'hidden'}>E-mail (para o comprovante do Pix)<input id="kEmail" type="email" autocomplete="email" value="${esc(last.email || '')}" placeholder="voce@email.com"></label>
       <label id="kTr" hidden>Troco para (R$)<input id="kT" inputmode="decimal" placeholder="Ex.: 100"></label>
+      ${S.cashback_percent && !TABLE ? `<label class="chk"><input type="checkbox" id="kCb" checked> Usar meu saldo de cashback, se eu tiver <span class="mut">(o desconto aparece no pedido)</span></label>` : ''}
       <div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>
       <p class="mut" style="margin:0;font-size:13px">Seus dados são usados só para preparar e entregar este pedido. <a href="/privacidade" target="_blank">Política de Privacidade</a>.</p>
       <div class="row" style="justify-content:flex-end"><button type="button" class="ghost" id="kX">Voltar</button><button class="pri" id="kGo">Enviar pedido</button></div></form>`);
@@ -728,6 +744,7 @@ async function vShop(slug) {
           ...(DIST && !t.pickup ? { lat: geo.lat, lng: geo.lng } : {}),
           ...($('#kWhen')?.value ? { scheduledFor: $('#kWhen').value } : {}),
           ...(TABLE && S.service_percent ? { service } : {}),
+          ...($('#kCb')?.checked ? { useCashback: true } : {}),
           changeFor: $('#kT').value ? toCents($('#kT').value) : undefined, coupon: coupon?.code,
           items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: c.notes })) } });
         local.set('customer', { ...last, ...customer, ...(email ? { email } : {}), ...(t.pickup || TABLE ? {} : { cep: $('#kCep').value, rua: $('#kRua').value, num: $('#kNum').value, comp: $('#kComp').value }) });
@@ -799,8 +816,13 @@ async function vTrack(code) {
       <tr><td>${o.fulfillment === 'pickup' ? 'Retirada na loja' : o.fulfillment === 'table' ? esc(o.zone) : `Entrega (${esc(o.zone)})`}</td><td class="n price">${brl(o.fee)}</td></tr>
       ${o.serviceFee ? `<tr><td>Taxa de serviço</td><td class="n price">${brl(o.serviceFee)}</td></tr>` : ''}
       ${o.discount ? `<tr><td>Desconto ${o.loyaltyDiscount ? 'de fidelidade' : esc(o.coupon || '')}</td><td class="n price">−${brl(o.discount)}</td></tr>` : ''}
+      ${o.cashbackUsed ? `<tr><td>Cashback usado</td><td class="n price">−${brl(o.cashbackUsed)}</td></tr>` : ''}
       ${o.promoDiscount ? `<tr><td>Promoção (${esc(o.promoNames || '')})</td><td class="n price">−${brl(o.promoDiscount)}</td></tr>` : ''}
       <tr><td><b>Total · ${esc(o.payment)}</b></td><td class="n price"><b>${brl(o.total)}</b></td></tr></tbody></table>
+      ${o.cashback && (o.cashback.willEarn || o.cashback.earned || o.cashback.balance) ? `<div class="loyal"><b>Cashback</b>
+        ${o.cashback.willEarn ? `<span>Você vai ganhar <b>${brl(o.cashback.willEarn)}</b> quando o pedido for entregue.</span>` : ''}
+        ${o.cashback.earned > 0 ? `<span class="badge b-g">Você ganhou ${brl(o.cashback.earned)} neste pedido!</span>` : ''}
+        <span class="mut">Seu saldo nesta loja: <b>${brl(o.cashback.balance)}</b>${o.cashback.balance ? `, para usar em até ${o.cashback.days} dias` : ''}.</span></div>` : ''}
       ${o.loyalty ? `<div class="loyal"><b>Cartão fidelidade</b>${o.loyaltyDiscount ? `<span class="badge b-g">Você ganhou ${o.loyalty.percent}% neste pedido!</span>` : ''}
         <div class="stamps">${Array.from({ length: o.loyalty.every }, (_, i) => `<i class="${i < Math.min(o.loyalty.stamps, o.loyalty.every) ? 'on' : ''}"></i>`).join('')}</div>
         <span class="mut">${o.loyalty.stamps >= o.loyalty.every ? `Seu próximo pedido tem ${o.loyalty.percent}% de desconto.` : `${o.loyalty.stamps} de ${o.loyalty.every} pedidos entregues. Faltam ${o.loyalty.every - o.loyalty.stamps} para ganhar ${o.loyalty.percent}% de desconto.`}</span></div>` : ''}
@@ -1138,7 +1160,7 @@ async function pMenu(S, owner) {
   const load = async () => { prods = sortMenu(await q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id))); draw(); };
   const draw = () => {
     const cats = [...new Set(prods.map(p => p.category))];
-    app.innerHTML = `<div class="row between"><div><h2>Cardápio</h2><p class="lead">${owner ? 'Crie produtos com grupos de opções: tamanhos, sabores, adicionais, combos.' : 'Marque itens esgotados ou ajuste o estoque.'} Estoque em branco = sem controle; com número, baixa a cada pedido e volta se o pedido for cancelado.</p></div>${owner ? '<span class="row"><button class="ghost" id="menuCsv">Baixar planilha</button><label class="btn ghost" style="cursor:pointer">Importar planilha<input type="file" id="menuImp" accept=".csv,text/csv" hidden></label><button class="pri" id="newP">Novo produto</button></span>' : ''}</div>
+    app.innerHTML = `<div class="row between"><div><h2>Cardápio</h2><p class="lead">${owner ? 'Crie produtos com grupos de opções: tamanhos, sabores, adicionais, combos.' : 'Marque itens esgotados ou ajuste o estoque.'} Estoque em branco = sem controle; com número, baixa a cada pedido e volta se o pedido for cancelado.</p></div>${owner ? '<span class="row"><button class="ghost" id="menuPrint">Imprimir cardápio</button><button class="ghost" id="menuCsv">Baixar planilha</button><label class="btn ghost" style="cursor:pointer">Importar planilha<input type="file" id="menuImp" accept=".csv,text/csv" hidden></label><button class="pri" id="newP">Novo produto</button></span>' : ''}</div>
     ${cats.map(c => `<div class="panel" style="margin-bottom:16px"><div class="row between"><h3>${esc(c)}${(S.category_hours || {})[c] ? ` <span class="badge b-a">${esc(catHoursText(S, c))}</span>` : ''}</h3><span class="row">${owner && 'stations' in S ? `<label class="chk" style="gap:6px;margin:0">Estação <select data-station="${esc(c)}" style="width:auto;min-height:34px;padding:2px 8px">${[...new Set([...stationList(S), 'Bar'])].map(n => `<option ${((S.stations || {})[c] || 'Cozinha') === n ? 'selected' : ''}>${esc(n)}</option>`).join('')}<option value="__new">Outra…</option></select></label>` : ''}${owner && 'category_hours' in S ? `<button class="ghost sm" data-chours="${esc(c)}">Horário da categoria</button>` : ''}</span></div><div class="scroll"><table class="stack"><thead><tr><th>Produto</th><th>Opções</th><th class="n">Preço</th><th>Estoque</th><th>Disponível</th><th></th></tr></thead><tbody>
       ${prods.filter(p => p.category === c).map(p => `<tr><td data-l="Produto"><span class="row" style="flex-wrap:nowrap"><span class="thumb">${picture(p, S.color)}</span><span><b>${esc(p.name)}</b><br><span class="mut">${esc(p.description)}</span></span></span></td>
         <td data-l="Opções"><span class="mut">${p.groups.map(g => `${esc(g.name)} (${g.options.length})`).join(', ') || '—'}</span></td><td data-l="Preço" class="n price">${brl(p.price)}</td>
@@ -1246,6 +1268,7 @@ async function pMenu(S, owner) {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.chours) return hoursEditor(b.dataset.chours);
     if (b.id === 'menuCsv') return exportMenu();
+    if (b.id === 'menuPrint') { toast('Preparando o cardápio…'); return printMenu(S, prods); }
     if (b.id === 'newP') editor(null);
     if (b.dataset.ed) editor(prods.find(p => p.id === +b.dataset.ed));
     if (b.dataset.av) { const p = prods.find(x => x.id === +b.dataset.av); await rpc('set_product_availability', { p_product: p.id, p_available: !p.available }); await load(); }
@@ -1767,6 +1790,20 @@ async function pReports(S) {
   // Financeiro do mês: faturamento − custo dos insumos vendidos − despesas = resultado
   let month = new Date().toLocaleDateString('en-CA', { timeZone: S.timezone || 'America/Sao_Paulo' }).slice(0, 7);
   const CATS = ['Aluguel', 'Salários', 'Energia', 'Água', 'Gás', 'Embalagens', 'Ingredientes avulsos', 'Marketing', 'Taxas e impostos', 'Aplicativos', 'Manutenção', 'Outros'];
+  // Atividades da equipe: quem mudou preço, cancelou pedido, mexeu no caixa, criou cupom…
+  let actFilter = '';
+  const drawActs = async () => {
+    const box = $('#acts'); if (!box) return;
+    const list = await q(sb.from('activity_log').select('at, email, action, detail').eq('tenant_id', S.id).order('at', { ascending: false }).limit(200)).catch(() => null);
+    if (!list) { box.innerHTML = ''; return; }
+    const acts = [...new Set(list.map(x => x.action))].sort(), shown = actFilter ? list.filter(x => x.action === actFilter) : list;
+    const wasOpen = box.querySelector('details')?.open;
+    box.innerHTML = `<details class="panel" style="margin-bottom:16px" ${wasOpen ? 'open' : ''}><summary><b>Atividades da equipe</b> <span class="mut">· ${list.length ? `última: ${esc(list[0].action.toLowerCase())} por ${esc(list[0].email || '?')} às ${hhmm(list[0].at)}` : 'nenhuma ainda'}</span></summary>
+      ${list.length ? `<div class="row" style="margin:10px 0"><select id="actF" style="width:auto"><option value="">Todas as ações</option>${acts.map(a => `<option ${a === actFilter ? 'selected' : ''}>${esc(a)}</option>`).join('')}</select></div>
+      <div class="scroll"><table class="stack"><thead><tr><th>Quando</th><th>Quem</th><th>O quê</th><th>Detalhe</th></tr></thead><tbody>
+      ${shown.map(x => `<tr><td data-l="Quando">${new Date(x.at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</td><td data-l="Quem">${esc(x.email || '?')}</td><td data-l="O quê"><b>${esc(x.action)}</b></td><td data-l="Detalhe">${esc(x.detail || '')}</td></tr>`).join('')}</tbody></table></div>
+      <p class="mut" style="margin:6px 0 0">Registra preços, produtos esgotados, cancelamentos, caixa, cupons, equipe, bloqueios e despesas. Guardado por 180 dias.</p>` : '<p class="mut">As ações da equipe aparecem aqui conforme forem acontecendo.</p>'}</details>`;
+  };
   const drawFin = async () => {
     const box = $('#fin'); if (!box) return;
     let f, ex;
@@ -1789,7 +1826,7 @@ async function pReports(S) {
     const bars = (rows, label, val, fmt, color) => { const m = Math.max(1, ...rows.map(val)); return rows.map(x => `<div class="bar"><span>${esc(label(x))}</span><i style="width:${val(x) / m * 100}%;${color ? `background:${color}` : ''}"></i><span class="price">${fmt(x)}</span></div>`).join('') || '<p class="empty">Sem dados no período</p>'; };
     app.innerHTML = `<div class="row between"><div><h2>Relatórios</h2><p class="lead">Pedidos não cancelados no período escolhido.</p></div>
       <span class="row">${[1, 7, 30, 90].map(d => `<button class="sm ${d === days ? 'pri' : 'ghost'}" data-days="${d}">${d === 1 ? 'Hoje' : d + ' dias'}</button>`).join('')}<button class="ghost sm" id="ordersCsv">Baixar pedidos (CSV)</button></span></div>
-    <div id="fin"></div>
+    <div id="fin"></div><div id="acts"></div>
     <div class="kpis"><div class="kpi"><span class="mut">Faturamento</span><b class="price">${brl(r.revenue)}</b></div><div class="kpi"><span class="mut">Pedidos</span><b>${r.orders}</b><span class="mut">${r.cancelled} cancelado(s)</span></div>
       <div class="kpi"><span class="mut">Ticket médio</span><b class="price">${brl(r.avgTicket)}</b></div><div class="kpi"><span class="mut">Tempo médio até entregar</span><b>${r.avgDeliveryMin ?? '—'}${r.avgDeliveryMin != null ? ' min' : ''}</b></div></div>
     <div class="two"><div class="panel"><h3>Faturamento por dia</h3><div class="bars">${bars(r.byDay, x => x.d.split('-').reverse().slice(0, 2).join('/'), x => x.revenue, x => brl(x.revenue))}</div></div>
@@ -1802,7 +1839,7 @@ async function pReports(S) {
         ${x.comment ? `<p style="margin:0">${esc(x.comment)}</p>` : ''}
         <form class="row" data-reply="${x.order_id}" style="flex-wrap:nowrap"><input name="reply" maxlength="500" placeholder="Responder publicamente" value="${esc(x.reply || '')}"><button class="ghost sm">${x.reply ? 'Atualizar' : 'Responder'}</button></form>
         <span class="mut" style="font-size:13px">${new Date(x.created_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</span></div>`).join('') || '<p class="mut" style="margin:0">Nenhuma avaliação ainda. Depois da entrega, o cliente pode avaliar pela página do pedido.</p>'}</div>`;
-    drawFin().catch(() => {});
+    drawFin().catch(() => {}); drawActs().catch(() => {});
   };
   app.onclick = attempt(async e => {
     const xd = e.target.closest('button[data-expdel]');
@@ -1825,7 +1862,10 @@ async function pReports(S) {
     const b = e.target.closest('button[data-days]'); if (b) { days = +b.dataset.days; await draw(); }
   });
   app.onsubmit = attempt(async e => { const f = e.target.closest('form[data-reply]'); if (!f) return; e.preventDefault(); await rpc('reply_review', { p_order: +f.dataset.reply, p_reply: f.reply.value }); toast('Resposta salva'); await draw(); });
-  app.onchange = e => { if (e.target.id === 'finM' && e.target.value) { month = e.target.value; drawFin().catch(() => {}); } };
+  app.onchange = e => {
+    if (e.target.id === 'finM' && e.target.value) { month = e.target.value; drawFin().catch(() => {}); }
+    if (e.target.id === 'actF') { actFilter = e.target.value; drawActs().catch(() => {}); }
+  };
   cleanup = () => { app.onclick = app.onsubmit = app.onchange = null; };
   await draw();
 }
@@ -1912,8 +1952,12 @@ async function pConfig(S) {
       <label class="chk"><input type="checkbox" id="lOn" ${st.loyalty_enabled ? 'checked' : ''}> Dar desconto para clientes fiéis</label>
       <div class="two" style="gap:10px"><label>A cada (pedidos entregues)<input id="lEvery" type="number" min="2" max="50" value="${st.loyalty_every ?? 10}"></label><label>Desconto no pedido seguinte (%)<input id="lPct" type="number" min="1" max="50" value="${st.loyalty_percent ?? 10}"></label></div>
       <p class="mut" style="margin:0">O cliente é reconhecido pelo telefone. O desconto entra sozinho no pedido seguinte e não soma com cupom (vale o maior). Ele acompanha os selos na página do pedido.</p>
+      ${'cashback_percent' in st ? `<h3>Cashback</h3>
+      <div class="two" style="gap:10px"><label>% de volta em cada pedido entregue (0 = desligado)<input id="cbPct" type="number" min="0" max="30" value="${st.cashback_percent || 0}"></label>
+        <label>O saldo vale por (dias)<input id="cbDays" type="number" min="7" max="365" value="${st.cashback_days || 90}"></label></div>
+      <p class="mut" style="margin:0">O cliente acumula saldo pelo telefone e escolhe usar no pedido seguinte. Cancelamento estorna. Pode somar com a fidelidade.</p>` : ''}
       <button class="pri">Salvar entrega e fidelidade</button></form>
-    <div class="panel"><h3>Bairros e taxas</h3><table><tbody>${zones.map(z => `<tr><td>${esc(z.name)}</td><td class="n" style="width:120px"><input inputmode="decimal" value="${fromCents(z.fee)}" data-zone="${z.id}" aria-label="Taxa ${esc(z.name)}"></td><td class="n"><button class="ghost sm" data-del="zones:${z.id}" aria-label="Remover">×</button></td></tr>`).join('')}</tbody></table>
+    <div class="panel"><h3>Bairros e taxas</h3>${zones.some(z => 'min_order' in z) ? '<p class="mut" style="margin:0 0 6px">Taxa de entrega e, se quiser, um pedido mínimo próprio para bairros mais longe.</p>' : ''}<table><tbody>${zones.map(z => `<tr><td>${esc(z.name)}</td><td class="n" style="width:120px"><input inputmode="decimal" value="${fromCents(z.fee)}" data-zone="${z.id}" aria-label="Taxa ${esc(z.name)}" title="Taxa de entrega"></td>${'min_order' in z ? `<td class="n" style="width:130px"><input inputmode="decimal" value="${z.min_order ? fromCents(z.min_order) : ''}" placeholder="mín. (opcional)" data-zmin="${z.id}" aria-label="Pedido mínimo ${esc(z.name)}" title="Pedido mínimo para este bairro"></td>` : ''}<td class="n"><button class="ghost sm" data-del="zones:${z.id}" aria-label="Remover">×</button></td></tr>`).join('')}</tbody></table>
       <form id="fZone" class="row" style="flex-wrap:nowrap"><input id="zN" placeholder="Bairro" required maxlength="60"><input id="zF" inputmode="decimal" placeholder="Taxa" style="width:100px" required><button class="ghost">Adicionar</button></form></div>
     <div class="panel"><h3>Cupons</h3><table><tbody>${coupons.map(c => `<tr><td><b>${esc(c.code)}</b><br><span class="mut">${[c.percent ? c.percent + '% de desconto' : '', c.free_shipping ? 'frete grátis' : '',
         c.min_subtotal ? `a partir de ${brl(c.min_subtotal)}` : '', c.first_order_only ? 'só 1ª compra' : '', c.max_per_customer ? `${c.max_per_customer}x por cliente` : '',
@@ -2021,6 +2065,8 @@ async function pConfig(S) {
       if (st0?.banner_path) sb.storage.from(BUCKET).remove([st0.banner_path]).catch(() => {});
       toast('Banner atualizado'); return draw();
     }
+    if (e.target.dataset.zmin) { const v = e.target.value.trim() ? toCents(e.target.value) : 0; if (!Number.isInteger(v) || v < 0) throw new Error('Mínimo inválido');
+      await q(sb.from('zones').update({ min_order: v }).eq('id', +e.target.dataset.zmin)); return toast(v ? 'Pedido mínimo do bairro salvo' : 'Bairro sem mínimo próprio'); }
     if (!e.target.dataset.zone) return;
     const fee = toCents(e.target.value); if (!Number.isInteger(fee) || fee < 0) throw new Error('Taxa inválida');
     await q(sb.from('zones').update({ fee }).eq('id', +e.target.dataset.zone)); toast('Taxa atualizada');
@@ -2093,7 +2139,8 @@ async function pConfig(S) {
       await q(sb.from('tenants').update({ delivery_mode: mode, lat: m ? +m[1] : null, lng: m ? +m[2] : null, distance_tiers: tiers,
         free_delivery_above: above, loyalty_enabled: $('#lOn').checked, loyalty_every: every, loyalty_percent: pct,
         allow_tables: $('#mOn').checked, tables_count: Math.max(1, Math.min(200, +$('#mCount').value || 10)),
-        ...($('#mSvc') ? { service_percent: Math.max(0, Math.min(20, Math.round(+$('#mSvc').value || 0))) } : {}) }).eq('id', S.id));
+        ...($('#mSvc') ? { service_percent: Math.max(0, Math.min(20, Math.round(+$('#mSvc').value || 0))) } : {}),
+        ...($('#cbPct') ? { cashback_percent: Math.max(0, Math.min(30, Math.round(+$('#cbPct').value || 0))), cashback_days: Math.max(7, Math.min(365, Math.round(+$('#cbDays').value || 90))) } : {}) }).eq('id', S.id));
       await refreshBrand();
     }
     if (id === 'fDom') { const d = await rpc('set_custom_domain', { p_tenant: S.id, p_domain: $('#dDom').value }); toast(d ? `Domínio salvo: ${d}. Agora avise o suporte para ativar.` : 'Domínio removido'); await draw(); return; }
@@ -2140,7 +2187,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql',
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
-  '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql'];
+  '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };

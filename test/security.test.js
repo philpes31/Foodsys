@@ -47,7 +47,7 @@ before(() => {
 const simpleProduct = id => json(`(select to_jsonb(p) from products p where tenant_id = '${id}' and not exists (select 1 from option_groups g where g.product_id = p.id) order by id limit 1)`);
 
 test('visitante não lê dados privados (pedidos, clientes, cupons, tokens, equipe)', () => {
-  for (const t of ['orders', 'order_items', 'order_events', 'order_reviews', 'coupons', 'couriers', 'memberships', 'platform_admins', 'cash_sessions', 'cash_moves', 'blocked_phones', 'ingredients', 'product_ingredients', 'ingredient_moves', 'expenses', 'rate_hits', 'option_ingredients'])
+  for (const t of ['orders', 'order_items', 'order_events', 'order_reviews', 'coupons', 'couriers', 'memberships', 'platform_admins', 'cash_sessions', 'cash_moves', 'blocked_phones', 'ingredients', 'product_ingredients', 'ingredient_moves', 'expenses', 'rate_hits', 'option_ingredients', 'cashback_ledger', 'activity_log'])
     nothing(`select count(*) from ${t}`, null);
   denied(`select * from tenant_pix`, null);
 });

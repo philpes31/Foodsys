@@ -219,3 +219,14 @@ body.kds-on main{max-width:none;padding:0}
 .steps2{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:6px 18px}
 .steps2 li.done{color:var(--mut);text-decoration:line-through}
 .steps2 a{color:inherit}
+@media print{
+  .menusheet{page:qr;font:12px Inter,sans-serif;color:#000}
+  .menusheet header{display:flex;justify-content:space-between;align-items:center;gap:8mm;border-bottom:2px solid #000;padding-bottom:4mm;margin-bottom:5mm}
+  .menusheet h1{font-size:30px;margin:0}.menusheet header img{width:32mm;height:32mm}
+  .menusheet .cols{columns:2;column-gap:10mm}
+  .menusheet section{break-inside:avoid;margin-bottom:5mm}
+  .menusheet h2{font-size:16px;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid #000;margin:0 0 2mm}
+  .menusheet .it{display:flex;justify-content:space-between;gap:4mm;padding:1.2mm 0;break-inside:avoid}
+  .menusheet .it small{display:block;color:#444}.menusheet .it b:last-child{white-space:nowrap}
+  .menusheet footer{margin-top:4mm;border-top:1px solid #000;padding-top:2mm;text-align:center}
+}
