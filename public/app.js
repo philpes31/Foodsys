@@ -66,6 +66,13 @@ const setColor = c => { document.documentElement.style.setProperty('--red', c ||
 
 /* ---------- app instalável (PWA) ---------- */
 // Na página de uma loja, o app instalado abre direto nela, com o nome e a cor da loja.
+// Cabeçalho: nome e, se a loja tiver, o logotipo no lugar do ícone padrão
+function brand(name, logo) {
+  $('#bName').textContent = name;
+  const img = $('#bLogo'), ic = $('#bIcon'); if (!img) return;
+  if (logo) { if (img.getAttribute('src') !== imgUrl(logo)) img.src = imgUrl(logo); img.alt = `Logotipo de ${name}`; img.hidden = false; ic.style.display = 'none'; }
+  else { img.hidden = true; img.removeAttribute('src'); ic.style.display = ''; }
+}
 function setManifest(store) {
   const link = $('#manifest'); if (!link) return;
   if (!store) { link.href = '/manifest.webmanifest'; return; }
@@ -105,13 +112,13 @@ const BUCKET = 'product-images';
 const imgUrl = path => path ? `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${path}` : '';
 const picture = (p, color) => p.image_path ? `<img src="${esc(imgUrl(p.image_path))}" alt="${esc(p.name)}" loading="lazy">` : art(p.icon, color);
 // Reduz a foto no navegador (máx. 900 px, JPEG) antes de enviar: carrega rápido no celular do cliente.
-async function shrinkImage(file, max = 900) {
+async function shrinkImage(file, max = 900, type = 'image/jpeg') {
   if (!/^image\//.test(file.type)) throw new Error('Escolha um arquivo de imagem');
   const bmp = await createImageBitmap(file);
   const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
   const c = document.createElement('canvas'); c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
   c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
-  return await new Promise((ok, no) => c.toBlob(b => b ? ok(b) : no(new Error('Não foi possível ler a imagem')), 'image/jpeg', .82));
+  return await new Promise((ok, no) => c.toBlob(b => b ? ok(b) : no(new Error('Não foi possível ler a imagem')), type, .82));
 }
 
 /* ---------- horário de funcionamento ---------- */
@@ -302,7 +309,7 @@ async function printMenu(S, prods) {
   const link = storeLink(S), cats = [...new Set(prods.filter(p => p.available).map(p => p.category))];
   const from = p => { const min = (p.groups || []).filter(g => g.min_sel > 0).reduce((a, g) => a + Math.min(...g.options.map(o => o.price)), 0); return p.price + min; };
   const hasVar = p => (p.groups || []).some(g => g.min_sel > 0 && new Set(g.options.map(o => o.price)).size > 1);
-  $('#print').innerHTML = `<div class="menusheet"><header><div><h1>${esc(S.name)}</h1><div>${[S.phone, S.address].filter(Boolean).map(esc).join(' · ')}</div>
+  $('#print').innerHTML = `<div class="menusheet"><header><div>${S.logo_path ? `<img class="mlogo" src="${esc(imgUrl(S.logo_path))}" alt="">` : ''}<h1>${esc(S.name)}</h1><div>${[S.phone, S.address].filter(Boolean).map(esc).join(' · ')}</div>
       ${S.description ? `<div style="margin-top:2mm">${esc(S.description)}</div>` : ''}</div>
       <div style="text-align:center"><img src="https://api.qrserver.com/v1/create-qr-code/?size=360x360&margin=4&data=${encodeURIComponent(link)}" alt="QR Code da loja"><div><b>Peça pelo celular</b></div></div></header>
     <div class="cols">${cats.map(c => `<section><h2>${esc(c)}</h2>${prods.filter(p => p.category === c && p.available).map(p => `<div class="it"><span><b>${esc(p.name)}</b>${p.description ? `<small>${esc(p.description)}</small>` : ''}</span><b>${hasVar(p) ? 'a partir de ' : ''}${brl(from(p))}</b></div>`).join('')}</section>`).join('')}</div>
@@ -408,7 +415,7 @@ function vSetup() {
 
 /* ---------- termos e privacidade ---------- */
 function vLegal(which) {
-  setColor('#d62828'); $('#bName').textContent = PLATFORM.name; header('', false);
+  setColor('#d62828'); brand(PLATFORM.name); header('', false);
   const missing = !PLATFORM.company || !PLATFORM.cnpj || !PLATFORM.email || !PLATFORM.city;
   app.innerHTML = `<article class="panel legal">${missing ? '<p class="banner warn" style="margin:0">Modelo: preencha os dados da empresa em <code>public/config.js</code> (PLATFORM) e revise o texto com um advogado.</p>' : ''}
     ${which === 'termos' ? termsHtml(PLATFORM) : privacyHtml(PLATFORM)}</article>`;
@@ -421,7 +428,7 @@ async function vCourier(token) {
     const r = await rpc('courier_portal', { p_token: token });
     if (!r) { app.innerHTML = '<div class="panel auth"><h2>Link inválido</h2><p>Peça um link novo para a loja.</p></div>'; header('', false); return false; }
     const sig = JSON.stringify(r); if (!force && sig === lastSig) return true; lastSig = sig;
-    setColor(r.store.color); $('#bName').textContent = r.store.name; header('', false);
+    setColor(r.store.color); brand(r.store.name); header('', false);
     app.innerHTML = `<div class="courier"><h2>Olá, ${esc(r.courier.name.split(' ')[0])}!</h2>
       <p class="lead">Hoje: <b>${r.today.deliveries}</b> entrega(s) · ${brl(r.today.fees)} em taxas. Esta página atualiza sozinha.</p>
       ${r.deliveries.map(d => `<div class="panel dl">
@@ -449,7 +456,7 @@ async function vCourier(token) {
 
 /* ---------- início ---------- */
 function vHome() {
-  setColor('#d62828'); $('#bName').textContent = 'Balcão'; header();
+  setColor('#d62828'); brand('Balcão'); header();
   const dest = ME?.tenant ? '/painel' : ME?.isAdmin ? '/plataforma' : ME ? '/comecar' : '/entrar/cadastro';
   app.innerHTML = `<section class="hero"><div class="grid"><h1>Delivery próprio para qualquer negócio</h1>
     <p>Loja online com a sua marca, fila de preparo em tempo real, despacho de entregadores e relatórios — para pizzaria, hamburgueria, açaí, mercado, farmácia e o que mais vender por entrega.</p>
@@ -469,7 +476,7 @@ async function vCallBoard(slug) {
     const ids = new Set(ready.map(x => x.n)), fresh = known ? ready.filter(x => !known.has(x.n)) : [];
     if (fresh.length) { last = fresh[0].n; try { beep(); setTimeout(beep, 400); } catch {} }
     known = ids;
-    app.innerHTML = `<div class="cb"><div class="cbh"><b>${esc(b.store.name)}</b><span>${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span></div>
+    app.innerHTML = `<div class="cb"><div class="cbh"><b class="cbname">${b.store.logo ? `<img src="${esc(imgUrl(b.store.logo))}" alt="">` : ''}${esc(b.store.name)}</b><span>${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span></div>
       <div class="cbcols"><section><h2>Preparando</h2><div class="nums prep">${prep.map(x => `<span>${x.n}</span>`).join('') || '<em>—</em>'}</div></section>
       <section class="ok"><h2>Pronto! Pode retirar</h2><div class="nums">${ready.map(x => `<span class="${x.n === last ? 'new' : ''}">${x.n}</span>`).join('') || '<em>—</em>'}</div></section></div></div>`;
   };
@@ -482,7 +489,7 @@ async function vCallBoard(slug) {
 
 /* ---------- meus pedidos (cliente, sem login) ---------- */
 async function vMyOrders() {
-  setColor('#d62828'); $('#bName').textContent = 'Meus pedidos'; header('', false);
+  setColor('#d62828'); brand('Meus pedidos'); header('', false);
   const list = myOrders();
   const st = await Promise.all(list.slice(0, 10).map(o => rpc('track_order', { p_code: o.code }).then(r => r?.order?.status || null).catch(() => null)));
   app.innerHTML = `<h2>Meus pedidos</h2><p class="lead">Pedidos feitos neste aparelho. Ficam só aqui no seu celular.</p>
@@ -496,7 +503,7 @@ async function vMyOrders() {
 
 /* ---------- entrar / criar conta / recuperar senha ---------- */
 function vAuth(mode = 'login') {
-  setColor('#d62828'); $('#bName').textContent = 'Balcão'; header('', false);
+  setColor('#d62828'); brand('Balcão'); header('', false);
   const T = { login: ['Entrar', 'Acesso para empresas e para a administração da plataforma.', 'Entrar'], cadastro: ['Criar conta', 'Depois de criar a conta você monta sua loja em um minuto.', 'Criar conta'], senha: ['Recuperar senha', 'Enviaremos um link para você criar uma nova senha.', 'Enviar link'], nova: ['Nova senha', 'Digite a nova senha da sua conta.', 'Salvar senha'] }[mode];
   if (!T) return go('/entrar');
   app.innerHTML = `<form class="panel auth" id="fAuth"><h2>${T[0]}</h2><p class="mut">${T[1]}</p>
@@ -521,7 +528,7 @@ function vAuth(mode = 'login') {
 
 /* ---------- criar a loja (depois do cadastro) ---------- */
 async function vStart() {
-  setColor('#d62828'); $('#bName').textContent = 'Balcão'; header();
+  setColor('#d62828'); brand('Balcão'); header();
   const segs = await q(sb.from('segment_templates').select('segment, name, color, icon').order('sort'));
   let seg = segs[0].segment;
   app.innerHTML = `<form class="panel" id="fNew" style="max-width:760px;margin:0 auto"><h2>Crie sua loja</h2>
@@ -545,7 +552,7 @@ const bySort = (a, b) => a.sort - b.sort || a.id - b.id;
 const sortMenu = prods => prods.sort(bySort).map(p => ({ ...p,
   groups: (p.option_groups || []).sort(bySort).map(g => ({ ...g, options: (g.options || []).sort(bySort) })) }));
 // Colunas públicas da loja (os dados internos de cobrança não são lidos pelo site).
-const TENANT_BASE = 'id, slug, name, segment, color, plan, min_order, is_open, allow_pickup, eta_text, phone, timezone, active, created_at, hours, auto_hours, pix_online, billing_status, trial_ends_at, paid_until, delivery_mode, lat, lng, distance_tiers, loyalty_enabled, loyalty_every, loyalty_percent, allow_tables, tables_count, allow_scheduling, schedule_days, schedule_lead_minutes, schedule_slot_minutes, description, address, instagram, banner_path, free_delivery_above, card_online, custom_domain, service_percent, category_hours, paused_until, delivery_paused_until, closed_dates, stations, cashback_percent, cashback_days';
+const TENANT_BASE = 'id, slug, name, segment, color, plan, min_order, is_open, allow_pickup, eta_text, phone, timezone, active, created_at, hours, auto_hours, pix_online, billing_status, trial_ends_at, paid_until, delivery_mode, lat, lng, distance_tiers, loyalty_enabled, loyalty_every, loyalty_percent, allow_tables, tables_count, allow_scheduling, schedule_days, schedule_lead_minutes, schedule_slot_minutes, description, address, instagram, banner_path, free_delivery_above, card_online, custom_domain, service_percent, category_hours, paused_until, delivery_paused_until, closed_dates, stations, cashback_percent, cashback_days, logo_path';
 let TENANT_COLS = TENANT_BASE;
 // Banco sem alguma migração nova: tira da lista a coluna que ainda não existe e tenta de novo.
 async function tenantsQuery(build) {
@@ -615,7 +622,7 @@ async function vShop(slug) {
   const zoneTxt = () => !geo?.quote ? '' : geo.quote.inArea
     ? `Distância aproximada: <b>${kmTxt(geo.quote.km)}</b> · taxa ${geo.quote.fee ? brl(geo.quote.fee) : 'grátis'}`
     : `<span class="badge b-r">Fora da área de entrega: ${kmTxt(geo.quote.km)} (a loja entrega até ${kmTxt(geo.quote.maxKm)})</span>`;
-  setColor(S.color); $('#bName').textContent = S.name; header('', false); document.title = `${S.name} — pedido online`; setManifest(S);
+  setColor(S.color); brand(S.name, S.logo_path); header('', false); document.title = `${S.name} — pedido online`; setManifest(S);
   const cartKey = `cart:${slug}`;
   let cart = local.get(cartKey, []).filter(c => products.some(p => p.id === c.productId)), cat = null, coupon = null;
   // "Mais pedidos": vitrine dos campeões de venda (aparece quando há 3 ou mais)
@@ -825,7 +832,7 @@ async function vTrack(code) {
     if (!force && sig === lastSig) return o.status;
     lastSig = sig;
     if (o.status === 'pagamento') { o.payment === 'Cartão online' ? drawCard(S, o) : drawPix(S, o); return o.status; }
-    setColor(S.color); $('#bName').textContent = S.name; header('', false);
+    setColor(S.color); brand(S.name, S.logo_path); header('', false);
     const flow = o.fulfillment !== 'delivery' ? ['novo', 'preparo', 'pronto', 'entregue'] : ['novo', 'preparo', 'pronto', 'rota', 'entregue'];
     const idx = flow.indexOf(o.status), at = Object.fromEntries(o.events.map(e => [e.status, e.at]));
     app.innerHTML = `<h2>Pedido #${o.number}</h2><p class="lead">Olá, ${esc(o.customerName)}! Esta página atualiza sozinha.</p>
@@ -858,7 +865,7 @@ async function vTrack(code) {
   };
   // Pagamento com cartão: o Mercado Pago cuida dos dados do cartão; aqui só o botão para pagar e a conferência.
   const drawCard = (S, o) => {
-    setColor(S.color); $('#bName').textContent = S.name; header('', false);
+    setColor(S.color); brand(S.name, S.logo_path); header('', false);
     app.innerHTML = `<h2>Pague com cartão</h2><p class="lead">Pedido #${o.number} · ${esc(S.name)} — assim que o pagamento for aprovado, ele vai direto para o preparo. Esta página atualiza sozinha.</p>
     <div class="panel pix" style="max-width:560px">
       <div class="tot"><span>Total</span><span class="price">${brl(o.total)}</span></div>
@@ -870,7 +877,7 @@ async function vTrack(code) {
   };
   // Tela de pagamento: QR Code, copia-e-cola, prazo e botão "Já paguei"
   const drawPix = (S, o) => {
-    setColor(S.color); $('#bName').textContent = S.name; header('', false);
+    setColor(S.color); brand(S.name, S.logo_path); header('', false);
     const left = o.pix?.expiresAt ? Math.max(0, Math.round((new Date(o.pix.expiresAt) - Date.now()) / 60000)) : null;
     app.innerHTML = `<h2>Pague com Pix</h2><p class="lead">Pedido #${o.number} · ${esc(S.name)} — assim que o pagamento cair, ele vai direto para o preparo. Esta página atualiza sozinha.</p>
     <div class="panel pix" style="max-width:560px">
@@ -907,7 +914,7 @@ async function vTrack(code) {
 /* ================= PAINEL DA EMPRESA ================= */
 async function vPanel(tab) {
   const S = ME.tenant, owner = ME.role === 'owner';
-  setColor(S.color); $('#bName').textContent = S.name;
+  setColor(S.color); brand(S.name, S.logo_path);
   const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ...(S.allow_tables ? [['mesas', 'Mesas']] : []), ['cardapio', 'Cardápio'], ['estoque', 'Estoque'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['unidades', 'Unidades'], ['config', 'Configurações']] : [])];
   if (tab === 'kds') return pKitchenScreen(S);
   if (!tabs.some(t => t[0] === tab) && tab !== 'novo') tab = 'pedidos';
@@ -2042,6 +2049,9 @@ async function pConfig(S) {
       <div class="two" style="gap:10px"><label>Meta do dia (R$)<input id="gD" inputmode="decimal" placeholder="ex.: 1.500,00"></label><label>Meta do mês (R$)<input id="gM" inputmode="decimal" placeholder="ex.: 40.000,00"></label></div>
       <button class="pri">Salvar metas</button></form>
     <form class="panel" id="fShow"><h3>Vitrine da loja</h3>
+      ${'logo_path' in st ? `<div class="row logo-ed"><span class="logo-prev">${st.logo_path ? `<img src="${esc(imgUrl(st.logo_path))}" alt="Logotipo da loja">` : '<span class="mut">Sem logo</span>'}</span>
+        <label>Logotipo (quadrado, PNG com fundo transparente fica melhor)<input type="file" id="shLogo" accept="image/png,image/jpeg,image/webp"></label>${st.logo_path ? '<button type="button" class="ghost sm" id="shLogoRm">Remover logotipo</button>' : ''}</div>
+      <p class="mut" style="margin:0">O logotipo aparece no topo da loja online, no painel, no painel de chamada e no cardápio impresso.</p>` : ''}
       <div class="banner-ed">${st.banner_path ? `<img src="${esc(imgUrl(st.banner_path))}" alt="Banner da loja">` : '<span class="mut">Sem banner</span>'}</div>
       <span class="row"><label>Banner (foto larga, ex.: fachada ou produtos)<input type="file" id="shBanner" accept="image/jpeg,image/png,image/webp"></label>${st.banner_path ? '<button type="button" class="ghost sm" id="shRm">Remover banner</button>' : ''}</span>
       <label>Descrição (aparece no topo da loja)<input id="shDesc" maxlength="300" value="${esc(st.description || '')}" placeholder="Ex.: Pizza no forno a lenha desde 1998"></label>
@@ -2151,10 +2161,11 @@ async function pConfig(S) {
       .catch(() => { const f = $('#fGoals'); if (f) f.hidden = true; });
     q(sb.from('tenants').select('auto_accept').eq('id', S.id).single()).then(r => { if ($('#fAuto')) { $('#aaOn').checked = !!r.auto_accept; $('#fAuto').hidden = false; } }).catch(() => {});
   };
-  const refreshBrand = async () => { await loadMe(); setColor(ME.tenant.color); $('#bName').textContent = ME.tenant.name; };
+  const refreshBrand = async () => { await loadMe(); setColor(ME.tenant.color); brand(ME.tenant.name, ME.tenant.logo_path); };
   app.onclick = attempt(async e => {
     // botões de envio de formulário são tratados no onsubmit; os demais (fora de formulários) aqui
     const b = e.target.closest('button'); if (!b || (b.type === 'submit' && b.closest('form'))) return;
+    if (b.id === 'shLogoRm') { await q(sb.from('tenants').update({ logo_path: null }).eq('id', S.id)); if (st0?.logo_path) sb.storage.from(BUCKET).remove([st0.logo_path]).catch(() => {}); await refreshBrand(); toast('Logotipo removido'); return draw(); }
     if (b.id === 'shRm') { await q(sb.from('tenants').update({ banner_path: null }).eq('id', S.id)); if (st0?.banner_path) sb.storage.from(BUCKET).remove([st0.banner_path]).catch(() => {}); toast('Banner removido'); return draw(); }
     if (b.id === 'mPrint') { await printTableQrs(storeLink(S), Math.max(1, Math.min(200, +$('#mCount').value || 10)), S.name); return; }
     if (b.id === 'dLoc') {
@@ -2194,6 +2205,16 @@ async function pConfig(S) {
   });
   app.onchange = attempt(async e => {
     if (e.target.id === 'pmKind') { const pct = e.target.value === 'percent'; document.querySelectorAll('.pmBP').forEach(x => x.hidden = pct); $('#pmPctL').hidden = !pct; return; }
+    if (e.target.id === 'shLogo' && e.target.files[0]) {
+      if (e.target.files[0].size > 8 * 1024 * 1024) throw new Error('Imagem grande demais (máx. 8 MB)');
+      toast('Enviando logotipo…');
+      const blob = await shrinkImage(e.target.files[0], 512, 'image/png');   // PNG mantém o fundo transparente
+      const path = `${S.id}/logo-${crypto.randomUUID()}.png`;
+      await q(sb.storage.from(BUCKET).upload(path, blob, { contentType: 'image/png', cacheControl: '31536000' }));
+      await q(sb.from('tenants').update({ logo_path: path }).eq('id', S.id));
+      if (st0?.logo_path) sb.storage.from(BUCKET).remove([st0.logo_path]).catch(() => {});
+      await refreshBrand(); toast('Logotipo atualizado'); return draw();
+    }
     if (e.target.id === 'shBanner' && e.target.files[0]) {
       toast('Enviando banner…');
       const blob = await shrinkImage(e.target.files[0], 1600);
@@ -2332,13 +2353,13 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
   '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql',
-  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql'];
+  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };
 async function vPlatform() {
   let hDays = 30;
-  setColor('#1d1716'); $('#bName').textContent = 'Balcão';
+  setColor('#1d1716'); brand('Balcão');
   header('<a class="on" href="/plataforma" data-link>Plataforma</a>' + (ME.tenant ? '<a href="/painel" data-link>Minha loja</a>' : ''));
   const plans = await q(sb.from('plans').select('name').order('sort'));
   const draw = async () => {

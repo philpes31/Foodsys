@@ -34,6 +34,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    21. `20261203000000_cashback_atividades.sql` (cashback, pedido mínimo por bairro e registro de atividades da equipe)
    22. `20261204000000_metas_cardapio_chamada.sql` (metas de vendas, engenharia de cardápio e painel de chamada)
    23. `20261205000000_aceite_reajuste.sql` (aceite automático de pedidos, reajuste de preços em lote e esgotar categoria)
+   24. `20261206000000_logotipo.sql` (logotipo da loja no cabeçalho, painel de chamada e cardápio impresso)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -225,7 +226,7 @@ O que já está pronto:
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 97 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 98 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;

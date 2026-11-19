@@ -252,3 +252,13 @@ body.kds-on main{max-width:none;padding:0}
 @keyframes pulse{50%{transform:scale(1.15)}}
 .goal{display:grid;gap:4px;margin:0 0 12px}
 .goal .progress{margin:0}
+
+/* logotipo da loja */
+#bLogo{width:38px;height:38px;object-fit:contain;border-radius:8px;background:#fff;padding:2px;flex:none}
+.logo-ed{align-items:center;gap:14px}
+.logo-prev{width:72px;height:72px;border:1px dashed var(--line);border-radius:12px;display:grid;place-items:center;overflow:hidden;background:#fff;flex:none}
+.logo-prev img{width:100%;height:100%;object-fit:contain}
+.logo-prev .mut{font-size:12px;text-align:center}
+.cbname{display:flex;align-items:center;gap:1.2vw}
+.cbname img{height:6vw;width:6vw;object-fit:contain;background:#fff;border-radius:1vw;padding:.3vw}
+.menusheet .mlogo{height:22mm;max-width:50mm;object-fit:contain;display:block;margin-bottom:2mm}

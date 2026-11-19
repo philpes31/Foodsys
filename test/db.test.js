@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -617,7 +617,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 23);
+  assert.equal(st.length, 24);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1120,4 +1120,18 @@ test('esgotar categoria inteira: equipe pode, outra loja não', () => {
   assert.equal(+sql(`select set_category_availability('${pizzaId}', '${cat}', true)`, U.staff), n);
   fails(`select set_category_availability('${pizzaId}', '${cat}', false)`, U.burger, /Sem permissão/);
   fails(`select set_category_availability('${pizzaId}', '${cat}', false)`, null, /permission denied/);
+});
+
+test('logotipo: dono troca, só na pasta da loja; público vê na loja e no painel de chamada', () => {
+  const path = `${pizzaId}/logo-1.png`;
+  sql(`update tenants set logo_path = '${path}' where id = '${pizzaId}'`, U.pizza);
+  assert.equal(sql(`select logo_path from tenants where slug = 'forno-da-vila'`, null), path);
+  assert.equal(json(`call_board('forno-da-vila')`, null).store.logo, path);
+  fails(`update tenants set logo_path = '${burgerId}/logo.png' where id = '${pizzaId}'`, U.pizza, /tenants_logo_path_format/);
+  fails(`update tenants set logo_path = '${pizzaId}/../x.png' where id = '${pizzaId}'`, U.pizza, /tenants_logo_path_format/);
+  assert.equal(sql(`with u as (update tenants set logo_path = null where id = '${pizzaId}' returning 1) select count(*) from u`, U.staff), '0');   // equipe não troca
+  assert.equal(sql(`select logo_path from tenants where id = '${pizzaId}'`), path);
+  fails(`update tenants set logo_path = null where id = '${pizzaId}'`, null, /permission denied/);
+  sql(`update tenants set logo_path = null where id = '${pizzaId}'`, U.pizza);
+  assert.equal(json(`call_board('forno-da-vila')`, null).store.logo, null);
 });
