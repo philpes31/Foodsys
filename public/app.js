@@ -892,7 +892,20 @@ function beep() { try { const c = new AudioContext(), o = c.createOscillator(), 
 const itemsList = o => `<ul>${o.items.map(x => `<li>${x.qty}× ${esc(x.product_name)}${x.options_text ? ` <span class="mut">(${esc(x.options_text)})</span>` : ''}${x.notes ? ` <b>— ${esc(x.notes)}</b>` : ''}</li>`).join('')}</ul>`;
 const setStatus = (id, status, courier) => rpc('change_order_status', { p_order: id, p_status: status, p_courier: courier ?? null });
 
-async function pOrders(S) {
+// Primeiros passos da loja nova (só o dono vê; some quando tudo estiver feito ou ao dispensar)
+async function setupSteps(S) {
+  const [z, o] = await Promise.all([q(sb.from('zones').select('id').eq('tenant_id', S.id).limit(1)).catch(() => []), q(sb.from('orders').select('id').eq('tenant_id', S.id).limit(1)).catch(() => [])]);
+  return [
+    { ok: !!(S.phone && S.address), t: 'Telefone e endereço da loja', go: '/painel/config' },
+    { ok: local.get(`seen-menu:${S.id}`, false), t: 'Revisar o cardápio (preços, fotos, esgotados)', go: '/painel/cardapio' },
+    { ok: !!S.auto_hours, t: 'Horário de funcionamento automático', go: '/painel/config' },
+    { ok: z.length > 0 || (S.delivery_mode === 'distance' && (S.distance_tiers || []).length > 0), t: 'Bairros ou distâncias de entrega e taxas', go: '/painel/config' },
+    { ok: !!(S.description || S.banner_path), t: 'Vitrine: descrição e foto de capa', go: '/painel/config' },
+    { ok: !!(S.pix_online || S.card_online), t: 'Pix ou cartão online (opcional, recomendado)', go: '/painel/config' },
+    { ok: o.length > 0, t: 'Fazer um pedido de teste na loja', go: `/loja/${S.slug}`, ext: true },
+    { ok: local.get(`shared:${S.id}`, false), t: 'Divulgar o link da loja (WhatsApp, Instagram)', share: true }];
+}
+async function pOrders(S, owner) {
   let orders = [];
   // Impressão automática: 'off', 'accept' (ao aceitar) ou 'arrive' (assim que o pedido chega). Vale só para este aparelho.
   let pmode = local.get('printMode', local.get('autoPrint', false) ? 'accept' : 'off');
@@ -908,7 +921,9 @@ async function pOrders(S) {
   };
   let lowIng = [];
   const loadLow = () => q(sb.from('ingredients').select('name, stock, min_stock').eq('tenant_id', S.id).gt('min_stock', 0)).then(r => { lowIng = r.filter(i => +i.stock <= +i.min_stock); }).catch(() => {});
-  const load = async () => { [orders] = await Promise.all([fetchOrders(S.id, ['novo', 'preparo', 'pronto']), loadLow()]); draw(); printArrivals(); };
+  let steps = null;
+  const loadSteps = () => owner && !local.get(`setup-done:${S.id}`, false) ? setupSteps(S).then(r => { steps = r.every(x => x.ok) ? null : r; }).catch(() => {}) : null;
+  const load = async () => { [orders] = await Promise.all([fetchOrders(S.id, ['novo', 'preparo', 'pronto']), loadLow(), steps === null && !load.once ? loadSteps() : null]); load.once = true; draw(); printArrivals(); };
   // Aviso de pedido parado: novo sem aceitar há 5+ min, ou pronto esperando há 15+ min.
   let lastNag = 0;
   const stuck = () => {
@@ -930,6 +945,9 @@ async function pOrders(S) {
     ${later.length ? `<div class="panel sched"><h3>Agendados para mais tarde (${later.length})</h3><div class="row">${later.map(o => `<span class="badge b-a" title="${esc(o.customer_name)}">${esc(fmtWhen(o.scheduled_for, S.timezone))} · #${o.number} · ${esc(where(o))}</span>`).join('')}</div>
       <p class="mut" style="margin:0">Eles entram nas colunas 1 hora antes do horário marcado.</p></div>` : ''}
     <div class="stuck" id="stuck" role="alert" hidden></div>
+    ${steps ? `<div class="panel setup"><div class="row between"><h3 style="margin:0">Primeiros passos · ${steps.filter(x => x.ok).length} de ${steps.length}</h3><button class="ghost sm" id="setupHide">Dispensar</button></div>
+      <div class="progress"><i style="width:${steps.filter(x => x.ok).length / steps.length * 100}%"></i></div>
+      <ol class="steps2">${steps.map(x => `<li class="${x.ok ? 'done' : ''}">${x.ok ? '✓' : '○'} ${x.share ? `<a href="#" data-share="1">${esc(x.t)}</a>` : `<a href="${esc(x.go)}" ${x.ext ? 'target="_blank" rel="noopener"' : 'data-link'}>${esc(x.t)}</a>`}</li>`).join('')}</ol></div>` : ''}
     ${lowIng.length ? `<a class="activeorder" href="/painel/estoque" data-link style="margin-bottom:12px">⚠ ${lowIng.length} insumo(s) acabando: <b>${lowIng.slice(0, 4).map(i => esc(i.name)).join(', ')}</b>${lowIng.length > 4 ? '…' : ''} · ver estoque →</a>` : ''}
     ${'paused_until' in S ? `<div class="pausebar">${S.paused_until && new Date(S.paused_until) > Date.now()
         ? `<span class="badge b-r">⏸ Loja pausada até ${hhmm(S.paused_until)}</span><button class="ok sm" data-pause="store" data-min="0">Retomar agora</button>`
@@ -953,6 +971,14 @@ async function pOrders(S) {
   app.onclick = attempt(async e => {
     const pr = e.target.closest('button[data-print]');
     if (pr) return printOrder(S, orders.find(o => o.id === +pr.dataset.print));
+    if (e.target.closest('#setupHide')) { local.set(`setup-done:${S.id}`, true); steps = null; return draw(); }
+    if (e.target.closest('[data-share]')) {
+      e.preventDefault(); const link = storeLink(S), msg = `Peça pela nossa loja online: ${link}`;
+      local.set(`shared:${S.id}`, true); steps = await setupSteps(S); if (steps.every(x => x.ok)) steps = null; draw();
+      try { if (navigator.share) return await navigator.share({ title: S.name, text: msg, url: link }); } catch {}
+      try { await navigator.clipboard.writeText(link); toast('Link copiado. Cole no WhatsApp e no Instagram.'); } catch { toast(link); }
+      return;
+    }
     const pz = e.target.closest('button[data-pause]');
     if (pz) { const r = await rpc('set_pause', { p_tenant: S.id, p_kind: pz.dataset.pause, p_minutes: +pz.dataset.min });
       S.paused_until = r.pausedUntil; S.delivery_paused_until = r.deliveryPausedUntil;
@@ -1076,18 +1102,71 @@ async function pDelivery(S) {
 }
 
 /* ---------- cardápio + editor de grupos de opções ---------- */
+// Planilha CSV (Excel/Google Planilhas): separa por ; ou , e entende aspas.
+function parseCsv(text) {
+  text = text.replace(/^\ufeff/, '');
+  const first = text.split(/\r?\n/)[0] || '', sep = (first.match(/;/g) || []).length >= (first.match(/,/g) || []).length ? ';' : ',';
+  const rows = []; let row = [], cell = '', inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQ) { if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else inQ = false; } else cell += ch; }
+    else if (ch === '"') inQ = true;
+    else if (ch === sep) { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+    else cell += ch;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter(r => r.some(c => c.trim() !== ''));
+}
+const MENU_HEAD = ['Categoria', 'Produto', 'Descrição', 'Preço', 'Disponível'];
+const normHead = h => h.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+function menuRowsFromCsv(text) {
+  const rows = parseCsv(text); if (rows.length < 2) throw new Error('A planilha precisa do cabeçalho e de pelo menos 1 produto');
+  const head = rows[0].map(normHead), col = names => head.findIndex(h => names.includes(h));
+  const ci = { cat: col(['categoria', 'category']), name: col(['produto', 'nome', 'name']), desc: col(['descricao', 'description']), price: col(['preco', 'valor', 'price']), av: col(['disponivel', 'ativo', 'available']) };
+  if (ci.cat < 0 || ci.name < 0 || ci.price < 0) throw new Error('Cabeçalho precisa ter as colunas Categoria, Produto e Preço');
+  return rows.slice(1).map((r, k) => {
+    const cell = i => i < 0 ? '' : String(r.at(i) ?? '').trim(), raw = cell(ci.price).replace(/R\$\s*/i, ''), price = toCents(raw);
+    const av = cell(ci.av).toLowerCase();
+    return { line: k + 2, category: cell(ci.cat), name: cell(ci.name), description: cell(ci.desc), price,
+      available: !['nao', 'não', 'n', '0', 'false', 'esgotado', 'inativo'].includes(av),
+      error: !cell(ci.cat) || !cell(ci.name) ? 'falta categoria ou nome' : !(Number.isInteger(price) && price >= 0) ? `preço "${cell(ci.price)}" inválido` : '' };
+  });
+}
 async function pMenu(S, owner) {
-  let prods = [];
+  let prods = []; local.set(`seen-menu:${S.id}`, true);
   const load = async () => { prods = sortMenu(await q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id))); draw(); };
   const draw = () => {
     const cats = [...new Set(prods.map(p => p.category))];
-    app.innerHTML = `<div class="row between"><div><h2>Cardápio</h2><p class="lead">${owner ? 'Crie produtos com grupos de opções: tamanhos, sabores, adicionais, combos.' : 'Marque itens esgotados ou ajuste o estoque.'} Estoque em branco = sem controle; com número, baixa a cada pedido e volta se o pedido for cancelado.</p></div>${owner ? '<button class="pri" id="newP">Novo produto</button>' : ''}</div>
+    app.innerHTML = `<div class="row between"><div><h2>Cardápio</h2><p class="lead">${owner ? 'Crie produtos com grupos de opções: tamanhos, sabores, adicionais, combos.' : 'Marque itens esgotados ou ajuste o estoque.'} Estoque em branco = sem controle; com número, baixa a cada pedido e volta se o pedido for cancelado.</p></div>${owner ? '<span class="row"><button class="ghost" id="menuCsv">Baixar planilha</button><label class="btn ghost" style="cursor:pointer">Importar planilha<input type="file" id="menuImp" accept=".csv,text/csv" hidden></label><button class="pri" id="newP">Novo produto</button></span>' : ''}</div>
     ${cats.map(c => `<div class="panel" style="margin-bottom:16px"><div class="row between"><h3>${esc(c)}${(S.category_hours || {})[c] ? ` <span class="badge b-a">${esc(catHoursText(S, c))}</span>` : ''}</h3><span class="row">${owner && 'stations' in S ? `<label class="chk" style="gap:6px;margin:0">Estação <select data-station="${esc(c)}" style="width:auto;min-height:34px;padding:2px 8px">${[...new Set([...stationList(S), 'Bar'])].map(n => `<option ${((S.stations || {})[c] || 'Cozinha') === n ? 'selected' : ''}>${esc(n)}</option>`).join('')}<option value="__new">Outra…</option></select></label>` : ''}${owner && 'category_hours' in S ? `<button class="ghost sm" data-chours="${esc(c)}">Horário da categoria</button>` : ''}</span></div><div class="scroll"><table class="stack"><thead><tr><th>Produto</th><th>Opções</th><th class="n">Preço</th><th>Estoque</th><th>Disponível</th><th></th></tr></thead><tbody>
       ${prods.filter(p => p.category === c).map(p => `<tr><td data-l="Produto"><span class="row" style="flex-wrap:nowrap"><span class="thumb">${picture(p, S.color)}</span><span><b>${esc(p.name)}</b><br><span class="mut">${esc(p.description)}</span></span></span></td>
         <td data-l="Opções"><span class="mut">${p.groups.map(g => `${esc(g.name)} (${g.options.length})`).join(', ') || '—'}</span></td><td data-l="Preço" class="n price">${brl(p.price)}</td>
         <td data-l="Estoque"><input class="stockin" type="number" min="0" inputmode="numeric" data-stock="${p.id}" value="${p.stock ?? ''}" placeholder="sem controle" aria-label="Estoque de ${esc(p.name)}">${p.stock === 0 ? ' <span class="badge b-r">zerado</span>' : ''}</td>
         <td data-l="Disponível"><button class="sm ${p.available ? 'ok' : 'ghost'}" data-av="${p.id}">${p.available ? 'Sim' : 'Esgotado'}</button></td>
         <td data-l="">${owner ? `<button class="ghost sm" data-ed="${p.id}">Editar</button>` : ''}</td></tr>`).join('')}</tbody></table></div></div>`).join('') || '<p class="empty">Nenhum produto ainda.</p>'}`;
+  };
+  const exportMenu = () => {
+    const rows = [MENU_HEAD, ...prods.map(p => [p.category, p.name, p.description || '', fromCents(p.price), p.available ? 'sim' : 'não'])];
+    const csv = '\ufeff' + rows.map(r => r.map(csvCell).join(';')).join('\n');
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' })); a.download = `cardapio-${S.slug}.csv`; a.click(); URL.revokeObjectURL(a.href);
+  };
+  const importMenu = async file => {
+    if (file.size > 1024 * 1024) throw new Error('Planilha grande demais (máx. 1 MB)');
+    const rows = menuRowsFromCsv(await file.text()), bad = rows.filter(r => r.error);
+    const key = r => `${r.category.toLowerCase()}|${r.name.toLowerCase()}`, have = new Set(prods.map(key));
+    const nNew = rows.filter(r => !r.error && !have.has(key(r))).length, nUpd = rows.filter(r => !r.error && have.has(key(r))).length;
+    dialog(`<h2>Importar cardápio</h2><p style="margin:0"><b>${nNew}</b> produto(s) novo(s) e <b>${nUpd}</b> atualizado(s) (preço, descrição e disponibilidade).</p>
+      <p class="mut" style="margin:0">Produtos são reconhecidos pelo nome dentro da categoria. Opções, fotos e estoque não mudam. Produtos que não estão na planilha continuam como estão.</p>
+      ${bad.length ? `<p class="stuck" style="display:block">Corrija antes de importar:<br>${bad.slice(0, 8).map(r => `linha ${r.line}: ${esc(r.error)}`).join('<br>')}${bad.length > 8 ? `<br>e mais ${bad.length - 8}…` : ''}</p>` : ''}
+      <div class="scroll" style="max-height:240px"><table><tbody>${rows.slice(0, 12).map(r => `<tr><td>${esc(r.category)}</td><td><b>${esc(r.name)}</b></td><td class="n price">${Number.isInteger(r.price) ? brl(r.price) : '?'}</td><td>${have.has(key(r)) ? '<span class="badge">atualiza</span>' : '<span class="badge b-g">novo</span>'}</td></tr>`).join('')}</tbody></table></div>
+      ${rows.length > 12 ? `<p class="mut" style="margin:0">e mais ${rows.length - 12} linha(s)…</p>` : ''}
+      <div class="row"><button class="pri" id="impGo" ${bad.length ? 'disabled' : ''}>Importar ${rows.length} linha(s)</button><button class="ghost" data-close>Cancelar</button></div>`);
+    $('#dlgBody').onclick = attempt(async ev => {
+      const go = ev.target.closest('#impGo'); if (!go) return; go.disabled = true;
+      try { const r = await rpc('import_menu', { p_tenant: S.id, p_rows: rows.map(({ category, name, description, price, available }) => ({ category, name, description, price, available })) });
+        closeDlg(); toast(`${r.created} criado(s), ${r.updated} atualizado(s)`); await load(); } finally { go.disabled = false; }
+    });
   };
   const editor = p => {
     const cats = [...new Set(prods.map(x => x.category))];
@@ -1166,11 +1245,13 @@ async function pMenu(S, owner) {
   app.onclick = attempt(async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.chours) return hoursEditor(b.dataset.chours);
+    if (b.id === 'menuCsv') return exportMenu();
     if (b.id === 'newP') editor(null);
     if (b.dataset.ed) editor(prods.find(p => p.id === +b.dataset.ed));
     if (b.dataset.av) { const p = prods.find(x => x.id === +b.dataset.av); await rpc('set_product_availability', { p_product: p.id, p_available: !p.available }); await load(); }
   });
   app.onchange = attempt(async e => {
+    if (e.target.id === 'menuImp') { const f = e.target.files?.[0]; e.target.value = ''; if (f) await importMenu(f); return; }
     const sc = e.target.dataset.station;
     if (sc != null) {
       let v = e.target.value;
@@ -1449,13 +1530,14 @@ const num = v => { const n = Number(String(v ?? '').trim().replace(/\./g, '').re
 const fmtQ = (q, u) => `${Number(q).toLocaleString('pt-BR', { maximumFractionDigits: 3 })} ${UNITS[u] || u}`;
 const fmtCost = c => (Number(c) / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL', minimumFractionDigits: 2, maximumFractionDigits: Number(c) < 100 ? 4 : 2 });
 async function pStock(S, owner) {
-  let ings = [], recipes = [], prods = [], moves = [];
+  let ings = [], recipes = [], prods = [], moves = [], optRec = [];
   const load = async () => {
     [ings, recipes, prods, moves] = await Promise.all([
       q(sb.from('ingredients').select('*').eq('tenant_id', S.id).order('name')),
       q(sb.from('product_ingredients').select('product_id, ingredient_id, qty').eq('tenant_id', S.id)),
-      q(sb.from('products').select('id, name, category, price').eq('tenant_id', S.id).order('category').order('sort')),
+      q(sb.from('products').select('id, name, category, price, groups:option_groups(name, sort, options(name, sort))').eq('tenant_id', S.id).order('category').order('sort')),
       q(sb.from('ingredient_moves').select('ingredient_id, delta, reason, note, at, order_id').eq('tenant_id', S.id).order('at', { ascending: false }).limit(30))]);
+    optRec = await q(sb.from('option_ingredients').select('product_id, option_name, ingredient_id, qty').eq('tenant_id', S.id)).catch(() => []);
     draw();
   };
   const ing = id => ings.find(i => i.id === id);
@@ -1475,7 +1557,7 @@ async function pStock(S, owner) {
     <div class="panel" style="margin-bottom:16px"><h3>Ficha técnica e margem</h3><p class="mut" style="margin:0 0 8px">Quanto de cada insumo vai em 1 unidade do produto. Com isso o sistema calcula o custo e a margem de cada item.</p>
       <div class="scroll"><table class="stack"><thead><tr><th>Produto</th><th>Ficha</th><th class="n">Preço</th><th class="n">Custo</th><th class="n">Margem</th><th></th></tr></thead><tbody>
       ${prods.map(p => { const rs = recipes.filter(r => r.product_id === p.id), c = unitCost(p.id), mg = p.price ? (p.price - c) / p.price : 0; return `<tr><td data-l="Produto"><b>${esc(p.name)}</b><br><span class="mut">${esc(p.category)}</span></td>
-        <td data-l="Ficha">${rs.length ? rs.map(r => `${esc(ing(r.ingredient_id)?.name || '?')} ${fmtQ(r.qty, ing(r.ingredient_id)?.unit)}`).join(', ') : '<span class="mut">sem ficha</span>'}</td>
+        <td data-l="Ficha">${rs.length ? rs.map(r => `${esc(ing(r.ingredient_id)?.name || '?')} ${fmtQ(r.qty, ing(r.ingredient_id)?.unit)}`).join(', ') : '<span class="mut">sem ficha</span>'}${optRec.some(o => o.product_id === p.id) ? `<br><span class="mut">+ extras em ${new Set(optRec.filter(o => o.product_id === p.id).map(o => o.option_name)).size} opção(ões)</span>` : ''}</td>
         <td data-l="Preço" class="n price">${brl(p.price)}</td><td data-l="Custo" class="n price">${rs.length ? brl(Math.round(c)) : '—'}</td>
         <td data-l="Margem" class="n">${rs.length ? `<b class="${mg < 0.5 ? 'neg' : ''}">${Math.round(mg * 100)}%</b>` : '—'}</td>
         <td data-l="">${owner ? `<button class="ghost sm" data-recipe="${p.id}">${rs.length ? 'Editar ficha' : 'Montar ficha'}</button>` : ''}</td></tr>`; }).join('')}</tbody></table></div>
@@ -1520,23 +1602,33 @@ async function pStock(S, owner) {
     }
     if (b.dataset.recipe) {
       const p = prods.find(x => x.id === +b.dataset.recipe); if (!ings.length) return toast('Cadastre os insumos primeiro');
-      let rows = recipes.filter(r => r.product_id === p.id).map(r => ({ id: r.ingredient_id, qty: +r.qty }));
-      if (!rows.length) rows = [{ id: ings[0].id, qty: '' }];
+      const optNames = [...new Set((p.groups || []).sort((a, b) => a.sort - b.sort).flatMap(g => (g.options || []).sort((a, b) => a.sort - b.sort).map(o => o.name)))];
+      let target = '', rows;
+      const rowsFor = t => { const r = (t ? optRec.filter(o => o.product_id === p.id && o.option_name === t) : recipes.filter(x => x.product_id === p.id)).map(x => ({ id: x.ingredient_id, qty: +x.qty }));
+        return r.length ? r : [{ id: ings[0].id, qty: '' }]; };
+      rows = rowsFor('');
       const paintR = () => { $('#rRows').innerHTML = rows.map((r, k) => `<div class="row" style="flex-wrap:nowrap"><select data-ri="${k}" style="flex:2">${ings.map(i => `<option value="${i.id}" ${i.id === r.id ? 'selected' : ''}>${esc(i.name)} (${UNITS[i.unit]})</option>`).join('')}</select>
         <input data-rq="${k}" inputmode="decimal" value="${String(r.qty).replace('.', ',')}" placeholder="qtd" style="flex:1"><button type="button" class="ghost sm" data-rdel="${k}" aria-label="Remover">✕</button></div>`).join('');
         paintCost(); };
       const paintCost = () => { const c = rows.reduce((a, r) => a + (num(r.qty) || 0) * (ing(r.id)?.unit_cost || 0), 0); $('#rCost').textContent = `Custo: ${brl(Math.round(c))} · margem ${p.price ? Math.round((p.price - c) / p.price * 100) : 0}%`; };
-      dialog(`<h2>Ficha técnica: ${esc(p.name)}</h2><p class="mut" style="margin:0">Quanto vai em <b>1 unidade</b> (ex.: mussarela 200 g, caixa 1 un).</p>
+      dialog(`<h2>Ficha técnica: ${esc(p.name)}</h2>
+        ${optNames.length ? `<label>Ficha de<select id="rTarget"><option value="">${esc(p.name)} (base, vai sempre)</option>${optNames.map(n => `<option value="${esc(n)}">Opção: ${esc(n)} (só quando escolhida)</option>`).join('')}</select></label>
+          <p class="mut" style="margin:0">Use as opções para o que muda: tamanho Grande +100 g de queijo, adicional de bacon 30 g…</p>` : ''}
+        <p class="mut" style="margin:0" id="rHint">Quanto vai em <b>1 unidade</b> (ex.: mussarela 200 g, caixa 1 un).</p>
         <form id="fRec"><div id="rRows" style="display:grid;gap:8px"></div><button type="button" class="ghost sm" id="rAdd">+ Insumo</button><p id="rCost" class="mut" style="margin:0"></p>
         <div class="row"><button class="pri">Salvar ficha</button><button type="button" class="ghost" data-close>Cancelar</button></div></form>`);
       paintR();
       $('#dlgBody').oninput = ev => { const k = ev.target.dataset.rq; if (k != null) { rows[+k].qty = ev.target.value; paintCost(); } };
-      $('#dlgBody').onchange = ev => { const k = ev.target.dataset.ri; if (k != null) { rows[+k].id = +ev.target.value; paintR(); } };
+      $('#dlgBody').onchange = ev => {
+        if (ev.target.id === 'rTarget') { target = ev.target.value; rows = rowsFor(target); $('#rHint').innerHTML = target ? `Insumos <b>a mais</b> quando o cliente escolhe <b>${esc(target)}</b>, por unidade.` : 'Quanto vai em <b>1 unidade</b> (ex.: mussarela 200 g, caixa 1 un).'; return paintR(); }
+        const k = ev.target.dataset.ri; if (k != null) { rows[+k].id = +ev.target.value; paintR(); } };
       $('#dlgBody').onclick = ev => { if (ev.target.closest('#rAdd')) { rows.push({ id: ings[0].id, qty: '' }); paintR(); } const d = ev.target.closest('[data-rdel]'); if (d) { rows.splice(+d.dataset.rdel, 1); paintR(); } };
       $('#dlgBody').onsubmit = attempt(async ev => {
         ev.preventDefault(); const items = rows.filter(r => String(r.qty).trim() !== '').map(r => ({ ingredientId: r.id, qty: num(r.qty) }));
         if (items.some(x => !(x.qty > 0))) throw new Error('Quantidade inválida');
-        await rpc('set_recipe', { p_product: p.id, p_items: items }); closeDlg(); toast('Ficha salva'); await load();
+        if (target) await rpc('set_option_recipe', { p_product: p.id, p_option: target, p_items: items });
+        else await rpc('set_recipe', { p_product: p.id, p_items: items });
+        closeDlg(); toast(target ? `Ficha de "${target}" salva` : 'Ficha salva'); await load();
       });
     }
   });
@@ -1892,7 +1984,7 @@ async function pConfig(S) {
     }
     if (b.dataset.rmdate) { const cd = (st0.closed_dates || []).filter(d => d.date !== b.dataset.rmdate); await q(sb.from('tenants').update({ closed_dates: cd }).eq('id', S.id)); toast('Data removida'); return draw(); }
     if (b.id === 'copyMon') { for (let i = 0; i < 7; i++) for (const k of 'abcd') $(`#h${i}${k}`).value = $(`#h1${k}`).value; return; }
-    if (b.id === 'copy') { try { await navigator.clipboard.writeText(storeLink(st0 || S)); toast('Link copiado'); } catch { toast('Copie o link manualmente'); } return; }
+    if (b.id === 'copy') { try { await navigator.clipboard.writeText(storeLink(st0 || S)); local.set(`shared:${S.id}`, true); toast('Link copiado'); } catch { toast('Copie o link manualmente'); } return; }
     if (b.id === 'demo') { b.disabled = true; await rpc('generate_demo_orders', { p_tenant: S.id, p_count: 12 }); toast('Pedidos de exemplo criados'); }
     if (b.dataset.del) { if (!sure(b)) return; const [t, id] = b.dataset.del.split(':'); await q(sb.from(t).delete().eq('id', +id)); }
     if (b.dataset.clink || b.dataset.crot) {
@@ -2048,7 +2140,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql',
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
-  '20261201000000_insumos_financeiro.sql'];
+  '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };

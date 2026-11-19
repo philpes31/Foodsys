@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -617,7 +617,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 19);
+  assert.equal(st.length, 20);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -938,4 +938,39 @@ test('financeiro: despesas só do dono; resultado = faturamento − insumos − 
   fails(`select profit_report('${pizzaId}', null)`, U.staff, /Sem permissão/);
   assert.equal(sql(`select count(*) from expenses`, U.staff), '0');
   sql(`select set_recipe(${p.id}, '[]')`, U.pizza);
+});
+
+test('adicionais: a opção escolhida baixa insumos extras; ficha sobrevive à edição do produto', () => {
+  const pz = menu('forno-da-vila').find(x => x.groups.length && x.groups.some(g => g.min >= 1));
+  const g = pz.groups.find(x => x.min >= 1), op = g.options.at(-1);
+  const q = sql(`insert into ingredients (tenant_id, name, unit) values ('${pizzaId}', 'Queijo extra', 'g') returning id`, U.pizza);
+  sql(`select ingredient_move(${q}, 'entrada', 1000, 4000, null)`, U.pizza);
+  fails(`select set_option_recipe(${pz.id}, 'Não existe', '[{"ingredientId":${q},"qty":100}]')`, U.pizza, /Opção não encontrada/);
+  fails(`select set_option_recipe(${pz.id}, '${op.name}', '[{"ingredientId":${q},"qty":100}]')`, U.staff, /Sem permissão/);
+  sql(`select set_option_recipe(${pz.id}, '${op.name}', '[{"ingredientId":${q},"qty":100}]')`, U.pizza);
+  // salvar o produto de novo recria as opções (ids novos); a ficha da opção continua valendo pelo nome
+  sql(`select save_product('${pizzaId}', ${pz.id}, (select jsonb_build_object('category', category, 'name', name, 'price', price::text, 'groups',
+        (select jsonb_agg(jsonb_build_object('name', g.name, 'min_sel', g.min_sel::text, 'max_sel', g.max_sel::text,
+          'options', (select jsonb_agg(jsonb_build_object('name', o.name, 'price', o.price::text) order by o.sort) from options o where o.group_id = g.id)) order by g.sort)
+         from option_groups g where g.product_id = products.id)) from products where id = ${pz.id}))`, U.pizza);
+  const fresh = menu('forno-da-vila').find(x => x.id === pz.id);
+  const chosen = fresh.groups.filter(x => x.min >= 1).map(x => x.name === g.name ? x.options.at(-1).id : x.options[0].id);
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', min_order = 0, allow_pickup = true, paused_until = null, closed_dates = '[]', category_hours = '{}' where id = '${pizzaId}'`);
+  const r = order('forno-da-vila', { customer: { name: 'Grande', phone: '11922113344' }, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: pz.id, qty: 2, optionIds: chosen }] });
+  assert.equal(+sql(`select stock from ingredients where id = ${q}`), 800);
+  assert.deepEqual(sql(`select array_to_string(option_names, '|') from order_items i join orders o on o.id = i.order_id where o.public_code = '${r.code}'`).split('|').includes(op.name), true);
+});
+
+test('importar cardápio: cria, atualiza pelo nome e recusa planilha inválida inteira', () => {
+  fails(`select import_menu('${pizzaId}', '[{"category":"X","name":"Y","price":100}]')`, U.staff, /Sem permissão/);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const cat = sql(`select category from products where id = ${p.id}`);
+  const rows = [{ category: cat, name: 'Água SEM gás', description: 'Gelada', price: 650 }, { category: 'Sobremesas', name: 'Pudim da casa', price: 1200, available: false }];
+  const r = json(`import_menu('${pizzaId}', '${JSON.stringify(rows)}')`, U.pizza);
+  assert.deepEqual([r.created, r.updated], [1, 1]);
+  assert.equal(+sql(`select price from products where id = ${p.id}`), 650);
+  assert.equal(sql(`select available from products where tenant_id = '${pizzaId}' and name = 'Pudim da casa'`), 'f');
+  fails(`select import_menu('${pizzaId}', '[{"category":"A","name":"Ok","price":100},{"category":"A","name":"Ruim","price":"abc"}]')`, U.pizza, /Linha 3: Preço inválido/);
+  assert.equal(sql(`select count(*) from products where tenant_id = '${pizzaId}' and name = 'Ok'`), '0');
+  sql(`update products set price = ${p.price} where id = ${p.id}`);
 });

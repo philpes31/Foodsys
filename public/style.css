@@ -213,3 +213,9 @@ body.kds-on main{max-width:none;padding:0}
 .heat td{width:28px;height:26px;border-radius:5px;text-align:center;color:#fff;font-weight:600;background:color-mix(in srgb,var(--red) calc(var(--a) * 100%),transparent);outline:1px solid var(--line)}
 .shift{margin-bottom:16px}
 .neg{color:var(--red)}
+.setup{margin-bottom:14px}
+.progress{height:8px;background:var(--line);border-radius:99px;overflow:hidden;margin:10px 0}
+.progress i{display:block;height:100%;background:var(--basil)}
+.steps2{list-style:none;padding:0;margin:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:6px 18px}
+.steps2 li.done{color:var(--mut);text-decoration:line-through}
+.steps2 a{color:inherit}
