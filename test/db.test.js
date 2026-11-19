@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -617,7 +617,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 22);
+  assert.equal(st.length, 23);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1064,4 +1064,60 @@ test('painel de chamada: público, só números de retirada/mesa, sem dados pess
   assert.equal(sql(`select coalesce(call_board('nao-existe')::text, 'null')`, null), 'null');
   sql(`update tenants set daily_goal = 150000 where id = '${pizzaId}'`, U.pizza);
   fails(`select daily_goal from tenants where id = '${pizzaId}'`, null, /permission denied/);
+});
+
+test('aceite automático: pedido entra em preparo; Pix só quando pago; equipe ainda pode voltar para novo', () => {
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const pick = (name, payment) => ({ customer: { name, phone: '11955554444' }, fulfillment: 'pickup', payment, items: [{ productId: p.id, qty: 1 }] });
+  const st = code => sql(`select status from orders where public_code = '${code}'`);
+  sql(`update tenants set auto_accept = true where id = '${pizzaId}'`, U.pizza);
+  const a = order('forno-da-vila', pick('Auto', 'Dinheiro'));
+  assert.equal(st(a.code), 'preparo');
+  const b = order('forno-da-vila', pick('Auto Pix', 'Pix online'));
+  assert.equal(st(b.code), 'pagamento');
+  sql(`update orders set status = 'novo', payment_status = 'paid', paid_at = now() where public_code = '${b.code}'`);
+  assert.equal(st(b.code), 'preparo');
+  sql(`update orders set status = 'novo' where public_code = '${a.code}'`);
+  assert.equal(st(a.code), 'novo');
+  sql(`update tenants set auto_accept = false where id = '${pizzaId}'`, U.pizza);
+  assert.equal(st(order('forno-da-vila', pick('Manual', 'Dinheiro')).code), 'novo');
+  fails(`update tenants set auto_accept = true where id = '${pizzaId}'`, null, /permission denied/);
+});
+
+test('reajuste de preços: prévia, arredondamento, opções, só o dono', () => {
+  const cat = sql(`select p.category from products p join option_groups g on g.product_id = p.id where p.tenant_id = '${pizzaId}' limit 1`);
+  const before = json(`(select jsonb_object_agg(id, price) from products where tenant_id = '${pizzaId}')`);
+  const optBefore = json(`(select jsonb_object_agg(o.id, o.price) from options o join option_groups g on g.id = o.group_id join products p on p.id = g.product_id where p.tenant_id = '${pizzaId}' and p.category = '${cat}')`);
+  const prev = json(`bulk_reprice('${pizzaId}', '${cat}', 10, 0, '90', true, false)`, U.pizza);
+  assert.equal(prev.applied, false);
+  assert.ok(prev.count > 0);
+  assert.ok(prev.items.every(i => i.new % 100 === 90 && i.new >= Math.round(i.old * 1.1)));
+  assert.deepEqual(json(`(select jsonb_object_agg(id, price) from products where tenant_id = '${pizzaId}')`), before);   // prévia não muda nada
+  const done = json(`bulk_reprice('${pizzaId}', '${cat}', 10, 0, '90', true, true)`, U.pizza);
+  assert.equal(done.applied, true); assert.equal(done.count, prev.count);
+  for (const i of done.items.filter(i => i.kind === 'produto')) assert.equal(+sql(`select price from products where id = ${i.id}`), i.new);
+  const optAfter = json(`(select jsonb_object_agg(o.id, o.price) from options o join option_groups g on g.id = o.group_id join products p on p.id = g.product_id where p.tenant_id = '${pizzaId}' and p.category = '${cat}')`);
+  for (const [id, v] of Object.entries(optBefore)) if (v === 0) assert.equal(optAfter[id], 0, 'opção grátis continua grátis');
+  const others = json(`(select jsonb_object_agg(id, price) from products where tenant_id = '${pizzaId}' and category <> '${cat}')`) || {};
+  for (const [id, v] of Object.entries(others)) assert.equal(v, before[id], 'outras categorias não mudam');
+  assert.ok(+sql(`select count(*) from activity_log where tenant_id = '${pizzaId}' and action = 'Reajuste de preços'`) >= 1);
+  // volta os preços (valor fixo negativo / reais inteiros)
+  const r2 = json(`bulk_reprice('${pizzaId}', null, 0, -50, '00', false, false)`, U.pizza);
+  assert.ok(r2.items.every(i => i.new % 100 === 0 && i.kind === 'produto'));
+  for (const [id, v] of Object.entries(before)) sql(`update products set price = ${v} where id = ${id}`);
+  for (const [id, v] of Object.entries(optBefore)) sql(`update options set price = ${v} where id = ${id}`);
+  fails(`select bulk_reprice('${pizzaId}', null, 10, 0, 'none', false, true)`, U.staff, /Sem permissão/);
+  fails(`select bulk_reprice('${burgerId}', null, 10, 0, 'none', false, true)`, U.pizza, /Sem permissão/);
+  fails(`select bulk_reprice('${pizzaId}', null, 0, 0, 'none', false, false)`, U.pizza, /percentual ou um valor/);
+  fails(`select bulk_reprice('${pizzaId}', null, 500, 0, 'none', false, false)`, U.pizza, /entre -90% e 300%/);
+});
+
+test('esgotar categoria inteira: equipe pode, outra loja não', () => {
+  const cat = sql(`select category from products where tenant_id = '${pizzaId}' and available group by category order by count(*) desc limit 1`);
+  const n = +sql(`select set_category_availability('${pizzaId}', '${cat}', false)`, U.staff);
+  assert.ok(n > 0);
+  assert.equal(sql(`select count(*) from products where tenant_id = '${pizzaId}' and category = '${cat}' and available`), '0');
+  assert.equal(+sql(`select set_category_availability('${pizzaId}', '${cat}', true)`, U.staff), n);
+  fails(`select set_category_availability('${pizzaId}', '${cat}', false)`, U.burger, /Sem permissão/);
+  fails(`select set_category_availability('${pizzaId}', '${cat}', false)`, null, /permission denied/);
 });
