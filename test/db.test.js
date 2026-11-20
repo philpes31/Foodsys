@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -617,7 +617,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 26);
+  assert.equal(st.length, 27);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1232,4 +1232,68 @@ test('avisos no celular: inscrição pelo código do pedido, fila ao mudar statu
   assert.equal(sql(`select push_public_key()`, null), key);
   fails(`select * from platform_settings`, U.admin, /permission denied/);
   sql(`delete from platform_settings`);
+});
+
+test('totem: equipe lança pedido de retirada, pago no caixa, canal próprio', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', auto_accept = false where id = '${pizzaId}'`);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const body = x => `'${JSON.stringify({ customer: { name: 'Totem Ana' }, fulfillment: 'pickup', payment: 'Pagar no caixa', items: [{ productId: p.id, qty: 2 }], ...x })}'::jsonb`;
+  const r = json(`kiosk_place_order('${pizzaId}', ${body({})})`, U.staff);
+  assert.equal(r.status, 'novo');
+  assert.equal(sql(`select channel || '|' || payment || '|' || fulfillment from orders where public_code = '${r.code}'`), 'totem|Pagar no caixa|pickup');
+  fails(`select kiosk_place_order('${pizzaId}', ${body({ fulfillment: 'delivery' })})`, U.staff, /retirar no balcão/);
+  fails(`select kiosk_place_order('${pizzaId}', ${body({ payment: 'Dinheiro' })})`, U.staff, /pagamento é no caixa/);
+  fails(`select kiosk_place_order('${pizzaId}', ${body({})})`, U.burger, /Sem permissão/);
+  fails(`select kiosk_place_order('${pizzaId}', ${body({})})`, null, /permission denied/);
+  fails(`select kiosk_place_order('${pizzaId}', ${body({ customer: { name: '' } })})`, U.staff, /Informe o nome/);
+  sql(`update tenants set auto_accept = true where id = '${pizzaId}'`);
+  assert.equal(json(`kiosk_place_order('${pizzaId}', ${body({})})`, U.staff).status, 'preparo');
+  sql(`update tenants set auto_accept = false, is_open = false where id = '${pizzaId}'`);
+  fails(`select kiosk_place_order('${pizzaId}', ${body({})})`, U.staff, /fechada/);
+  sql(`update tenants set is_open = true where id = '${pizzaId}'`);
+});
+
+test('indique e ganhe: crédito para os dois na entrega do 1º pedido; regras contra abuso', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', referral_reward = 1000, cashback_percent = 0, cashback_days = 60 where id = '${pizzaId}'`);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const mk = (name, phone) => order('forno-da-vila', { customer: { name, phone }, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 1 }] });
+  const st = (code, s) => sql(`update orders set status = '${s}' where public_code = '${code}'`);
+  const bal = phone => +sql(`select cashback_balance('${pizzaId}', '${phone}')`);
+  const A = '11977770001', B = '11977770002', C = '11977770003';
+  const a1 = mk('Ana Indica', A);
+  const ref = json(`my_referral('${a1.code}')`, null);
+  assert.match(ref.code, /^[A-Z2-9]{6}$/); assert.equal(ref.reward, 1000); assert.equal(ref.slug, 'forno-da-vila');
+  assert.equal(json(`my_referral('${a1.code}')`, null).code, ref.code);   // sempre o mesmo código
+  const b1 = mk('Bia Nova', B);
+  assert.equal(sql(`select apply_referral('${b1.code}', '${ref.code.toLowerCase()}')`, null), 'ok');
+  assert.equal(sql(`select apply_referral('${a1.code}', '${ref.code}')`, null), 'self');
+  assert.equal(sql(`select apply_referral('${b1.code}', 'ZZZZZZ')`, null), 'ok');   // já ligado: não troca
+  fails(`select referred_by from orders`, null, /permission denied/);
+  fails(`select * from referral_codes`, U.pizza, /permission denied/);
+  st(b1.code, 'preparo'); st(b1.code, 'entregue');
+  assert.equal(bal(A), 1000); assert.equal(bal(B), 1000);
+  const r2 = json(`my_referral('${a1.code}')`, null);
+  assert.equal(r2.friends, 1); assert.equal(r2.earned, 1000);
+  st(b1.code, 'entregue');   // repetir não paga de novo
+  assert.equal(bal(A), 1000);
+  // cliente que já comprou não conta como indicação
+  const b2 = mk('Bia Nova', B);
+  assert.equal(sql(`select apply_referral('${b2.code}', '${ref.code}')`, null), 'not-first');
+  // crédito usado no pedido seguinte (mesmo com cashback em 0%)
+  const b3 = order('forno-da-vila', { customer: { name: 'Bia Nova', phone: B }, fulfillment: 'pickup', payment: 'Dinheiro', useCashback: true, items: [{ productId: p.id, qty: 3 }] });
+  assert.equal(+sql(`select cashback_used from orders where public_code = '${b3.code}'`), 1000);
+  assert.equal(bal(B), 0);
+  // cancelamento depois da entrega tira o crédito dos dois
+  const c1 = mk('Caio', C);
+  assert.equal(sql(`select apply_referral('${c1.code}', '${ref.code}')`, null), 'ok');
+  st(c1.code, 'entregue'); assert.equal(bal(A), 2000); assert.equal(bal(C), 1000);
+  st(c1.code, 'cancelado'); assert.equal(bal(A), 1000); assert.equal(bal(C), 0);
+  // crédito vence
+  sql(`update cashback_ledger set expires_at = now() - interval '1 day' where kind = 'indicação' and tenant_id = '${pizzaId}'`);
+  assert.equal(bal(A), 0);
+  // desligado
+  sql(`update tenants set referral_reward = 0 where id = '${pizzaId}'`);
+  assert.equal(sql(`select coalesce(my_referral('${a1.code}')::text, 'null')`, null), 'null');
+  assert.equal(sql(`select apply_referral('${mk('Duda', '11977770004').code}', '${ref.code}')`, null), 'off');
+  fails(`update tenants set referral_reward = 500 where id = '${pizzaId}'`, null, /permission denied/);
 });

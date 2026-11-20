@@ -37,6 +37,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    24. `20261206000000_logotipo.sql` (logotipo da loja no cabeçalho, painel de chamada e cardápio impresso)
    25. `20261207000000_chamada_nomes.sql` (nome do cliente no painel de chamada, opcional: "Maria S.")
    26. `20261208000000_sugestoes_garcom_avisos.sql` (sugestões escolhidas no carrinho, conta de mesa dividida, avisos no celular)
+   27. `20261209000000_totem_indicacao.sql` (totem de autoatendimento e indique e ganhe)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -237,7 +238,7 @@ O que já está pronto:
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 105 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 107 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;

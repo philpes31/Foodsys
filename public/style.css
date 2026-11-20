@@ -295,3 +295,46 @@ body.kds-on main{max-width:none;padding:0}
   header nav::-webkit-scrollbar{display:none}
   header nav a{white-space:nowrap;padding:8px 12px;flex:none}
 }
+
+/* indique e ganhe */
+.refbox{margin-top:12px}
+/* totem de autoatendimento */
+body.kiosk{background:var(--bg);color:var(--ink);user-select:none;-webkit-user-select:none}
+body.kiosk main{padding:0}
+.kstart{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;text-align:center;padding:5vh 6vw;position:relative;background:linear-gradient(180deg,color-mix(in srgb,var(--red) 10%,var(--bg)),var(--bg))}
+.kstart h1{font-size:clamp(34px,6vw,72px);margin:0}
+.kstart p{font-size:clamp(18px,2.4vw,26px);margin:0;color:var(--mut)}
+.kstart .klogo{width:clamp(120px,20vw,220px);height:clamp(120px,20vw,220px)}
+.kbig{font-size:clamp(20px,2.6vw,30px)!important;padding:18px 36px!important;border-radius:18px!important;min-height:64px}
+.kclosed{font-size:28px!important;color:var(--red)!important;font-weight:700}
+.kok{font-weight:800;color:#2f9e44!important;font-size:clamp(24px,3vw,36px)!important}
+.knum{font-size:clamp(110px,22vw,240px);font-weight:900;line-height:1;color:var(--red)}
+.kprice{font-weight:700;color:var(--ink)!important}
+.kexit{position:absolute;left:10px;bottom:10px;opacity:.25;background:none;border:0;font-size:22px;color:var(--mut);padding:10px;cursor:pointer}
+.klogo{width:84px;height:84px;object-fit:contain;border-radius:16px;background:#fff;display:block;margin:0 auto 10px}
+.kwrap{display:grid;grid-template-columns:200px 1fr 340px;height:100vh}
+.kcats{background:var(--red);padding:16px 10px;display:flex;flex-direction:column;gap:8px;overflow-y:auto}
+.kcats button{background:#ffffff1f;color:#fff;border:0;border-radius:14px;padding:18px 12px;font:inherit;font-weight:700;font-size:18px;text-align:left;cursor:pointer}
+.kcats button.on{background:#fff;color:var(--red)}
+.kmenu{overflow-y:auto;padding:20px 22px}
+.kmenu h2{margin:0 0 14px;font-size:30px}
+.kgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px}
+.kitem{display:flex;flex-direction:column;gap:6px;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:0 0 14px;overflow:hidden;font:inherit;color:var(--ink);cursor:pointer}
+.kitem img,.kitem svg{width:100%;aspect-ratio:4/3;object-fit:cover;display:block}
+.kitem b{font-size:19px;padding:0 14px}
+.kitem .mut{font-size:14px;padding:0 14px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.kitem .price{font-size:20px;font-weight:800;padding:0 14px}
+.kitem:active{transform:scale(.98)}
+.kcart{border-left:1px solid var(--line);background:var(--card);padding:18px;display:flex;flex-direction:column;gap:12px;overflow-y:auto}
+.kcart h2{margin:0}
+.klist{flex:1;overflow-y:auto;display:grid;gap:10px;align-content:start}
+.kline{display:flex;justify-content:space-between;gap:10px;border-bottom:1px solid var(--line);padding-bottom:10px;font-size:16px}
+.kq{display:flex;align-items:center;gap:8px}
+.kq button{width:44px;height:44px;border-radius:12px;border:1px solid var(--line);background:var(--bg);font-size:22px;cursor:pointer;color:var(--ink)}
+.kcart input{font-size:20px;min-height:54px}
+body.kiosk .opts button{min-height:54px;font-size:17px}
+@media (max-width:900px){
+  .kwrap{grid-template-columns:1fr;grid-template-rows:auto 1fr auto;height:auto;min-height:100vh}
+  .kcats{flex-direction:row;overflow-x:auto}.kcats .klogo{display:none}.kcats button{white-space:nowrap;padding:12px 16px}
+  .kcart{border-left:0;border-top:1px solid var(--line);position:sticky;bottom:0;max-height:55vh}
+}

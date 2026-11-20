@@ -15,7 +15,7 @@ const csvCell = x => { let v = String(x ?? ''); if (/^[=+\-@\t\r]/.test(v)) v = 
 const fromCents = c => ((c || 0) / 100).toFixed(2).replace('.', ',');
 const mins = t => Math.max(0, Math.floor((Date.now() - new Date(t).getTime()) / 60000));
 const hhmm = t => new Date(t).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-const CHANNEL = { online: 'Site', balcao: 'Balcão', telefone: 'Telefone', mesa: 'Mesa' };
+const CHANNEL = { online: 'Site', balcao: 'Balcão', telefone: 'Telefone', mesa: 'Mesa', totem: 'Totem' };
 const FUL = { delivery: 'Entrega', pickup: 'Retirada', table: 'Mesa' };
 const where = o => o.fulfillment === 'table' ? `Mesa ${o.table_label || ''}` : o.fulfillment === 'pickup' ? 'Retirada' : `Entrega · ${o.zone_name}`;
 const SLABEL = { novo: 'Recebido', preparo: 'Em preparo', pronto: 'Pronto', rota: 'Saiu para entrega', entregue: 'Entregue', cancelado: 'Cancelado' };
@@ -387,7 +387,10 @@ function header(nav = '', who = true) {
 }
 
 async function render() {
+  // Totem travado: qualquer navegação (voltar, links) volta para o totem; só a tela de login passa
+  if (local.get('kioskLock', false) && location.pathname !== '/painel/totem' && !location.pathname.startsWith('/entrar')) history.replaceState(null, '', '/painel/totem');
   cleanup?.(); cleanup = null; closeDlg(); window.scrollTo(0, 0); $('#banner').innerHTML = ''; setManifest(null);
+  document.body.classList.remove('kiosk');
   if (!configured) return vSetup();
   const p = location.pathname.split('/').filter(Boolean).map(decodeURIComponent);
   try {
@@ -553,7 +556,7 @@ const bySort = (a, b) => a.sort - b.sort || a.id - b.id;
 const sortMenu = prods => prods.sort(bySort).map(p => ({ ...p,
   groups: (p.option_groups || []).sort(bySort).map(g => ({ ...g, options: (g.options || []).sort(bySort) })) }));
 // Colunas públicas da loja (os dados internos de cobrança não são lidos pelo site).
-const TENANT_BASE = 'id, slug, name, segment, color, plan, min_order, is_open, allow_pickup, eta_text, phone, timezone, active, created_at, hours, auto_hours, pix_online, billing_status, trial_ends_at, paid_until, delivery_mode, lat, lng, distance_tiers, loyalty_enabled, loyalty_every, loyalty_percent, allow_tables, tables_count, allow_scheduling, schedule_days, schedule_lead_minutes, schedule_slot_minutes, description, address, instagram, banner_path, free_delivery_above, card_online, custom_domain, service_percent, category_hours, paused_until, delivery_paused_until, closed_dates, stations, cashback_percent, cashback_days, logo_path';
+const TENANT_BASE = 'id, slug, name, segment, color, plan, min_order, is_open, allow_pickup, eta_text, phone, timezone, active, created_at, hours, auto_hours, pix_online, billing_status, trial_ends_at, paid_until, delivery_mode, lat, lng, distance_tiers, loyalty_enabled, loyalty_every, loyalty_percent, allow_tables, tables_count, allow_scheduling, schedule_days, schedule_lead_minutes, schedule_slot_minutes, description, address, instagram, banner_path, free_delivery_above, card_online, custom_domain, service_percent, category_hours, paused_until, delivery_paused_until, closed_dates, stations, cashback_percent, cashback_days, logo_path, referral_reward';
 let TENANT_COLS = TENANT_BASE;
 // Banco sem alguma migração nova: tira da lista a coluna que ainda não existe e tenta de novo.
 async function tenantsQuery(build) {
@@ -617,6 +620,9 @@ async function vShop(slug) {
   // Pedido na mesa: o QR Code da mesa abre /loja/<loja>?mesa=7
   const mesaParam = (new URLSearchParams(location.search).get('mesa') || '').toUpperCase().trim();
   const TABLE = S.allow_tables && /^[A-Z0-9][A-Z0-9 -]{0,9}$/.test(mesaParam) ? mesaParam : null;
+  // Indique e ganhe: o link do amigo abre /loja/<loja>?indica=ABC123; o código vale no 1º pedido feito neste aparelho
+  const indica = (new URLSearchParams(location.search).get('indica') || '').toUpperCase().trim();
+  if (S.referral_reward && /^[A-Z2-9]{6}$/.test(indica)) local.set(`ref:${slug}`, indica);
   const SLOTS = !TABLE && S.allow_scheduling && S.is_open && billingOk(S) ? scheduleSlots(S) : [];
   const CAN_ORDER = OS.open || SLOTS.length > 0, SCHED_ONLY = !OS.open && SLOTS.length > 0;
   let geo = null; // { lat, lng, quote: { km, fee, inArea, maxKm } } no modo por distância
@@ -678,7 +684,7 @@ async function vShop(slug) {
     cat = cats.includes(cat) ? cat : cats[0];
     const list = cat === TOP ? popular : products.filter(p => p.category === cat), count = cart.reduce((t, c) => t + c.qty, 0);
     const catNow = c => catOpen(S, c, new Date());
-    app.innerHTML = `${TABLE ? `<div class="banner" style="margin:-24px calc(-1 * max(4vw,16px)) 16px">Você está pedindo para a <b>Mesa ${esc(TABLE)}</b>. O pedido vai direto para a cozinha.</div>` : ''}${S.banner_path ? `<div class="hero-banner" style="background-image:linear-gradient(0deg,#000a,#0000 60%),url('${esc(imgUrl(S.banner_path))}')"><h1>${esc(S.name)}</h1></div>` : `<h2>${esc(S.name)}</h2>`}
+    app.innerHTML = `${TABLE ? `<div class="banner" style="margin:-24px calc(-1 * max(4vw,16px)) 16px">Você está pedindo para a <b>Mesa ${esc(TABLE)}</b>. O pedido vai direto para a cozinha.</div>` : ''}${!TABLE && S.referral_reward && local.get(`ref:${slug}`, null) ? `<div class="banner" style="margin:-24px calc(-1 * max(4vw,16px)) 16px">🎁 Você foi indicado por um amigo! No seu 1º pedido entregue, vocês dois ganham <b>${brl(S.referral_reward)}</b> de crédito para usar aqui.</div>` : ''}${S.banner_path ? `<div class="hero-banner" style="background-image:linear-gradient(0deg,#000a,#0000 60%),url('${esc(imgUrl(S.banner_path))}')"><h1>${esc(S.name)}</h1></div>` : `<h2>${esc(S.name)}</h2>`}
     ${S.description ? `<p class="desc">${esc(S.description)}</p>` : ''}
     ${deliveryPaused(S) && !TABLE ? `<p class="banner" style="text-align:left;border-radius:12px;margin:0 0 12px">Entregas pausadas até as <b>${hhmm(S.delivery_paused_until)}</b>${S.allow_pickup ? ' · retirada na loja continua funcionando' : ''}.</p>` : ''}
     ${ACTIVE ? `<a class="activeorder" href="/pedido/${esc(ACTIVE.code)}" data-link>Seu pedido <b>#${ACTIVE.number}</b> está <b>${esc((SLABEL[ACTIVE.status] || ACTIVE.status).toLowerCase())}</b> · Acompanhar →</a>` : ''}
@@ -728,7 +734,7 @@ async function vShop(slug) {
       <label>Pagamento<select id="kPay">${TABLE ? '<option value="Pagar no caixa" selected>Pagar no caixa / na mesa</option>' : ''}${S.pix_online ? `<option value="Pix online" ${TABLE ? '' : 'selected'}>Pix agora (QR Code, confirmação automática)</option>` : ''}${S.card_online && !TABLE ? `<option value="Cartão online" ${S.pix_online ? '' : 'selected'}>Cartão de crédito agora (pagamento online)</option>` : ''}${TABLE ? '' : '<option value="Pix">Pix na entrega</option><option>Cartão na entrega</option><option>Dinheiro</option>'}</select></label>
       <label id="kEm" ${S.pix_online ? '' : 'hidden'}>E-mail (para o comprovante do Pix)<input id="kEmail" type="email" autocomplete="email" value="${esc(last.email || '')}" placeholder="voce@email.com"></label>
       <label id="kTr" hidden>Troco para (R$)<input id="kT" inputmode="decimal" placeholder="Ex.: 100"></label>
-      ${S.cashback_percent && !TABLE ? `<label class="chk"><input type="checkbox" id="kCb" checked> Usar meu saldo de cashback, se eu tiver <span class="mut">(o desconto aparece no pedido)</span></label>` : ''}
+      ${(S.cashback_percent || S.referral_reward) && !TABLE ? `<label class="chk"><input type="checkbox" id="kCb" checked> Usar meu saldo de cashback, se eu tiver <span class="mut">(o desconto aparece no pedido)</span></label>` : ''}
       <div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>
       <p class="mut" style="margin:0;font-size:13px">Seus dados são usados só para preparar e entregar este pedido. <a href="/privacidade" target="_blank">Política de Privacidade</a>.</p>
       <div class="row" style="justify-content:flex-end"><button type="button" class="ghost" id="kX">Voltar</button><button class="pri" id="kGo">Enviar pedido</button></div></form>`);
@@ -787,6 +793,8 @@ async function vShop(slug) {
         local.set('customer', { ...last, ...customer, ...(email ? { email } : {}), ...(t.pickup || TABLE ? {} : { cep: $('#kCep').value, rua: $('#kRua').value, num: $('#kNum').value, comp: $('#kComp').value }) });
         local.set(lastKey, cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, optText: c.optText, notes: c.notes })));
         rememberOrder({ code: r.code, slug, store: S.name, number: r.number, total: r.total, at: new Date().toISOString() });
+        const refC = local.get(`ref:${slug}`, null);
+        if (refC && S.referral_reward) { await rpc('apply_referral', { p_order_code: r.code, p_ref: refC }).catch(() => null); local.set(`ref:${slug}`, null); }
         cart = []; saveCart();
         if (r.pix) { $('#kGo').textContent = 'Gerando Pix…'; try { await pixCall({ action: 'create', code: r.code, email }); } catch (err) { toast(err.message); } }
         if (r.card) {
@@ -841,7 +849,13 @@ async function pushSubscribe(code, key) {
   if (!ok) throw new Error('Este pedido já foi encerrado');
 }
 async function vTrack(code) {
-  let lastSig = '', rating = 0, pushKey = null;
+  let lastSig = '', rating = 0, pushKey = null, REF;
+  rpc('my_referral', { p_code: code }).then(r => { REF = r; if (r) draw(true).catch(() => {}); }).catch(() => { REF = null; });
+  const refLink = () => `${location.origin}/loja/${REF.slug}?indica=${REF.code}`;
+  const refBox = o => !REF || o.status === 'cancelado' ? '' : `<div class="loyal refbox"><b>🎁 Indique e ganhe ${brl(REF.reward)}</b>
+    <span>Mande seu link para um amigo que ainda não comprou aqui. Quando o 1º pedido dele for entregue, <b>vocês dois</b> ganham ${brl(REF.reward)} de crédito para usar na loja (vale ${REF.days} dias).</span>
+    <span class="row"><button class="pri sm" id="refWa">Enviar no WhatsApp</button><button class="ghost sm" id="refCopy">Copiar link</button></span>
+    ${REF.friends ? `<span class="mut">Amigos que já pediram: <b>${REF.friends}</b> · você ganhou <b>${brl(REF.earned)}</b></span>` : ''}</div>`;
   if (pushSupported()) rpc('push_public_key').then(k => { pushKey = k || null; if (pushKey) draw(true).catch(() => {}); }).catch(() => {});
   const pushBox = o => {
     if (!pushKey || ['entregue', 'cancelado', 'pagamento'].includes(o.status)) return '';
@@ -880,6 +894,7 @@ async function vTrack(code) {
         ${o.cashback.willEarn ? `<span>Você vai ganhar <b>${brl(o.cashback.willEarn)}</b> quando o pedido for entregue.</span>` : ''}
         ${o.cashback.earned > 0 ? `<span class="badge b-g">Você ganhou ${brl(o.cashback.earned)} neste pedido!</span>` : ''}
         <span class="mut">Seu saldo nesta loja: <b>${brl(o.cashback.balance)}</b>${o.cashback.balance ? `, para usar em até ${o.cashback.days} dias` : ''}.</span></div>` : ''}
+      ${refBox(o)}
       ${o.loyalty ? `<div class="loyal"><b>Cartão fidelidade</b>${o.loyaltyDiscount ? `<span class="badge b-g">Você ganhou ${o.loyalty.percent}% neste pedido!</span>` : ''}
         <div class="stamps">${Array.from({ length: o.loyalty.every }, (_, i) => `<i class="${i < Math.min(o.loyalty.stamps, o.loyalty.every) ? 'on' : ''}"></i>`).join('')}</div>
         <span class="mut">${o.loyalty.stamps >= o.loyalty.every ? `Seu próximo pedido tem ${o.loyalty.percent}% de desconto.` : `${o.loyalty.stamps} de ${o.loyalty.every} pedidos entregues. Faltam ${o.loyalty.every - o.loyalty.stamps} para ganhar ${o.loyalty.percent}% de desconto.`}</span></div>` : ''}
@@ -919,6 +934,8 @@ async function vTrack(code) {
   app.onclick = attempt(async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.star) { rating = +b.dataset.star; document.querySelectorAll('[data-star]').forEach(x => { x.textContent = +x.dataset.star <= rating ? '★' : '☆'; x.classList.toggle('on', +x.dataset.star <= rating); }); $('#rvSend').disabled = false; return; }
+    if (b.id === 'refCopy') { await navigator.clipboard.writeText(refLink()).then(() => toast('Link copiado'), () => prompt('Copie o link:', refLink())); return; }
+    if (b.id === 'refWa') return window.open(`https://wa.me/?text=${encodeURIComponent(`Experimenta pedir aqui e ganhe ${brl(REF.reward)} de crédito no seu primeiro pedido: ${refLink()}`)}`, '_blank', 'noopener');
     if (b.id === 'pushOn') { b.disabled = true; try { await pushSubscribe(code, pushKey); local.set(`push:${code}`, true); toast('Pronto! Você vai receber os avisos deste pedido'); await draw(true); } finally { b.disabled = false; } return; }
     if (b.id === 'rvSend') { b.disabled = true; try { await rpc('review_order', { p_code: code, p_rating: rating, p_comment: $('#rvText').value }); toast('Obrigado pela avaliação!'); await draw(true); } finally { b.disabled = false; } return; }
     if (b.id === 'pixCopy') { const ta = $('#pixCode'); try { await navigator.clipboard.writeText(ta.value); } catch { ta.select(); document.execCommand('copy'); } toast('Código copiado. Cole no app do banco.'); }
@@ -944,6 +961,7 @@ async function vPanel(tab) {
   setColor(S.color); brand(S.name, S.logo_path);
   const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ...(S.allow_tables ? [['garcom', 'Garçom'], ['mesas', 'Mesas']] : []), ['cardapio', 'Cardápio'], ['estoque', 'Estoque'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['unidades', 'Unidades'], ['config', 'Configurações']] : [])];
   if (tab === 'kds') return pKitchenScreen(S);
+  if (tab === 'totem') return pKiosk(S);
   if (!tabs.some(t => t[0] === tab) && tab !== 'novo') tab = 'pedidos';
   $('#banner').innerHTML = billingBanner(S, owner);
   header(tabs.map(([k, n]) => `<a href="/painel/${k}" data-link class="${k === tab ? 'on' : ''}">${esc(n)}</a>`).join('') + `<a href="/loja/${S.slug}" target="_blank" rel="noopener">Ver loja ↗</a>` + (ME.isAdmin ? '<a href="/plataforma" data-link>Plataforma</a>' : ''));
@@ -1876,6 +1894,102 @@ async function pTables(S) {
   await load();
 }
 
+/* ---------- totem de autoatendimento ---------- */
+async function pKiosk(S) {
+  document.body.classList.add('kds-on', 'kiosk'); setColor(S.color); brand(S.name, S.logo_path);
+  local.set('kioskLock', true);
+  const all = sortMenu(await q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id).eq('available', true)));
+  let stage = 'start', cart = [], cat = null, name = '', away = false, done = null, idleT, warnT, backT;
+  const items = () => all.filter(p => p.stock !== 0 && catOpen(S, p.category, new Date()));
+  const cats = () => [...new Set(items().map(p => p.category))];
+  const total = () => cart.reduce((t, c) => t + c.unit * c.qty, 0), count = () => cart.reduce((t, c) => t + c.qty, 0);
+  const reset = () => { cart = []; name = ''; away = false; done = null; cat = null; stage = 'start'; closeDlg(); draw(); };
+  const add = it => { const k = cart.find(c => c.productId === it.productId && c.optionIds.join() === it.optionIds.join() && c.notes === it.notes); k ? k.qty += it.qty : cart.push(it); toast(`${it.name} no pedido`); draw(); };
+  const logo = S.logo_path ? `<img class="klogo" src="${esc(imgUrl(S.logo_path))}" alt="">` : '';
+  const draw = () => {
+    const open = openState(S).open;
+    if (stage === 'start') {
+      app.innerHTML = `<div class="kstart" data-k="begin">${logo}<h1>${esc(S.name)}</h1>
+        ${open ? '<button class="pri kbig" data-k="begin">Toque para fazer seu pedido</button><p>Escolha, confirme e pague no caixa. Chamamos pelo número.</p>' : '<p class="kclosed">Estamos fechados agora</p>'}
+        <button class="kexit" data-k="exit" aria-label="Sair do totem">⋯</button></div>`;
+      return;
+    }
+    if (stage === 'done') {
+      app.innerHTML = `<div class="kstart"><p class="kok">Pedido feito!</p><div class="knum">${done.number}</div>
+        <h2>${done.status === 'preparo' ? 'Já estamos preparando.' : 'Agora é só pagar no caixa.'}</h2>
+        <p>${done.status === 'preparo' ? 'Pague no caixa e aguarde: chamamos pelo número ' : 'Diga o número '}<b>${done.number}</b>${done.status === 'preparo' ? '.' : ' no caixa. Depois é só aguardar ser chamado.'}</p>
+        <p class="kprice">Total: ${brl(done.total)}</p><button class="pri kbig" data-k="new">Fazer outro pedido</button></div>`;
+      return;
+    }
+    const cs = cats(); if (!cs.includes(cat)) cat = cs[0];
+    app.innerHTML = `<div class="kwrap">
+      <aside class="kcats">${logo}${cs.map(c => `<button class="${c === cat ? 'on' : ''}" data-cat="${esc(c)}">${esc(c)}</button>`).join('')}</aside>
+      <section class="kmenu"><h2>${esc(cat || '')}</h2><div class="kgrid">${items().filter(p => p.category === cat).map(p => `<button class="kitem" data-p="${p.id}">${picture(p, S.color)}<b>${esc(p.name)}</b><span class="mut">${esc(p.description || '')}</span><span class="price">${brl(p.price)}${p.groups.length ? ' <small class="mut">+ opções</small>' : ''}</span></button>`).join('') || '<p class="mut">Nada nesta categoria agora.</p>'}</div></section>
+      <aside class="kcart"><h2>Seu pedido</h2>
+        <div class="klist">${cart.map((c, i) => `<div class="kline"><div><b>${esc(c.name)}</b>${c.optText ? `<br><small class="mut">${esc(c.optText)}</small>` : ''}${c.notes ? `<br><small class="mut">${esc(c.notes)}</small>` : ''}<br><span class="price">${brl(c.unit * c.qty)}</span></div>
+          <span class="kq"><button data-q="${i}" data-d="-1" aria-label="Menos">−</button><b>${c.qty}</b><button data-q="${i}" data-d="1" aria-label="Mais">+</button></span></div>`).join('') || '<p class="mut">Toque nos produtos para adicionar.</p>'}</div>
+        <div class="tot"><span>Total</span><span class="price">${brl(total())}</span></div>
+        ${stage === 'menu' ? `<button class="pri kbig" data-k="finish" ${cart.length ? '' : 'disabled'}>Finalizar (${count()})</button>`
+        : `<form id="kF" class="grid" style="gap:10px"><label>Seu nome, para chamarmos<input id="kName" value="${esc(name)}" required maxlength="40" autocomplete="off" placeholder="Ex.: Ana"></label>
+            <div class="segs" style="grid-template-columns:1fr 1fr"><button type="button" data-away="0" class="${away ? '' : 'on'}">Comer aqui</button><button type="button" data-away="1" class="${away ? 'on' : ''}">Para levar</button></div>
+            <p class="mut" style="margin:0">Pagamento no caixa: dinheiro, Pix ou cartão.</p>
+            <button class="pri kbig" id="kSend">Confirmar pedido</button><button type="button" class="ghost" data-k="back">Voltar ao cardápio</button></form>`}
+        <button class="ghost" data-k="cancel">Cancelar pedido</button></aside></div>`;
+    if (stage === 'name') $('#kName')?.focus();
+  };
+  // Sem toque por 90 s: pergunta se ainda tem alguém; mais 20 s, recomeça
+  const poke = () => {
+    clearTimeout(idleT); clearTimeout(warnT);
+    if (stage === 'start') return;
+    idleT = setTimeout(() => {
+      if (stage === 'done') return reset();
+      dialog('<h2>Ainda está aí?</h2><p>Toque em continuar para manter seu pedido.</p><div class="row"><button class="pri kbig" data-close>Continuar</button></div>');
+      warnT = setTimeout(reset, 20000);
+    }, stage === 'done' ? 15000 : 90000);
+  };
+  const onAny = () => poke();
+  document.addEventListener('pointerdown', onAny, true); document.addEventListener('keydown', onAny, true);
+  const exit = () => {
+    const pin = local.get('kioskPin', '');
+    dialog(`<h2>Sair do totem</h2>${pin ? '<label>PIN do totem<input id="kPin" type="password" inputmode="numeric" maxlength="8" autocomplete="off"></label>' : '<p>Voltar para o painel da loja?</p>'}
+      <div class="row"><button class="pri" id="kOut">Sair</button><button class="ghost" data-close>Cancelar</button></div>`);
+    $('#dlgBody').onclick = e => {
+      if (!e.target.closest('#kOut')) return;
+      if (pin && $('#kPin').value !== pin) return toast('PIN incorreto');
+      local.set('kioskLock', false); closeDlg(); go('/painel');
+    };
+  };
+  app.onclick = attempt(async e => {
+    const b = e.target.closest('button,[data-k]'); if (!b) return;
+    const k = b.dataset.k;
+    if (k === 'exit') return exit();
+    if (k === 'begin' && openState(S).open) { stage = 'menu'; draw(); return poke(); }
+    if (k === 'new') return reset();
+    if (k === 'cancel') { if (!cart.length) return reset(); dialog('<h2>Cancelar o pedido?</h2><p>Os itens escolhidos serão apagados.</p><div class="row"><button class="pri" id="kYes">Sim, cancelar</button><button class="ghost" data-close>Continuar pedindo</button></div>'); $('#dlgBody').onclick = ev => { if (ev.target.closest('#kYes')) reset(); }; return; }
+    if (k === 'finish') { stage = 'name'; return draw(); }
+    if (k === 'back') { name = $('#kName')?.value || name; stage = 'menu'; return draw(); }
+    if (b.dataset.away != null) { name = $('#kName')?.value || name; away = b.dataset.away === '1'; return draw(); }
+    if (b.dataset.cat) { cat = b.dataset.cat; draw(); return $('.kmenu')?.scrollTo(0, 0); }
+    if (b.dataset.p) { const p = all.find(x => x.id === +b.dataset.p); return openBuilder(p, add); }
+    if (b.dataset.q != null) { const c = cart[+b.dataset.q]; c.qty += +b.dataset.d; if (c.qty <= 0) cart.splice(+b.dataset.q, 1); return draw(); }
+  });
+  app.onsubmit = attempt(async e => {
+    e.preventDefault();
+    name = $('#kName').value.trim(); if (!name) throw new Error('Digite seu nome');
+    const btn = $('#kSend'); btn.disabled = true; btn.textContent = 'Enviando…';
+    try {
+      const r = await rpc('kiosk_place_order', { p_tenant: S.id, p: { customer: { name }, fulfillment: 'pickup', payment: 'Pagar no caixa',
+        items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: (away ? (c.notes ? `Para levar · ${c.notes}` : 'Para levar') : c.notes).slice(0, 140) })) } });
+      done = r; cart = []; stage = 'done'; draw(); poke();
+    } finally { const b2 = $('#kSend'); if (b2) { b2.disabled = false; b2.textContent = 'Confirmar pedido'; } }
+  });
+  const tick = setInterval(() => { if (stage === 'start') draw(); }, 60000);   // abre/fecha sozinho pelo horário
+  try { await document.documentElement.requestFullscreen?.(); } catch {}
+  cleanup = () => { clearInterval(tick); clearTimeout(idleT); clearTimeout(warnT); clearTimeout(backT); document.removeEventListener('pointerdown', onAny, true); document.removeEventListener('keydown', onAny, true);
+    app.onclick = app.onsubmit = null; document.body.classList.remove('kds-on', 'kiosk'); if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); };
+  draw();
+}
+
 /* ---------- garçom: mapa das mesas no celular ---------- */
 async function pWaiter(S) {
   let tables = [];
@@ -2142,6 +2256,10 @@ async function pConfig(S) {
     <form class="panel" id="fAuto" hidden><h3>Aceite automático</h3><p class="mut" style="margin:0">Pedidos novos entram direto em <b>Em preparo</b>, sem precisar tocar em Aceitar. Pedidos com Pix ou cartão online só entram quando o pagamento é confirmado; agendados continuam esperando a hora. Se a impressão estiver ligada no Preparo, a comanda sai assim que o pedido chega.</p>
       <label class="chk"><input type="checkbox" id="aaOn"> Aceitar pedidos automaticamente</label>
       <button class="pri">Salvar</button></form>
+    <form class="panel" id="fKiosk"><h3>Totem de autoatendimento</h3>
+      <p class="mut" style="margin:0">Transforme um tablet em totem: o cliente escolhe os produtos, digita o nome e paga no caixa. O pedido chega no Preparo marcado como <b>Totem</b>. Use um tablet logado com uma conta da equipe.</p>
+      <label>PIN para sair do totem (opcional, fica só neste aparelho)<input id="kioskPin" type="password" inputmode="numeric" maxlength="8" pattern="[0-9]{4,8}" value="${esc(local.get('kioskPin', ''))}" style="max-width:200px" autocomplete="off"></label>
+      <button class="pri">Abrir o totem neste aparelho</button></form>
     <form class="panel" id="fCall" hidden><h3>Painel de chamada</h3><p class="mut" style="margin:0">Tela para TV voltada aos clientes, com os pedidos de retirada sendo preparados e prontos. <a href="/chamada/${esc(st.slug)}" target="_blank" rel="noopener">Abrir o painel</a></p>
       <label class="chk"><input type="checkbox" id="cnOn"> Mostrar o nome do cliente junto do número</label>
       <p class="mut" style="margin:0">Aparece só o primeiro nome e a inicial do sobrenome (ex.: <b>Maria S.</b>). Telefone e endereço nunca aparecem.</p>
@@ -2201,6 +2319,9 @@ async function pConfig(S) {
       ${'cashback_percent' in st ? `<h3>Cashback</h3>
       <div class="two" style="gap:10px"><label>% de volta em cada pedido entregue (0 = desligado)<input id="cbPct" type="number" min="0" max="30" value="${st.cashback_percent || 0}"></label>
         <label>O saldo vale por (dias)<input id="cbDays" type="number" min="7" max="365" value="${st.cashback_days || 90}"></label></div>
+      ${'referral_reward' in st ? `<h3>Indique e ganhe</h3>
+      <label>Crédito para quem indica e para o amigo indicado (R$, 0 = desligado)<input id="refRw" inputmode="decimal" value="${st.referral_reward ? fromCents(st.referral_reward) : '0'}" style="max-width:160px"></label>
+      <p class="mut" style="margin:0">Cada cliente ganha um link de indicação na página do pedido. Quando o 1º pedido do amigo é entregue, os dois ganham esse valor de crédito para usar na loja (vale pelo mesmo prazo do cashback). Só vale para quem nunca comprou na loja.</p>` : ''}
       <p class="mut" style="margin:0">O cliente acumula saldo pelo telefone e escolhe usar no pedido seguinte. Cancelamento estorna. Pode somar com a fidelidade.</p>` : ''}
       <button class="pri">Salvar entrega e fidelidade</button></form>
     <div class="panel"><h3>Bairros e taxas</h3>${zones.some(z => 'min_order' in z) ? '<p class="mut" style="margin:0 0 6px">Taxa de entrega e, se quiser, um pedido mínimo próprio para bairros mais longe.</p>' : ''}<table><tbody>${zones.map(z => `<tr><td>${esc(z.name)}</td><td class="n" style="width:120px"><input inputmode="decimal" value="${fromCents(z.fee)}" data-zone="${z.id}" aria-label="Taxa ${esc(z.name)}" title="Taxa de entrega"></td>${'min_order' in z ? `<td class="n" style="width:130px"><input inputmode="decimal" value="${z.min_order ? fromCents(z.min_order) : ''}" placeholder="mín. (opcional)" data-zmin="${z.id}" aria-label="Pedido mínimo ${esc(z.name)}" title="Pedido mínimo para este bairro"></td>` : ''}<td class="n"><button class="ghost sm" data-del="zones:${z.id}" aria-label="Remover">×</button></td></tr>`).join('')}</tbody></table>
@@ -2339,6 +2460,7 @@ async function pConfig(S) {
       await q(sb.from('tenants').update({ name: $('#sN').value.trim(), phone: $('#sPh').value.trim(), eta_text: $('#sEta').value.trim(), min_order, color: $('#sC').value, is_open: $('#sOpen').checked, allow_pickup: $('#sPick').checked }).eq('id', S.id));
       await refreshBrand();
     }
+    if (id === 'fKiosk') { const pin = $('#kioskPin').value.trim(); if (pin && !/^\d{4,8}$/.test(pin)) throw new Error('O PIN deve ter de 4 a 8 números'); local.set('kioskPin', pin); return go('/painel/totem'); }
     if (id === 'fCall') await q(sb.from('tenants').update({ call_names: $('#cnOn').checked }).eq('id', S.id));
     if (id === 'fAuto') await q(sb.from('tenants').update({ auto_accept: $('#aaOn').checked }).eq('id', S.id));
     if (id === 'fGoals') {
@@ -2408,6 +2530,7 @@ async function pConfig(S) {
         free_delivery_above: above, loyalty_enabled: $('#lOn').checked, loyalty_every: every, loyalty_percent: pct,
         allow_tables: $('#mOn').checked, tables_count: Math.max(1, Math.min(200, +$('#mCount').value || 10)),
         ...($('#mSvc') ? { service_percent: Math.max(0, Math.min(20, Math.round(+$('#mSvc').value || 0))) } : {}),
+        ...($('#refRw') ? { referral_reward: (() => { const v = toCents($('#refRw').value || '0'); if (!Number.isInteger(v) || v < 0 || v > 10000) throw new Error('Indique e ganhe: de R$ 0 a R$ 100'); return v; })() } : {}),
         ...($('#cbPct') ? { cashback_percent: Math.max(0, Math.min(30, Math.round(+$('#cbPct').value || 0))), cashback_days: Math.max(7, Math.min(365, Math.round(+$('#cbDays').value || 90))) } : {}) }).eq('id', S.id));
       await refreshBrand();
     }
@@ -2456,7 +2579,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
   '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql',
-  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql'];
+  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };
