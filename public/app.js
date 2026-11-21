@@ -427,34 +427,89 @@ function vLegal(which) {
 
 /* ---------- página do entregador (link secreto, sem login) ---------- */
 async function vCourier(token) {
-  let lastSig = '';
-  const draw = async (force) => {
-    const r = await rpc('courier_portal', { p_token: token });
-    if (!r) { app.innerHTML = '<div class="panel auth"><h2>Link inválido</h2><p>Peça um link novo para a loja.</p></div>'; header('', false); return false; }
-    const sig = JSON.stringify(r); if (!force && sig === lastSig) return true; lastSig = sig;
-    setColor(r.store.color); brand(r.store.name); header('', false);
-    app.innerHTML = `<div class="courier"><h2>Olá, ${esc(r.courier.name.split(' ')[0])}!</h2>
-      <p class="lead">Hoje: <b>${r.today.deliveries}</b> entrega(s) · ${brl(r.today.fees)} em taxas. Esta página atualiza sozinha.</p>
-      ${r.deliveries.map(d => `<div class="panel dl">
-        <div class="row between"><b class="big">#${d.number}</b><span class="mut">saiu há ${mins(d.since)} min</span></div>
+  let lastSig = '', R = null, plan = null, planSig = '', me = null, watch = null, lastSent = 0, sentAt = null, wake = null;
+  const sharing = () => local.get(`share:${token.slice(0, 12)}`, false);
+  // Rota sugerida: posição atual (ou a loja) → entregas na ordem mais curta. Endereço sem localização: procura no mapa.
+  const buildPlan = async () => {
+    const ds = R?.deliveries || [], sig = ds.map(d => d.id).join();
+    if (sig === planSig && plan) return;
+    planSig = sig; plan = null;
+    if (!ds.length) return;
+    const pts = await Promise.all(ds.map(async d => d.lat != null ? { lat: d.lat, lng: d.lng } : await geocodeText(/ km$/.test(d.zone) ? d.address : `${d.address}, ${d.zone}`)));
+    if (sig !== planSig) return;
+    const withPt = ds.map((d, i) => ({ ...d, pt: pts[i] })), geo = withPt.filter(d => d.pt), rest = withPt.filter(d => !d.pt);
+    const start = me ? [me.lat, me.lng] : R.store.lat != null ? [R.store.lat, R.store.lng] : null;
+    plan = [...orderStops(start, geo, d => [d.pt.lat, d.pt.lng]), ...rest];
+    paint();
+  };
+  const gmaps = () => {
+    const stop = d => d.pt ? `${d.pt.lat},${d.pt.lng}` : (/ km$/.test(d.zone) ? d.address : `${d.address}, ${d.zone}`);
+    const ps = plan.map(stop), origin = me ? `${me.lat},${me.lng}` : R.store.lat != null ? `${R.store.lat},${R.store.lng}` : '';
+    return `https://www.google.com/maps/dir/?api=1&travelmode=driving${origin ? `&origin=${encodeURIComponent(origin)}` : ''}&destination=${encodeURIComponent(ps.at(-1))}${ps.length > 1 ? `&waypoints=${encodeURIComponent(ps.slice(0, -1).join('|'))}` : ''}`;
+  };
+  const card = (d, i) => `<div class="panel dl">
+        <div class="row between"><b class="big">${plan ? `<span class="stopn">${i + 1}</span> ` : ''}#${d.number}</b><span class="mut">saiu há ${mins(d.since)} min</span></div>
         <div><b>${esc(d.customerName)}</b></div>
         <div class="addr">${esc(d.address)}<br><span class="mut">${esc(d.zone)}</span></div>
         <div class="${d.paid ? 'badge b-g' : 'badge b-a'}" style="font-size:14px;padding:6px 10px">${d.paid ? 'JÁ PAGO · não cobrar' : `Cobrar ${brl(d.total)} · ${esc(d.payment)}${d.changeFor ? ` · levar troco p/ ${brl(d.changeFor)}` : ''}`}</div>
         <div class="mut">${d.items.map(esc).join(' · ')}</div>
         <div class="grid" style="grid-template-columns:repeat(3,minmax(0,1fr));gap:8px">
-          <a class="btn ghost" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(/ km$/.test(d.zone) ? d.address : d.address + ', ' + d.zone)}" target="_blank" rel="noopener">Mapa</a>
-          ${waBtn(waLink(d.customerPhone, `Olá, ${d.customerName.split(' ')[0]}! Sou o entregador da ${r.store.name} e estou chegando com seu pedido #${d.number}.`), 'WhatsApp').replace('btn ghost sm', 'btn ghost') || '<span></span>'}
+          <a class="btn ghost" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(d.lat != null ? `${d.lat},${d.lng}` : / km$/.test(d.zone) ? d.address : d.address + ', ' + d.zone)}" target="_blank" rel="noopener">Mapa</a>
+          ${waBtn(waLink(d.customerPhone, `Olá, ${d.customerName.split(' ')[0]}! Sou o entregador da ${R.store.name} e estou chegando com seu pedido #${d.number}.`), 'WhatsApp').replace('btn ghost sm', 'btn ghost') || '<span></span>'}
           <a class="btn ghost" href="tel:${esc(String(d.customerPhone).replace(/[^\d+]/g, ''))}">Ligar</a></div>
-        <button class="ok" data-done="${d.id}">Entreguei</button></div>`).join('') || '<div class="panel"><p class="empty">Nenhuma entrega com você agora.</p></div>'}
-      ${r.store.phone ? `<p class="mut">Dúvidas: ${esc(r.store.phone)}</p>` : ''}</div>`;
+        <button class="ok" data-done="${d.id}">Entreguei</button></div>`;
+  const paint = () => {
+    if (!R) return;
+    const ds = plan || R.deliveries;
+    app.innerHTML = `<div class="courier"><h2>Olá, ${esc(R.courier.name.split(' ')[0])}!</h2>
+      <p class="lead">Hoje: <b>${R.today.deliveries}</b> entrega(s) · ${brl(R.today.fees)} em taxas. Esta página atualiza sozinha.</p>
+      ${R.deliveries.length ? `<div class="panel live">
+        <label class="chk"><input type="checkbox" id="shareLoc" ${sharing() ? 'checked' : ''}> <b>Compartilhar minha localização</b></label>
+        <span class="mut">${sharing() ? (me ? `Ligado · o cliente vê você no mapa${sentAt ? ` · enviado às ${hhmm(sentAt)}` : ''}. Mantenha esta página aberta.` : 'Procurando o GPS… permita a localização se o celular pedir.') : 'O cliente acompanha você chegando, só enquanto a entrega dele está em rota. Desliga sozinho quando você termina.'}</span>
+        ${R.deliveries.length > 1 ? `<div class="row between" style="margin-top:6px"><b>Rota sugerida${plan ? `: ${plan.map(d => '#' + d.number).join(' → ')}` : '…'}</b>${plan ? `<a class="btn pri sm" href="${esc(gmaps())}" target="_blank" rel="noopener">Abrir rota no Google Maps</a>` : ''}</div>` : ''}
+        <div class="omap" id="cMap" hidden></div></div>` : ''}
+      ${ds.map(card).join('') || '<div class="panel"><p class="empty">Nenhuma entrega com você agora.</p></div>'}
+      ${R.store.phone ? `<p class="mut">Dúvidas: ${esc(R.store.phone)}</p>` : ''}</div>`;
+    drawMap($('#cMap'), [
+      ...(me ? [{ ...me, kind: 'moto', label: 'Você' }] : R.store.lat != null ? [{ lat: R.store.lat, lng: R.store.lng, kind: 'store', label: R.store.name }] : []),
+      ...(plan || []).filter(d => d.pt).map((d, i) => ({ ...d.pt, kind: 'n', label: String(i + 1) }))]);
+  };
+  const draw = async force => {
+    const r = await rpc('courier_portal', { p_token: token });
+    if (!r) { app.innerHTML = '<div class="panel auth"><h2>Link inválido</h2><p>Peça um link novo para a loja.</p></div>'; header('', false); return false; }
+    const sig = JSON.stringify(r); if (!force && sig === lastSig) return true; lastSig = sig; R = r;
+    setColor(r.store.color); brand(r.store.name, r.store.logo); header('', false);
+    if (!r.deliveries.length) stopGps();
+    else if (sharing() && watch == null) startGps();
+    paint(); buildPlan();
     return true;
+  };
+  const send = async () => {
+    if (!me || !R?.deliveries.length || Date.now() - lastSent < 15000) return;
+    lastSent = Date.now();
+    try { if (await rpc('courier_ping', { p_token: token, p_lat: me.lat, p_lng: me.lng, p_acc: me.acc })) { sentAt = new Date(); paint(); } } catch {}
+  };
+  function startGps() {
+    if (!navigator.geolocation) return toast('Este celular não tem GPS no navegador');
+    watch = navigator.geolocation.watchPosition(p => { me = { lat: p.coords.latitude, lng: p.coords.longitude, acc: p.coords.accuracy }; send(); if (!sentAt) paint(); },
+      err => { toast(err.code === 1 ? 'Permita a localização para o cliente ver você no mapa' : 'GPS indisponível agora'); }, { enableHighAccuracy: true, maximumAge: 10000, timeout: 30000 });
+    navigator.wakeLock?.request('screen').then(w => { wake = w; }).catch(() => {});   // tela acesa enquanto compartilha
+  }
+  function stopGps() { if (watch != null) navigator.geolocation.clearWatch(watch); watch = null; wake?.release?.().catch(() => {}); wake = null; }
+  app.onchange = e => {
+    if (e.target.id !== 'shareLoc') return;
+    local.set(`share:${token.slice(0, 12)}`, e.target.checked);
+    if (e.target.checked) startGps(); else { stopGps(); me = null; sentAt = null; }
+    paint();
   };
   app.onclick = attempt(async e => {
     const b = e.target.closest('button[data-done]'); if (!b) return;
     if (!sure(b)) return;
     await rpc('courier_deliver', { p_token: token, p_order: +b.dataset.done }); toast('Entrega confirmada'); await draw(true);
   });
-  if (await draw(true)) { const h = setInterval(() => draw().catch(() => {}), 15000); cleanup = () => { clearInterval(h); app.onclick = null; }; }
+  const vis = () => { if (document.visibilityState === 'visible' && sharing() && R?.deliveries.length) { navigator.wakeLock?.request('screen').then(w => { wake = w; }).catch(() => {}); draw().catch(() => {}); } };
+  document.addEventListener('visibilitychange', vis);
+  if (await draw(true)) { const h = setInterval(() => { draw().catch(() => {}); send(); }, 15000); cleanup = () => { clearInterval(h); stopGps(); document.removeEventListener('visibilitychange', vis); app.onclick = app.onchange = null; }; }
   else cleanup = () => { app.onclick = null; };
 }
 
@@ -849,7 +904,22 @@ async function pushSubscribe(code, key) {
   if (!ok) throw new Error('Este pedido já foi encerrado');
 }
 async function vTrack(code) {
-  let lastSig = '', rating = 0, pushKey = null, REF;
+  let lastSig = '', rating = 0, pushKey = null, REF, LIVE = null, liveAt = 0;
+  // Entregador ao vivo: posição a cada 15 s enquanto o pedido está em rota
+  const paintLive = () => {
+    const el = $('#tMap'); if (!el) return;
+    if (!LIVE) { el.hidden = true; $('#tMapInfo').textContent = 'O entregador ainda não ligou a localização. Assim que ligar, ele aparece aqui no mapa.'; return; }
+    const pts = [{ lat: LIVE.lat, lng: LIVE.lng, kind: 'moto', label: 'Entregador' }, ...(LIVE.dest ? [{ ...LIVE.dest, kind: 'home', label: 'Você' }] : [])];
+    drawMap(el, pts);
+    const km = LIVE.dest ? kmBetween([LIVE.lat, LIVE.lng], [LIVE.dest.lat, LIVE.dest.lng]) : null, ago = Math.max(0, Math.round((Date.now() - new Date(LIVE.at)) / 1000));
+    $('#tMapInfo').innerHTML = `🛵 ${km != null ? `A cerca de <b>${km < 1 ? Math.round(km * 1000) + ' m' : kmTxt(Math.round(km * 10) / 10)}</b> de você · ` : ''}${LIVE.stopsBefore ? `${LIVE.stopsBefore} entrega(s) antes da sua · ` : ''}atualizado há ${ago < 60 ? `${ago} s` : `${Math.round(ago / 60)} min`}`;
+  };
+  const pollLive = async () => {
+    if (!$('#tMap') || Date.now() - liveAt < 14000) return;
+    liveAt = Date.now();
+    try { LIVE = await rpc('track_courier', { p_code: code }); } catch { LIVE = null; }
+    paintLive();
+  };
   rpc('my_referral', { p_code: code }).then(r => { REF = r; if (r) draw(true).catch(() => {}); }).catch(() => { REF = null; });
   const refLink = () => `${location.origin}/loja/${REF.slug}?indica=${REF.code}`;
   const refBox = o => !REF || o.status === 'cancelado' ? '' : `<div class="loyal refbox"><b>🎁 Indique e ganhe ${brl(REF.reward)}</b>
@@ -882,6 +952,7 @@ async function vTrack(code) {
       `<div class="steps">${flow.map((s, i) => `<span class="${i <= idx ? 'on' : ''}">${s === 'pronto' && o.fulfillment === 'pickup' ? 'Pronto p/ retirar' : s === 'entregue' && o.fulfillment === 'table' ? 'Servido' : SLABEL[s]}${at[s] ? `<br><small>${hhmm(at[s])}</small>` : ''}</span>`).join('')}</div>`}
       ${o.etaAt && !['entregue', 'cancelado', 'pagamento'].includes(o.status) && !(o.fulfillment !== 'delivery' && o.status === 'pronto') ? `<p class="eta">${o.fulfillment === 'delivery' ? 'Previsão de entrega' : o.fulfillment === 'table' ? 'Previsão para servir' : 'Previsão para ficar pronto'}: <b>por volta das ${hhmm(new Date(Math.max(new Date(o.etaAt), Date.now() + 5 * 60000)).toISOString())}</b> <span class="mut">· tempo médio da loja</span></p>` : ''}
       ${o.courier ? `<p><b>${esc(o.courier)}</b> está a caminho de ${esc(o.address)}, ${esc(o.zone)}.</p>` : ''}
+      ${o.status === 'rota' && o.fulfillment === 'delivery' ? '<div class="omap" id="tMap" hidden></div><p class="mut" id="tMapInfo" style="margin:6px 0 12px"></p>' : ''}
       ${pushBox(o)}
       <table><tbody>${o.items.map(x => `<tr><td>${x.qty}× ${esc(x.product_name)}${x.options_text ? `<br><span class="mut">${esc(x.options_text)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}</td><td class="n price">${brl(x.qty * x.unit_price)}</td></tr>`).join('')}
       <tr><td>${o.fulfillment === 'pickup' ? 'Retirada na loja' : o.fulfillment === 'table' ? esc(o.zone) : `Entrega (${esc(o.zone)})`}</td><td class="n price">${brl(o.fee)}</td></tr>
@@ -902,6 +973,7 @@ async function vTrack(code) {
         <textarea id="rvText" rows="2" maxlength="500" placeholder="Conte o que achou (opcional)"></textarea><button class="pri" id="rvSend" disabled>Enviar avaliação</button></div>` : ''}
       ${o.review ? `<div class="loyal"><b>Sua avaliação</b><span class="stars">${'★'.repeat(o.review.rating)}${'☆'.repeat(5 - o.review.rating)}</span>${o.review.comment ? `<span>${esc(o.review.comment)}</span>` : ''}${o.review.reply ? `<span class="mut">Resposta da loja: ${esc(o.review.reply)}</span>` : ''}</div>` : ''}
       <div class="row"><a class="btn ghost" href="/loja/${esc(S.slug)}" data-link>Voltar à loja</a>${['entregue', 'cancelado'].includes(o.status) && o.fulfillment !== 'table' ? `<a class="btn pri" href="/loja/${esc(S.slug)}?repetir=1" data-link>↻ Pedir de novo</a>` : ''}</div></div>`;
+    paintLive();
     return o.status;
   };
   // Pagamento com cartão: o Mercado Pago cuida dos dados do cartão; aqui só o botão para pagar e a conferência.
@@ -950,7 +1022,8 @@ async function vTrack(code) {
   }
   const st = await draw(true);
   if (!['entregue', 'cancelado'].includes(st)) {
-    const h = setInterval(async () => { try { if (['entregue', 'cancelado'].includes(await draw())) clearInterval(h); } catch {} }, 5000);
+    const h = setInterval(async () => { try { if (['entregue', 'cancelado'].includes(await draw())) clearInterval(h); pollLive(); } catch {} }, 5000);
+    pollLive();
     cleanup = () => { clearInterval(h); app.onclick = null; };
   } else cleanup = () => { app.onclick = null; };
 }
@@ -1125,13 +1198,63 @@ async function pOrders(S, owner) {
 // Rota de entregas: ordena as paradas pela mais próxima (a partir da loja) e monta o link do Google Maps.
 const kmBetween = (a, b) => { const r = x => x * Math.PI / 180, dLat = r(b[0] - a[0]), dLng = r(b[1] - a[1]);
   return 12742 * Math.asin(Math.sqrt(Math.sin(dLat / 2) ** 2 + Math.cos(r(a[0])) * Math.cos(r(b[0])) * Math.sin(dLng / 2) ** 2)); };
+// Ordem das paradas a partir de "start" ([lat, lng]): vizinho mais próximo e depois 2-opt (desfaz cruzamentos). pt(x) => [lat, lng]
+function orderStops(start, xs, pt) {
+  const left = [...xs], out = []; let at = start || (xs[0] && pt(xs[0]));
+  while (left.length) { let bi = 0; left.forEach((o, i) => { if (kmBetween(at, pt(o)) < kmBetween(at, pt(left[bi]))) bi = i; }); const [o] = left.splice(bi, 1); out.push(o); at = pt(o); }
+  if (!start || out.length < 3) return out;
+  const len = r => r.reduce((t, o, i) => t + kmBetween(i ? pt(r[i - 1]) : start, pt(o)), 0);
+  let best = out, bestLen = len(out), improved = true, guard = 0;
+  while (improved && guard++ < 50) {
+    improved = false;
+    for (let i = 0; i < best.length - 1; i++) for (let j = i + 1; j < best.length; j++) {
+      const cand = [...best.slice(0, i), ...best.slice(i, j + 1).reverse(), ...best.slice(j + 1)], l = len(cand);
+      if (l < bestLen - 1e-9) { best = cand; bestLen = l; improved = true; }
+    }
+  }
+  return best;
+}
 function planRoute(S, os) {
   const geo = os.filter(o => o.dest_lat != null && o.dest_lng != null), rest = os.filter(o => o.dest_lat == null || o.dest_lng == null);
-  const out = []; let at = S.lat != null ? [S.lat, S.lng] : geo[0] ? [geo[0].dest_lat, geo[0].dest_lng] : null;
-  while (geo.length) { let bi = 0; geo.forEach((o, i) => { if (kmBetween(at, [o.dest_lat, o.dest_lng]) < kmBetween(at, [geo[bi].dest_lat, geo[bi].dest_lng])) bi = i; });
-    const [o] = geo.splice(bi, 1); out.push(o); at = [o.dest_lat, o.dest_lng]; }
-  // Sem coordenadas: agrupa pelo bairro/zona.
-  return [...out, ...rest.sort((a, b) => String(a.zone_name).localeCompare(String(b.zone_name)))];
+  const start = S.lat != null ? [S.lat, S.lng] : null;
+  // Sem coordenadas: agrupa pelo bairro/zona, no fim.
+  return [...orderStops(start, geo, o => [o.dest_lat, o.dest_lng]), ...rest.sort((a, b) => String(a.zone_name).localeCompare(String(b.zone_name)))];
+}
+
+// Mapa leve (blocos do OpenStreetMap, sem biblioteca). pts: [{ lat, lng, kind: 'moto'|'home'|'store'|'n', label }]
+function drawMap(el, pts, { height = 260 } = {}) {
+  if (!el) return;
+  pts = pts.filter(p => Number.isFinite(p?.lat) && Number.isFinite(p?.lng));
+  if (!pts.length) { el.innerHTML = ''; el.hidden = true; return; }
+  el.hidden = false;
+  const W = el.clientWidth || 600, H = height, T = 256;
+  const X = (lng, z) => (lng + 180) / 360 * T * 2 ** z;
+  const Y = (lat, z) => { const r = lat * Math.PI / 180; return (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * T * 2 ** z; };
+  let z = 17;
+  for (; z > 3; z--) {
+    const xs = pts.map(p => X(p.lng, z)), ys = pts.map(p => Y(p.lat, z));
+    if (Math.max(...xs) - Math.min(...xs) <= W - 70 && Math.max(...ys) - Math.min(...ys) <= H - 70) break;
+  }
+  const xs = pts.map(p => X(p.lng, z)), ys = pts.map(p => Y(p.lat, z));
+  const left = (Math.max(...xs) + Math.min(...xs)) / 2 - W / 2, top = (Math.max(...ys) + Math.min(...ys)) / 2 - H / 2, n = 2 ** z;
+  let tiles = '';
+  for (let tx = Math.floor(left / T); tx <= Math.floor((left + W) / T); tx++) for (let ty = Math.floor(top / T); ty <= Math.floor((top + H) / T); ty++) {
+    if (ty < 0 || ty >= n) continue;
+    tiles += `<img src="https://tile.openstreetmap.org/${z}/${((tx % n) + n) % n}/${ty}.png" alt="" style="left:${Math.round(tx * T - left)}px;top:${Math.round(ty * T - top)}px" loading="lazy" referrerpolicy="strict-origin-when-cross-origin">`;
+  }
+  const icon = { moto: '🛵', home: '🏠', store: '🏪' };
+  const marks = pts.map(p => `<span class="mk mk-${p.kind || 'n'}" style="left:${Math.round(X(p.lng, z) - left)}px;top:${Math.round(Y(p.lat, z) - top)}px" title="${esc(p.label || '')}">${icon[p.kind] || esc(p.label || '•')}</span>`).join('');
+  el.style.height = `${H}px`;
+  el.innerHTML = `${tiles}${marks}<a class="osm" href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">© OpenStreetMap</a>`;
+}
+// Endereço em texto → coordenadas (com cache no aparelho), para pedidos sem localização exata
+async function geocodeText(addr) {
+  const k = `geo:${addr}`, c = local.get(k, null); if (c) return c.lat ? c : null;
+  try {
+    const u = new URL('https://nominatim.openstreetmap.org/search'); u.searchParams.set('format', 'json'); u.searchParams.set('limit', '1'); u.searchParams.set('countrycodes', 'br'); u.searchParams.set('q', addr);
+    const j = await (await fetch(u, { headers: { 'Accept-Language': 'pt-BR' } })).json();
+    const r = j[0] ? { lat: +j[0].lat, lng: +j[0].lon } : {}; local.set(k, r); return r.lat ? r : null;
+  } catch { return null; }
 }
 const stopOf = o => o.dest_lat != null ? `${o.dest_lat},${o.dest_lng}` : / km$/.test(o.zone_name) ? o.address : `${o.address}, ${o.zone_name}`;
 const routeUrl = (S, os) => { const pts = os.map(stopOf), origin = S.lat != null ? `${S.lat},${S.lng}` : (S.address || '');
@@ -1141,14 +1264,18 @@ const routeMsg = (S, os) => `Rota com ${os.length} entregas — ${S.name}\n\n${o
 // Mensagem de acerto para o entregador (WhatsApp): entregas, taxas e dinheiro a devolver.
 const settleMsg = (S, c, day) => `Acerto ${S.name} — ${day.split('-').reverse().join('/')}\n${c.name}\n\nEntregas: ${c.deliveries}${c.onRoute ? ` (+${c.onRoute} em rota)` : ''}\nTaxas de entrega: ${brl(c.fees)}\nDinheiro recebido dos clientes: ${brl(c.cash)}\n${c.cash >= c.fees ? `Devolver à loja: ${brl(c.cash - c.fees)}` : `A loja paga: ${brl(c.fees - c.cash)}`}\n\nPedidos: ${c.orders.map(o => `#${o.number} ${o.status === 'rota' ? '(em rota)' : ''}${o.payment === 'Dinheiro' && o.status === 'entregue' ? ` dinheiro ${brl(o.total)}` : ''}`).join(', ')}`;
 async function pDelivery(S) {
-  let ready = [], route = [], couriers = [], settle = null;
+  let ready = [], route = [], couriers = [], settle = null, onMap = null;
   const today = new Date().toLocaleDateString('en-CA', { timeZone: S.timezone || 'America/Sao_Paulo' });
   let sday = today;
   const picked = new Set();
   const load = async () => {
     [ready, route, couriers, settle] = await Promise.all([fetchOrders(S.id, ['pronto']), fetchOrders(S.id, ['rota']), q(sb.from('couriers').select('id, tenant_id, name, phone, active').eq('tenant_id', S.id).order('id')),
       rpc('courier_settlement', { p_tenant: S.id, p_day: sday }).catch(() => null)]);
+    onMap = await rpc('courier_positions', { p_tenant: S.id }).catch(() => null);
     draw();
+    if (onMap?.length) drawMap($('#dMap'), [...(S.lat != null ? [{ lat: S.lat, lng: S.lng, kind: 'store', label: S.name }] : []),
+      ...onMap.map(c => ({ lat: c.lat, lng: c.lng, kind: 'moto', label: c.name })),
+      ...onMap.flatMap(c => c.orders.filter(o => o.lat != null).map(o => ({ lat: o.lat, lng: o.lng, kind: 'n', label: `#${o.number}` })))]);
   };
   const draw = () => {
     const free = couriers.filter(c => c.active);
@@ -1160,6 +1287,7 @@ async function pDelivery(S) {
         ${o.fulfillment !== 'delivery' ? `<button class="ok sm" data-st="entregue" data-id="${o.id}">${o.fulfillment === 'table' ? 'Servido na mesa' : 'Cliente retirou'}</button>` : free.length ? `<span class="row" style="flex-wrap:nowrap"><select id="c${o.id}" aria-label="Entregador">${free.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><button class="pri sm" data-st="rota" data-id="${o.id}">Despachar</button></span>` : '<span class="badge b-a">Cadastre ou ative um entregador</span>'}
         <span class="row">${waBtn(waLink(o.customer_phone, customerMsg(o, S.name)), 'Avisar cliente')}${o.fulfillment === 'delivery' ? `<a class="btn ghost sm" href="${esc(mapsUrl(o))}" target="_blank" rel="noopener">Mapa</a>` : ''}</span></div>`).join('') || '<p class="empty">Nenhum pedido pronto</p>'}
     </div><div class="panel"><h3>Em rota (${route.length})</h3>
+      ${onMap?.length ? `<div class="omap" id="dMap" hidden></div><p class="mut" style="margin:4px 0 10px">${onMap.map(c => `🛵 <b>${esc(c.name)}</b> · ${c.orders.length} entrega(s) · posição de ${hhmm(c.at)}`).join('<br>')}</p>` : ''}
       ${route.map(o => `<div class="tk go"><div class="top"><span>#${o.number} · ${esc(o.courier?.name || '—')}</span><span class="price">${mins(o.updated_at)} min</span></div><span class="mut">${esc(o.address)} — ${esc(o.zone_name)} · ${esc(o.payment)}</span>
         <span class="row"><button class="ok sm" data-st="entregue" data-id="${o.id}">Confirmar entrega</button>${waBtn(waLink(couriers.find(c => c.id === o.courier_id)?.phone, courierMsg(o)), 'Enviar ao entregador')}${waBtn(waLink(o.customer_phone, customerMsg(o, S.name)), 'Avisar cliente')}</span></div>`).join('') || '<p class="empty">Ninguém na rua agora</p>'}
       ${settle ? `<div class="row between" style="margin-top:8px"><h3 style="margin:0">Acerto do dia</h3><input type="date" id="sDay" value="${sday}" max="${today}" style="width:auto"></div>
@@ -2579,7 +2707,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
   '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql',
-  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql'];
+  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };

@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -617,7 +617,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 27);
+  assert.equal(st.length, 28);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1296,4 +1296,41 @@ test('indique e ganhe: crédito para os dois na entrega do 1º pedido; regras co
   assert.equal(sql(`select coalesce(my_referral('${a1.code}')::text, 'null')`, null), 'null');
   assert.equal(sql(`select apply_referral('${mk('Duda', '11977770004').code}', '${ref.code}')`, null), 'off');
   fails(`update tenants set referral_reward = 500 where id = '${pizzaId}'`, null, /permission denied/);
+});
+
+test('entregador ao vivo: posição só em rota, cliente vê só o próprio pedido, apaga ao terminar', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', lat = -23.55, lng = -46.63 where id = '${pizzaId}'`);
+  const c = sql(`insert into couriers (tenant_id, name, phone) values ('${pizzaId}', 'Rafa Moto', '11911113333') returning id`);
+  const tok = sql(`select courier_link(${c})`, U.pizza);
+  const ping = (lat, lng) => sql(`select courier_ping('${tok}', ${lat}, ${lng}, 12)`, null);
+  assert.equal(ping(-23.56, -46.64), 'f');   // sem entrega em rota: não guarda
+  assert.equal(sql(`select coalesce(last_at::text, 'null') from couriers where id = ${c}`), 'null');
+  const p = menu('forno-da-vila').find(x => x.groups.length === 0);
+  const mk = () => order('forno-da-vila', { customer: { name: 'Cli Mapa', phone: '11966660000' }, fulfillment: 'delivery', zoneId: zones('forno-da-vila')[0].id, address: 'Rua M, 1', payment: 'Pix', items: [{ productId: p.id, qty: 1 }] });
+  const a = mk(), b = mk(), other = mk();
+  const id = x => sql(`select id from orders where public_code = '${x.code}'`);
+  for (const x of [a, b]) sql(`select change_order_status(${id(x)}, 'preparo'); select change_order_status(${id(x)}, 'pronto'); select change_order_status(${id(x)}, 'rota', ${c})`, U.pizza);
+  sql(`update orders set dest_lat = -23.57, dest_lng = -46.65 where id = ${id(a)}`);
+  assert.equal(sql(`select coalesce(track_courier('${a.code}')::text, 'null')`, null), 'null');   // ainda sem posição
+  assert.equal(ping(-23.561234567, -46.641234567), 't');
+  const t = json(`track_courier('${a.code}')`, null);
+  assert.equal(t.lat, -23.56123); assert.equal(t.lng, -46.64123);   // arredondado (~1 m)
+  assert.deepEqual(t.dest, { lat: -23.57, lng: -46.65 }); assert.deepEqual(t.store, { lat: -23.55, lng: -46.63 });
+  assert.equal(t.stopsBefore, 0);
+  assert.equal(json(`track_courier('${b.code}')`, null).stopsBefore, 1);
+  assert.equal(sql(`select coalesce(track_courier('${other.code}')::text, 'null')`, null), 'null');   // pedido de outro: nada
+  const portal = json(`courier_portal('${tok}')`, null);
+  assert.equal(portal.store.lat, -23.55); assert.equal(portal.deliveries.find(d => d.number).lat !== undefined, true);
+  assert.equal(json(`courier_positions('${pizzaId}')`, U.pizza)[0].name, 'Rafa Moto');
+  assert.deepEqual(json(`courier_positions('${pizzaId}')`, U.burger), []);
+  fails(`select courier_positions('${pizzaId}')`, null, /permission denied/);
+  fails(`select last_lat from couriers where id = ${c}`, U.pizza, /permission denied/);
+  fails(`select courier_ping('${'x'.repeat(64)}', 1, 1, 1)`, null, /Link inválido/);
+  fails(`select courier_ping('${tok}', 91, 1, 1)`, null, /Posição inválida/);
+  // entregou o primeiro: posição continua (ainda tem o segundo); entregou o último: apaga
+  sql(`select courier_deliver('${tok}', ${id(a)})`, null);
+  assert.notEqual(sql(`select coalesce(last_at::text, 'null') from couriers where id = ${c}`), 'null');
+  assert.equal(sql(`select coalesce(track_courier('${a.code}')::text, 'null')`, null), 'null');   // entregue: não mostra mais
+  sql(`select courier_deliver('${tok}', ${id(b)})`, null);
+  assert.equal(sql(`select coalesce(last_at::text, 'null') from couriers where id = ${c}`), 'null');
 });
