@@ -366,3 +366,17 @@ body.kiosk .opts button{min-height:54px;font-size:17px}
 .share{display:inline-block;width:80px;height:8px;border-radius:4px;background:var(--line);overflow:hidden;vertical-align:middle}
 .share span{display:block;height:100%;border-radius:4px}
 .pseg{display:flex;flex-wrap:wrap}
+
+/* vale-presente */
+.mono{font-family:ui-monospace,Menlo,Consolas,monospace;letter-spacing:.5px}
+.giftcode{font:800 28px ui-monospace,Menlo,Consolas,monospace;letter-spacing:2px;text-align:center;border:2px dashed var(--line);border-radius:14px;padding:14px;margin:8px 0}
+.giftsheet{display:none}
+@media print{
+  @page gift{size:A5 landscape;margin:8mm}
+  .giftsheet{page:gift;display:grid;place-items:center;min-height:120mm}
+  .giftcard{width:170mm;border:2px solid;border-radius:6mm;padding:9mm;text-align:center;font:14px Inter,sans-serif;color:#000}
+  .giftcard h1{margin:0;font-size:24pt}.giftcard h2{margin:2mm 0;font-size:32pt}.giftcard p{margin:2mm 0}
+  .giftcard img{height:18mm}.giftcard .s{font-size:10pt;color:#555}
+  .giftcard .gcode{font:700 20pt monospace;letter-spacing:2px;border:1px dashed #999;border-radius:3mm;padding:3mm;margin:5mm 0}
+}
+.giftbox{display:grid;gap:6px}

@@ -162,17 +162,17 @@ const localToUtc = (tz, y, m, d, minOfDay) => { const guess = Date.UTC(y, m - 1,
 const fmtWhen = (iso, tz) => new Date(iso).toLocaleString('pt-BR', { timeZone: tz || 'America/Sao_Paulo', weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 const hhmmTz = (iso, tz) => new Date(iso).toLocaleTimeString('pt-BR', { timeZone: tz || 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
 // Horários possíveis para agendar (mesma regra do banco: antecedência, limite de dias e faixas de funcionamento)
-function scheduleSlots(S) {
-  const tz = S.timezone || 'America/Sao_Paulo', step = S.schedule_slot_minutes || 30, minAt = Date.now() + (S.schedule_lead_minutes || 60) * 60000;
-  const maxAt = Date.now() + (S.schedule_days || 3) * 864e5, out = [];
-  for (let i = 0; i <= (S.schedule_days || 3); i++) {
+function scheduleSlots(S, o = {}) {
+  const tz = S.timezone || 'America/Sao_Paulo', step = o.step || S.schedule_slot_minutes || 30, minAt = Date.now() + (o.lead ?? S.schedule_lead_minutes ?? 60) * 60000;
+  const days = o.days || S.schedule_days || 3, maxAt = Date.now() + days * 864e5, out = [], endGap = o.endGap || 0;
+  for (let i = 0; i <= days; i++) {
     const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' }).formatToParts(new Date(Date.now() + i * 864e5)).map(x => [x.type, x.value]));
     const dow = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(p.weekday);
     const ranges = S.auto_hours ? ((S.hours || {})[dow] || []).map(([o, c]) => [toMin(o), toMin(c) <= toMin(o) ? 1440 : toMin(c)]) : [[8 * 60, 23 * 60]];
     const slots = [];
-    for (const [o, c] of ranges) for (let m = Math.ceil(o / step) * step; m < c; m += step) {
+    for (const [o2, c] of ranges) for (let m = Math.ceil(o2 / step) * step; m < c - endGap; m += step) {
       const at = localToUtc(tz, +p.year, +p.month, +p.day, m);
-      if (at.getTime() >= minAt && at.getTime() <= maxAt && !closedOn(S, at) && !(S.paused_until && at < new Date(S.paused_until))) slots.push({ iso: at.toISOString(), label: `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}` });
+      if (at.getTime() >= minAt && at.getTime() <= maxAt && !closedOn(S, at) && (o.ignorePause || !(S.paused_until && at < new Date(S.paused_until)))) slots.push({ iso: at.toISOString(), label: `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}` });
     }
     if (slots.length) out.push({ day: i === 0 ? 'Hoje' : i === 1 ? 'Amanhã' : `${DAYS[dow]} ${p.day}/${p.month}`, slots });
   }
@@ -400,6 +400,7 @@ async function render() {
     if (p[0] === 'termos' || p[0] === 'privacidade') return vLegal(p[0]);
     if (p[0] === 'meus-pedidos') return await vMyOrders();
     if (p[0] === 'chamada' && p[1]) return await vCallBoard(p[1]);
+    if (p[0] === 'reserva' && p[1]) return await vReservation(p[1]);
     if (p[0] === 'entregador' && p[1]) return await vCourier(p[1]);
     if (!p.length) { const hs = await slugForHost(); if (hs) return await vShop(hs); }
     await loadMe();
@@ -423,6 +424,62 @@ function vLegal(which) {
   const missing = !PLATFORM.company || !PLATFORM.cnpj || !PLATFORM.email || !PLATFORM.city;
   app.innerHTML = `<article class="panel legal">${missing ? '<p class="banner warn" style="margin:0">Modelo: preencha os dados da empresa em <code>public/config.js</code> (PLATFORM) e revise o texto com um advogado.</p>' : ''}
     ${which === 'termos' ? termsHtml(PLATFORM) : privacyHtml(PLATFORM)}</article>`;
+}
+
+/* ---------- reserva de mesa ---------- */
+function reserveDialog(S) {
+  const days = scheduleSlots(S, { step: 30, lead: 60, days: 30, endGap: 60, ignorePause: true });
+  if (!days.length) return toast('Sem horários disponíveis para reserva nos próximos dias');
+  const last = local.get('customer', {});
+  dialog(`<h2>Reservar mesa</h2><p class="mut" style="margin:0">${esc(S.name)} · a loja confirma a reserva e você acompanha pelo link.</p>
+    <form id="rvF" class="grid" style="gap:10px">
+      <div class="two" style="gap:10px"><label>Dia<select id="rvDay">${days.map((d, i) => `<option value="${i}">${esc(d.day)}</option>`).join('')}</select></label>
+        <label>Horário<select id="rvTime"></select></label></div>
+      <label>Pessoas<select id="rvParty">${Array.from({ length: S.reservation_max_party || 12 }, (_, i) => `<option ${i === 1 ? 'selected' : ''}>${i + 1}</option>`).join('')}</select></label>
+      <div class="two" style="gap:10px"><label>Seu nome<input id="rvName" required maxlength="80" value="${esc(last.name || '')}" autocomplete="name"></label>
+        <label>WhatsApp<input id="rvPhone" required inputmode="tel" maxlength="20" value="${esc(last.phone || '')}" autocomplete="tel" placeholder="(11) 99999-9999"></label></div>
+      <label>Observação (opcional)<input id="rvNote" maxlength="300" placeholder="Ex.: aniversário, cadeirão para bebê"></label>
+      <p class="mut" style="margin:0;font-size:13px">Grupos maiores que ${S.reservation_max_party || 12} pessoas: fale com a loja${S.phone ? ` (${esc(S.phone)})` : ''}.</p>
+      <div class="row" style="justify-content:flex-end"><button type="button" class="ghost" data-close>Voltar</button><button class="pri">Pedir reserva</button></div></form>`);
+  const fill = () => { const d = days[+$('#rvDay').value]; $('#rvTime').innerHTML = d.slots.map(x => `<option value="${x.iso}">${esc(x.label)}</option>`).join(''); };
+  fill(); $('#rvDay').onchange = fill;
+  $('#dlgBody').onsubmit = attempt(async e => {
+    e.preventDefault(); const b = e.target.querySelector('button.pri'); b.disabled = true;
+    try {
+      const r = await rpc('request_reservation', { p_slug: S.slug, p: { name: $('#rvName').value.trim(), phone: $('#rvPhone').value.trim(), party: +$('#rvParty').value, at: $('#rvTime').value, note: $('#rvNote').value.trim() } });
+      local.set('customer', { ...last, name: $('#rvName').value.trim(), phone: $('#rvPhone').value.trim() });
+      local.set('reservations', [{ code: r.code, slug: S.slug, at: $('#rvTime').value }, ...local.get('reservations', [])].slice(0, 10));
+      closeDlg(); go(`/reserva/${r.code}`);
+    } finally { b.disabled = false; }
+  });
+}
+const RESV_ST = { pendente: ['b-a', 'Aguardando confirmação'], confirmada: ['b-g', 'Confirmada'], recusada: ['b-r', 'Não foi possível reservar'], cancelada: ['b-r', 'Cancelada'], chegou: ['b-g', 'Você chegou. Bom apetite!'], faltou: ['', 'Não compareceu'] };
+const whenTxt = (iso, tz) => new Date(iso).toLocaleString('pt-BR', { timeZone: tz || 'America/Sao_Paulo', weekday: 'long', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+async function vReservation(code) {
+  let last = '';
+  const draw = async () => {
+    const r = await rpc('reservation_view', { p_code: code });
+    if (!r) { header('', false); app.innerHTML = '<div class="panel auth"><h2>Reserva não encontrada</h2><p>Confira o link.</p></div>'; return; }
+    const sig = JSON.stringify(r); if (sig === last) return; last = sig;
+    setColor(r.store.color); brand(r.store.name, r.store.logo); header('', false);
+    const [cls, txt] = RESV_ST[r.status] || ['', r.status];
+    app.innerHTML = `<div class="panel" style="max-width:560px;margin:0 auto;display:grid;gap:10px"><h2 style="margin:0">Reserva · ${esc(r.store.name)}</h2>
+      <span class="badge ${cls}" style="justify-self:start;font-size:15px;padding:6px 12px">${esc(txt)}</span>
+      <div class="ci"><span>Quando</span><b>${esc(whenTxt(r.at, r.store.timezone))}</b></div>
+      <div class="ci"><span>Pessoas</span><b>${r.party}</b></div>
+      <div class="ci"><span>Nome</span><b>${esc(r.name)}</b></div>
+      ${r.table ? `<div class="ci"><span>Mesa</span><b>${esc(r.table)}</b></div>` : ''}${r.note ? `<p class="mut" style="margin:0">Obs.: ${esc(r.note)}</p>` : ''}
+      ${r.status === 'pendente' ? '<p class="mut" style="margin:0">A loja vai confirmar sua reserva. Esta página atualiza sozinha.</p>' : ''}
+      ${r.store.address ? `<p class="mut" style="margin:0">📍 ${esc(r.store.address)}</p>` : ''}
+      <div class="row">${r.canCancel ? '<button class="ghost" id="rvCancel">Cancelar reserva</button>' : ''}${waBtn(waLink(r.store.phone, `Olá! Sobre a minha reserva (${r.code}) para ${r.party} pessoa(s) em ${whenTxt(r.at, r.store.timezone)}.`), 'Falar com a loja')}<a class="btn ghost" href="/loja/${esc(r.store.slug)}" data-link>Ver cardápio</a></div></div>`;
+  };
+  app.onclick = attempt(async e => {
+    const b = e.target.closest('#rvCancel'); if (!b || !sure(b)) return;
+    await rpc('reservation_cancel', { p_code: code }); toast('Reserva cancelada'); last = ''; await draw();
+  });
+  await draw();
+  const h = setInterval(() => draw().catch(() => {}), 20000);
+  cleanup = () => { clearInterval(h); app.onclick = null; };
 }
 
 /* ---------- página do entregador (link secreto, sem login) ---------- */
@@ -611,7 +668,7 @@ const bySort = (a, b) => a.sort - b.sort || a.id - b.id;
 const sortMenu = prods => prods.sort(bySort).map(p => ({ ...p,
   groups: (p.option_groups || []).sort(bySort).map(g => ({ ...g, options: (g.options || []).sort(bySort) })) }));
 // Colunas públicas da loja (os dados internos de cobrança não são lidos pelo site).
-const TENANT_BASE = 'id, slug, name, segment, color, plan, min_order, is_open, allow_pickup, eta_text, phone, timezone, active, created_at, hours, auto_hours, pix_online, billing_status, trial_ends_at, paid_until, delivery_mode, lat, lng, distance_tiers, loyalty_enabled, loyalty_every, loyalty_percent, allow_tables, tables_count, allow_scheduling, schedule_days, schedule_lead_minutes, schedule_slot_minutes, description, address, instagram, banner_path, free_delivery_above, card_online, custom_domain, service_percent, category_hours, paused_until, delivery_paused_until, closed_dates, stations, cashback_percent, cashback_days, logo_path, referral_reward';
+const TENANT_BASE = 'id, slug, name, segment, color, plan, min_order, is_open, allow_pickup, eta_text, phone, timezone, active, created_at, hours, auto_hours, pix_online, billing_status, trial_ends_at, paid_until, delivery_mode, lat, lng, distance_tiers, loyalty_enabled, loyalty_every, loyalty_percent, allow_tables, tables_count, allow_scheduling, schedule_days, schedule_lead_minutes, schedule_slot_minutes, description, address, instagram, banner_path, free_delivery_above, card_online, custom_domain, service_percent, category_hours, paused_until, delivery_paused_until, closed_dates, stations, cashback_percent, cashback_days, logo_path, referral_reward, reservations_on, reservation_max_party';
 let TENANT_COLS = TENANT_BASE;
 // Banco sem alguma migração nova: tira da lista a coluna que ainda não existe e tenta de novo.
 async function tenantsQuery(build) {
@@ -744,7 +801,7 @@ async function vShop(slug) {
     ${S.description ? `<p class="desc">${esc(S.description)}</p>` : ''}
     ${deliveryPaused(S) && !TABLE ? `<p class="banner" style="text-align:left;border-radius:12px;margin:0 0 12px">Entregas pausadas até as <b>${hhmm(S.delivery_paused_until)}</b>${S.allow_pickup ? ' · retirada na loja continua funcionando' : ''}.</p>` : ''}
     ${ACTIVE ? `<a class="activeorder" href="/pedido/${esc(ACTIVE.code)}" data-link>Seu pedido <b>#${ACTIVE.number}</b> está <b>${esc((SLABEL[ACTIVE.status] || ACTIVE.status).toLowerCase())}</b> · Acompanhar →</a>` : ''}
-    <p class="lead">${myOrders().length ? '<a href="/meus-pedidos" data-link>Meus pedidos</a> · ' : ''}${SCHED_ONLY ? '<span class="badge b-a">Fechado agora · agende seu pedido</span> · ' : ''}${RV?.count ? `<button class="rating" id="seeReviews">★ ${String(RV.avg).replace('.', ',')} <span class="mut">(${RV.count} avaliaç${RV.count > 1 ? 'ões' : 'ão'})</span></button> · ` : ''}${esc(S.seg?.name)} · ${OS.open ? `<span class="badge b-g">Aberto${OS.label ? ' ' + OS.label : ' agora'}</span>` : `<span class="badge b-r">${esc(OS.label || 'Fechado')}</span>`} · ${TABLE ? '' : ETA?.delivery ? `entrega em ~${etaTxt(ETA.delivery)} <span class="mut">(média da loja)</span>` : `entrega em ${esc(S.eta_text)}`}${S.min_order ? ` · pedido mínimo ${brl(S.min_order)}` : ''}${S.phone ? ` · ${esc(S.phone)}` : ''}
+    <p class="lead">${S.reservations_on && !TABLE ? '<button class="ghost sm" id="resvBtn">📅 Reservar mesa</button> · ' : ''}${myOrders().length ? '<a href="/meus-pedidos" data-link>Meus pedidos</a> · ' : ''}${SCHED_ONLY ? '<span class="badge b-a">Fechado agora · agende seu pedido</span> · ' : ''}${RV?.count ? `<button class="rating" id="seeReviews">★ ${String(RV.avg).replace('.', ',')} <span class="mut">(${RV.count} avaliaç${RV.count > 1 ? 'ões' : 'ão'})</span></button> · ` : ''}${esc(S.seg?.name)} · ${OS.open ? `<span class="badge b-g">Aberto${OS.label ? ' ' + OS.label : ' agora'}</span>` : `<span class="badge b-r">${esc(OS.label || 'Fechado')}</span>`} · ${TABLE ? '' : ETA?.delivery ? `entrega em ~${etaTxt(ETA.delivery)} <span class="mut">(média da loja)</span>` : `entrega em ${esc(S.eta_text)}`}${S.min_order ? ` · pedido mínimo ${brl(S.min_order)}` : ''}${S.phone ? ` · ${esc(S.phone)}` : ''}
       ${waLink(S.phone, `Olá, ${S.name}!`) ? ` · <a href="${esc(waLink(S.phone, `Olá, ${S.name}!`))}" target="_blank" rel="noopener">Falar no WhatsApp</a>` : ''}
       ${S.instagram ? ` · <a href="https://instagram.com/${esc(S.instagram)}" target="_blank" rel="noopener">@${esc(S.instagram)}</a>` : ''}
       ${S.address ? `<br><a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(S.address)}" target="_blank" rel="noopener">${esc(S.address)}</a>` : ''}</p>
@@ -791,10 +848,22 @@ async function vShop(slug) {
       <label id="kEm" ${S.pix_online ? '' : 'hidden'}>E-mail (para o comprovante do Pix)<input id="kEmail" type="email" autocomplete="email" value="${esc(last.email || '')}" placeholder="voce@email.com"></label>
       <label id="kTr" hidden>Troco para (R$)<input id="kT" inputmode="decimal" placeholder="Ex.: 100"></label>
       ${(S.cashback_percent || S.referral_reward) && !TABLE ? `<label class="chk"><input type="checkbox" id="kCb" checked> Usar meu saldo de cashback, se eu tiver <span class="mut">(o desconto aparece no pedido)</span></label>` : ''}
-      <div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div>
+      ${!TABLE ? `<details class="giftbox"><summary>Tenho um vale-presente</summary><span class="row" style="flex-wrap:nowrap"><input id="kGift" placeholder="VP-XXXX-XXXX" autocomplete="off" autocapitalize="characters"><button type="button" class="ghost sm" id="kGiftOk">Aplicar</button></span><span class="mut" id="kGiftMsg"></span></details>` : ''}
+      <div class="tot"><span>Total</span><span class="price">${brl(t.total)}</span></div><div id="kGiftLine"></div>
       <p class="mut" style="margin:0;font-size:13px">Seus dados são usados só para preparar e entregar este pedido. <a href="/privacidade" target="_blank">Política de Privacidade</a>.</p>
       <div class="row" style="justify-content:flex-end"><button type="button" class="ghost" id="kX">Voltar</button><button class="pri" id="kGo">Enviar pedido</button></div></form>`);
     $('#kPay').onchange = e => { $('#kTr').hidden = e.target.value !== 'Dinheiro'; $('#kEm').hidden = e.target.value !== 'Pix online'; };
+    // Vale-presente: confere o saldo e mostra quanto falta pagar (o banco recalcula tudo ao enviar)
+    let gift = null;
+    if ($('#kGiftOk')) $('#kGiftOk').onclick = attempt(async () => {
+      const code = $('#kGift').value.trim(); if (!code) { gift = null; $('#kGiftMsg').textContent = ''; $('#kGiftLine').innerHTML = ''; return; }
+      gift = await rpc('gift_card_check', { p_slug: slug, p_code: code });
+      if (!gift) { $('#kGiftMsg').textContent = 'Vale não encontrado, vencido ou sem saldo.'; $('#kGiftLine').innerHTML = ''; return; }
+      const use = Math.min(gift.balance, t.total), rest = t.total - use;
+      $('#kGift').value = fmtGift(gift.code);
+      $('#kGiftMsg').textContent = `Vale aplicado: saldo de ${brl(gift.balance)}${gift.balance > use ? `, sobram ${brl(gift.balance - use)} para outro pedido` : ''}.`;
+      $('#kGiftLine').innerHTML = `<div class="ci"><span>Vale-presente</span><span class="price">− ${brl(use)}</span></div><div class="tot"><span>${rest ? 'A pagar' : 'O vale cobre tudo'}</span><span class="price">${brl(rest)}</span></div>`;
+    });
     $('#kEm').hidden = $('#kPay').value !== 'Pix online';
     $('#kX').onclick = closeDlg;
     // CEP → rua e bairro. Modo bairros: seleciona o bairro se existir na lista. Modo distância: localiza e calcula a taxa.
@@ -844,6 +913,7 @@ async function vShop(slug) {
           ...($('#kWhen')?.value ? { scheduledFor: $('#kWhen').value } : {}),
           ...(TABLE && S.service_percent ? { service } : {}),
           ...($('#kCb')?.checked ? { useCashback: true } : {}),
+          ...(gift ? { giftCode: gift.code } : {}),
           changeFor: $('#kT').value ? toCents($('#kT').value) : undefined, coupon: coupon?.code,
           items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: c.notes })) } });
         local.set('customer', { ...last, ...customer, ...(email ? { email } : {}), ...(t.pickup || TABLE ? {} : { cep: $('#kCep').value, rua: $('#kRua').value, num: $('#kNum').value, comp: $('#kComp').value }) });
@@ -862,6 +932,7 @@ async function vShop(slug) {
     });
   };
   app.onclick = attempt(async e => {
+    if (e.target.closest('#resvBtn')) return reserveDialog(S);
     if (e.target.id === 'svc') { service = e.target.checked; paintTotals(); return; }
     const b = e.target.closest('button'); if (!b) return; const d = b.dataset;
     if (d.cat) { cat = d.cat; paint(); }
@@ -1676,7 +1747,7 @@ async function pNewOrder(S) {
   let cart = [], st = { channel: preTable ? 'mesa' : 'balcao', ful: preTable ? 'table' : 'pickup', table: preTable || '1', name: '', phone: '', zone: zones[0]?.id || null, cep: '', rua: '', num: '', comp: '', pay: 'Pagar no caixa', change: '', term: '' }, geo = null, cepInfo = null;
   const sub = () => cart.reduce((t, c) => t + c.qty * c.unit, 0);
   const fee = () => st.ful !== 'delivery' ? 0 : DIST ? (geo?.quote?.fee || 0) : (zones.find(z => z.id === +st.zone)?.fee || 0);
-  const read = () => { for (const k of ['name', 'phone', 'table', 'zone', 'cep', 'rua', 'num', 'comp', 'pay', 'change', 'term']) { const el = $('#n_' + k); if (el) st[k] = el.value; } };
+  const read = () => { for (const k of ['name', 'phone', 'table', 'zone', 'cep', 'rua', 'num', 'comp', 'pay', 'change', 'term', 'gift']) { const el = $('#n_' + k); if (el) st[k] = el.value; } };
   const draw = () => {
     const list = products.filter(p => !st.term || (p.name + ' ' + p.category).toLowerCase().includes(st.term.toLowerCase()));
     const cats = [...new Set(list.map(p => p.category))];
@@ -1699,6 +1770,7 @@ async function pNewOrder(S) {
       ${cart.map((x, i) => `<div class="ci"><div><b>${x.qty}× ${esc(x.name)}</b>${x.optText ? `<br><span class="mut">${esc(x.optText)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}<br><button class="ghost sm" data-dec="${i}">−</button> <button class="ghost sm" data-inc="${i}">+</button></div><span class="price">${brl(x.qty * x.unit)}</span></div>`).join('') || '<p class="empty">Toque nos produtos para adicionar.</p>'}
       <label>Pagamento<select id="n_pay">${['Pagar no caixa', 'Dinheiro', 'Cartão na entrega', 'Pix'].map(v => `<option value="${v}" ${st.pay === v ? 'selected' : ''}>${v === 'Cartão na entrega' ? 'Cartão' : v}</option>`).join('')}</select></label>
       ${st.pay === 'Dinheiro' ? `<label>Troco para (R$)<input id="n_change" inputmode="decimal" value="${esc(st.change)}"></label>` : ''}
+      <label>Vale-presente (opcional)<input id="n_gift" value="${esc(st.gift || '')}" placeholder="VP-XXXX-XXXX" autocomplete="off"></label>
       <div class="ci"><span>Subtotal</span><span class="price">${brl(sub())}</span></div>${fee() ? `<div class="ci"><span>Entrega</span><span class="price">${brl(fee())}</span></div>` : ''}
       <div class="tot"><span>Total</span><span class="price">${brl(sub() + fee())}</span></div>
       <p class="mut" style="margin:0;font-size:13px">Cupons, fidelidade, promoções e frete grátis são aplicados pelo sistema ao lançar.</p>
@@ -1727,8 +1799,9 @@ async function pNewOrder(S) {
           customer: { name: st.name.trim(), phone: st.phone.trim() }, zoneId: st.ful === 'delivery' && !DIST ? +st.zone : undefined, address: addr,
           ...(st.ful === 'delivery' && DIST ? { lat: geo.lat, lng: geo.lng } : {}),
           payment: st.pay, changeFor: st.pay === 'Dinheiro' && st.change ? toCents(st.change) : undefined,
+          ...(st.gift?.trim() ? { giftCode: st.gift.trim() } : {}),
           items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: c.notes })) } });
-        toast(`Pedido #${r.number} lançado · ${brl(r.total)}`);
+        toast(`Pedido #${r.number} lançado · ${r.total ? `a pagar ${brl(r.total)}` : 'pago com vale-presente'}`); st.gift = '';
         if (local.get('printMode', local.get('autoPrint', false) ? 'accept' : 'off') !== 'off') { const o = (await q(sb.from('orders').select(ORDER_COLS).eq('id', r.id)))[0]; if (o) printOrder(S, o); }
         if (fromWaiter) return go('/painel/garcom');
         cart = []; st = { ...st, name: '', phone: '', rua: '', num: '', comp: '', cep: '', change: '' }; geo = null; draw();
@@ -1747,7 +1820,7 @@ async function pNewOrder(S) {
 }
 
 /* ---------- fechamento de caixa ---------- */
-async function pCash(S) {
+async function pCash(S, owner) {
   const today = new Date().toLocaleDateString('en-CA', { timeZone: S.timezone || 'America/Sao_Paulo' });
   let day = today, r = null;
   const rows = (arr, label) => arr.map(x => `<tr><td>${esc(label(x))}</td><td class="n">${x.count}</td><td class="n price">${brl(x.total)}</td></tr>`).join('') || '<tr><td class="mut" colspan="3">Sem vendas</td></tr>';
@@ -1775,7 +1848,57 @@ async function pCash(S) {
       ${r.paidOnline ? `<p class="mut" style="margin:0">Já recebido online (Pix): <b>${brl(r.paidOnline)}</b>, cai direto na conta do Mercado Pago.</p>` : ''}
       ${r.cashChange ? `<p class="mut" style="margin:0">Troco devolvido em dinheiro: <b>${brl(r.cashChange)}</b>.</p>` : ''}</div>
     <div class="panel"><h3>Por canal</h3><table><thead><tr><th>Canal</th><th class="n">Pedidos</th><th class="n">Valor</th></tr></thead><tbody>${rows(r.byChannel, x => CHANNEL[x.channel] || x.channel)}</tbody></table>
-      <h3>Por tipo</h3><table><tbody>${rows(r.byFulfillment, x => FUL[x.fulfillment] || x.fulfillment)}</tbody></table></div></div>`;
+      <h3>Por tipo</h3><table><tbody>${rows(r.byFulfillment, x => FUL[x.fulfillment] || x.fulfillment)}</tbody></table></div></div>
+    <div id="gifts"></div>`;
+    drawGifts().catch(() => {});
+  };
+  // Vale-presente: vender, listar, imprimir, cancelar
+  let gq = '';
+  const drawGifts = async () => {
+    const box = $('#gifts'); if (!box) return;
+    let gs; try { gs = await q(sb.from('gift_cards').select('id, code, initial, balance, buyer_name, recipient_name, sold_method, active, expires_at, created_at').eq('tenant_id', S.id).order('created_at', { ascending: false }).limit(200)); } catch { box.innerHTML = ''; return; }
+    const st = g => !g.active ? '<span class="badge b-r">Cancelado</span>' : g.expires_at && new Date(g.expires_at) < Date.now() ? '<span class="badge">Vencido</span>' : g.balance === 0 ? '<span class="badge">Usado</span>' : '<span class="badge b-g">Ativo</span>';
+    const list = gs.filter(g => !gq || g.code.includes(gq.replace(/[^A-Z0-9]/gi, '').toUpperCase()) || `${g.buyer_name} ${g.recipient_name}`.toLowerCase().includes(gq.toLowerCase()));
+    const live = gs.filter(g => g.active && g.balance > 0 && !(g.expires_at && new Date(g.expires_at) < Date.now()));
+    box.innerHTML = `<div class="panel" style="margin-top:20px"><div class="row between"><div><h3 style="margin:0">Vale-presente</h3><p class="mut" style="margin:4px 0 0">${live.length} vale(s) com saldo · ${brl(live.reduce((a, g) => a + g.balance, 0))} a usar na loja. O cliente usa o código no pedido (site, balcão ou telefone).</p></div>
+      <span class="row"><input id="gSearch" placeholder="Buscar código ou nome" value="${esc(gq)}" style="width:200px"><button class="pri" id="gNew">Vender vale</button></span></div>
+      ${list.length ? `<div class="scroll" style="margin-top:10px"><table class="stack"><thead><tr><th>Código</th><th>Para</th><th class="n">Valor</th><th class="n">Saldo</th><th>Situação</th><th>Vendido</th><th></th></tr></thead><tbody>
+        ${list.slice(0, 50).map(g => `<tr><td data-l="Código"><b class="mono">${fmtGift(g.code)}</b></td><td data-l="Para">${esc(g.recipient_name || '—')}${g.buyer_name ? `<br><span class="mut">de ${esc(g.buyer_name)}</span>` : ''}</td>
+          <td data-l="Valor" class="n price">${brl(g.initial)}</td><td data-l="Saldo" class="n price"><b>${brl(g.balance)}</b></td><td data-l="Situação">${st(g)}</td>
+          <td data-l="Vendido">${new Date(g.created_at).toLocaleDateString('pt-BR')} · ${esc(g.sold_method)}${g.expires_at ? `<br><span class="mut">vale até ${new Date(g.expires_at).toLocaleDateString('pt-BR')}</span>` : ''}</td>
+          <td data-l=""><span class="row" style="flex-wrap:nowrap"><button class="ghost sm" data-gprint="${g.id}">Imprimir</button>${owner && g.active && g.balance > 0 ? `<button class="ghost sm" data-gcancel="${g.id}">Cancelar</button>` : ''}</span></td></tr>`).join('')}</tbody></table></div>` : `<p class="empty" style="margin:10px 0 0">${gq ? 'Nenhum vale encontrado.' : 'Nenhum vale vendido ainda.'}</p>`}</div>`;
+    $('#gSearch').oninput = e => { gq = e.target.value; clearTimeout(drawGifts.t); drawGifts.t = setTimeout(() => drawGifts().then(() => { const i = $('#gSearch'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }), 250); };
+    box.onclick = attempt(async e => {
+      const b = e.target.closest('button'); if (!b) return;
+      if (b.id === 'gNew') return sellGift();
+      if (b.dataset.gprint) return printGift(S, gs.find(g => g.id === +b.dataset.gprint));
+      if (b.dataset.gcancel) { if (!sure(b)) return; await rpc('gift_card_cancel', { p_id: +b.dataset.gcancel }); toast('Vale cancelado'); return drawGifts(); }
+    });
+  };
+  const sellGift = () => {
+    dialog(`<h2>Vender vale-presente</h2><form id="gF" class="grid" style="gap:10px">
+      <div class="segs" style="grid-template-columns:repeat(4,1fr)">${[3000, 5000, 10000, 20000].map(v => `<button type="button" data-gv="${v}">${brl(v)}</button>`).join('')}</div>
+      <label>Valor (R$)<input id="gAmt" inputmode="decimal" required placeholder="50,00"></label>
+      <div class="two" style="gap:10px"><label>Quem comprou (opcional)<input id="gBuy" maxlength="80"></label><label>Para quem é (opcional)<input id="gTo" maxlength="80"></label></div>
+      <label>Mensagem (opcional)<input id="gMsg" maxlength="200" placeholder="Feliz aniversário!"></label>
+      <div class="two" style="gap:10px"><label>Pagamento recebido<select id="gPay"><option>Dinheiro</option><option>Pix</option><option>Cartão</option>${owner ? '<option>Cortesia</option>' : ''}</select></label>
+        <label>Validade<select id="gDays"><option value="90">3 meses</option><option value="180">6 meses</option><option value="365" selected>1 ano</option><option value="0">Sem validade</option></select></label></div>
+      <p class="mut" style="margin:0">Receba o pagamento antes de gerar o vale. Vendido em dinheiro, ele entra na gaveta do caixa.</p>
+      <div class="row"><button class="pri">Gerar vale</button><button type="button" class="ghost" data-close>Cancelar</button></div></form>`);
+    $('#dlgBody').onclick = e => { const v = e.target.closest('[data-gv]'); if (v) $('#gAmt').value = fromCents(+v.dataset.gv); };
+    $('#dlgBody').onsubmit = attempt(async e => {
+      e.preventDefault(); const btn = e.target.querySelector('button.pri'); btn.disabled = true;
+      try {
+        const amt = toCents($('#gAmt').value); if (!Number.isInteger(amt) || amt < 100) throw new Error('Valor inválido');
+        const r = await rpc('gift_card_create', { p_tenant: S.id, p_amount: amt, p_buyer: $('#gBuy').value, p_recipient: $('#gTo').value, p_message: $('#gMsg').value, p_method: $('#gPay').value, p_days: +$('#gDays').value });
+        const g = { code: r.code, initial: amt, balance: amt, recipient_name: $('#gTo').value.trim(), buyer_name: $('#gBuy').value.trim(), message: $('#gMsg').value.trim(), expires_at: r.expires };
+        const msg = `🎁 Vale-presente ${S.name}${g.recipient_name ? ` para ${g.recipient_name}` : ''}: ${brl(amt)}\nCódigo: ${fmtGift(r.code)}${g.message ? `\n"${g.message}"` : ''}\nUse no pedido em ${storeLink(S)}${r.expires ? `\nVálido até ${new Date(r.expires).toLocaleDateString('pt-BR')}` : ''}`;
+        $('#dlgBody').innerHTML = `<h2>Vale gerado</h2><div class="giftcode">${fmtGift(r.code)}</div><p class="lead" style="margin:0;text-align:center">${brl(amt)}${g.recipient_name ? ` · para ${esc(g.recipient_name)}` : ''}</p>
+          <div class="row" style="justify-content:center"><button class="pri" id="gPrint">Imprimir vale</button>${waBtn(`https://wa.me/?text=${encodeURIComponent(msg)}`, 'Enviar no WhatsApp')}<button class="ghost" data-close>Fechar</button></div>`;
+        $('#dlgBody').onclick = ev => { if (ev.target.closest('#gPrint')) printGift(S, g); };
+        drawGifts().catch(() => {});
+      } finally { btn.disabled = false; }
+    });
   };
   const printCash = () => {
     $('#print').innerHTML = `<div class="tkt"><b class="big">${esc(S.name)}</b><div>FECHAMENTO DE CAIXA</div><div>${day.split('-').reverse().join('/')} · impresso ${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</div><hr>
@@ -2059,6 +2182,16 @@ function closeTableDialog(S, m, after) {
   };
 }
 
+const fmtGift = c => `${c.slice(0, 2)}-${c.slice(2, 6)}-${c.slice(6)}`;
+function printGift(S, g) {
+  const c = S.color || '#d62828';
+  $('#print').innerHTML = `<div class="giftsheet"><div class="giftcard" style="border-color:${esc(c)}">
+    ${S.logo_path ? `<img src="${esc(imgUrl(S.logo_path))}" alt="">` : ''}<h1 style="color:${esc(c)}">Vale-presente</h1><p>${esc(S.name)}</p><h2>${brl(g.initial)}</h2>
+    ${g.recipient_name ? `<p>Para: <b>${esc(g.recipient_name)}</b>${g.buyer_name ? ` · De: ${esc(g.buyer_name)}` : ''}</p>` : ''}${g.message ? `<p><i>“${esc(g.message)}”</i></p>` : ''}
+    <div class="gcode">${fmtGift(g.code)}</div><p class="s">Use este código ao fazer o pedido em ${esc(storeLink(S).replace(/^https?:\/\//, ''))} ou no balcão.${g.expires_at ? ` Válido até ${new Date(g.expires_at).toLocaleDateString('pt-BR')}.` : ''}</p></div></div>`;
+  window.print();
+}
+
 function printBill(S, m) {
   // junta itens iguais (mesmo produto, opções e preço) de todos os pedidos da mesa
   const agg = []; for (const i of m.items) { const k = agg.find(x => x.name === i.name && x.options === i.options && x.unit === i.unit); k ? k.qty += i.qty : agg.push({ ...i }); }
@@ -2072,10 +2205,32 @@ function printBill(S, m) {
   window.print();
 }
 async function pTables(S) {
-  let tables = [];
-  const load = async () => { tables = await rpc('open_tables', { p_tenant: S.id }); draw(); };
+  let tables = [], resv = null, seen = null;
+  const load = async () => {
+    const from = new Date(Date.now() - 3 * 3600e3).toISOString(), to = new Date(Date.now() + 8 * 864e5).toISOString();
+    [tables, resv] = await Promise.all([rpc('open_tables', { p_tenant: S.id }),
+      q(sb.from('reservations').select('id, code, name, phone, party, at, note, status, table_label, created_at').eq('tenant_id', S.id).gte('at', from).lte('at', to).order('at')).catch(() => null)]);
+    const pend = (resv || []).filter(r => r.status === 'pendente').map(r => r.id);
+    if (seen && pend.some(id => !seen.has(id))) { beep(); toast('Nova reserva para confirmar'); }
+    seen = new Set(pend);
+    draw();
+  };
+  const resvMsg = r => `Olá, ${r.name.split(' ')[0]}! ${r.status === 'confirmada' ? 'Sua reserva está confirmada' : r.status === 'recusada' ? 'Infelizmente não conseguimos confirmar sua reserva' : 'Sobre sua reserva'} na ${S.name}: ${r.party} pessoa(s), ${whenTxt(r.at, S.timezone)}${r.table_label ? `, mesa ${r.table_label}` : ''}.\nAcompanhe: ${location.origin}/reserva/${r.code}`;
+  const resvBox = () => {
+    if (!resv) return '';
+    const act = resv.filter(r => ['pendente', 'confirmada', 'chegou'].includes(r.status)), byDay = {};
+    for (const r of act) (byDay[ymdIn(S.timezone, new Date(r.at))] ||= []).push(r);
+    const today = ymdIn(S.timezone, new Date()), tomorrow = ymdIn(S.timezone, new Date(Date.now() + 864e5));
+    const dayTxt = d => d === today ? 'Hoje' : d === tomorrow ? 'Amanhã' : new Date(`${d}T12:00:00`).toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: '2-digit' });
+    const np = act.filter(r => r.status === 'pendente').length;
+    return `<div class="panel" style="margin-bottom:20px"><div class="row between"><h3 style="margin:0">Reservas</h3><span class="mut">${np ? `<span class="badge b-a">${np} para confirmar</span> ` : ''}próximos 7 dias</span></div>
+      ${Object.keys(byDay).length ? Object.entries(byDay).map(([d, rs]) => `<h4 style="margin:12px 0 6px">${esc(dayTxt(d))} · ${rs.reduce((a, r) => a + r.party, 0)} pessoa(s)</h4>
+        ${rs.map(r => `<div class="tk resv"><div class="top"><span><b>${hhmm(r.at)}</b> · ${esc(r.name)} · ${r.party} pessoa(s)${r.table_label ? ` · mesa ${esc(r.table_label)}` : ''}</span><span class="badge ${RESV_ST[r.status][0]}">${r.status === 'chegou' ? 'Chegou' : r.status === 'pendente' ? 'Para confirmar' : 'Confirmada'}</span></div>
+          ${r.note ? `<span class="mut">${esc(r.note)}</span>` : ''}
+          <span class="row">${r.status === 'pendente' ? `<button class="ok sm" data-rv="${r.id}" data-to="confirmada">Confirmar</button><button class="ghost sm" data-rv="${r.id}" data-to="recusada">Recusar</button>` : ''}${r.status === 'confirmada' ? `<button class="ok sm" data-rv="${r.id}" data-to="chegou">Chegou</button><button class="ghost sm" data-rv="${r.id}" data-to="faltou">Não veio</button><button class="ghost sm" data-rvt="${r.id}">Mesa</button>` : ''}${waBtn(waLink(r.phone, resvMsg(r)), 'WhatsApp')}</span></div>`).join('')}`).join('') : '<p class="empty" style="margin:8px 0 0">Nenhuma reserva nos próximos dias.</p>'}</div>`;
+  };
   const draw = () => {
-    app.innerHTML = `<h2>Mesas</h2><p class="lead">Contas abertas: todos os pedidos de cada mesa somados até o fechamento. ${tables.length ? `${tables.length} mesa(s) ocupada(s) · ${brl(tables.reduce((a, m) => a + m.total, 0))} em aberto.` : ''}</p>
+    app.innerHTML = `${resvBox()}<h2>Mesas</h2><p class="lead">Contas abertas: todos os pedidos de cada mesa somados até o fechamento. ${tables.length ? `${tables.length} mesa(s) ocupada(s) · ${brl(tables.reduce((a, m) => a + m.total, 0))} em aberto.` : ''}</p>
     <div class="tables">${tables.map(m => { const due = m.total - m.paidOnline; return `<div class="panel tablecard"><div class="row between"><h3 style="margin:0">Mesa ${esc(m.table)}</h3><span class="mut">desde ${hhmm(m.since)} · ${mins(m.since)} min</span></div>
       <p class="mut" style="margin:4px 0">${m.orders.map(o => `#${o.number} <span class="badge ${o.status === 'entregue' ? 'b-g' : o.status === 'pronto' ? 'b-a' : ''}">${o.status === 'entregue' ? 'servido' : esc((SLABEL[o.status] || o.status).toLowerCase())}</span>`).join(' ')}</p>
       <div class="li"><span>${m.items.reduce((a, i) => a + i.qty, 0)} itens</span><span class="price">${brl(m.subtotal)}</span></div>
@@ -2086,12 +2241,25 @@ async function pTables(S) {
   };
   app.onclick = attempt(async e => {
     const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.rv) {
+      const r = resv.find(x => x.id === +b.dataset.rv), to = b.dataset.to;
+      if (['recusada', 'faltou'].includes(to) && !sure(b)) return;
+      await rpc('set_reservation', { p_id: r.id, p_status: to, p_table: null });
+      toast(to === 'confirmada' ? 'Reserva confirmada. Avise o cliente pelo WhatsApp.' : 'Reserva atualizada');
+      if (['confirmada', 'recusada'].includes(to)) { const link = waLink(r.phone, resvMsg({ ...r, status: to })); if (link) window.open(link, '_blank', 'noopener'); }
+      return load();
+    }
+    if (b.dataset.rvt) {
+      const r = resv.find(x => x.id === +b.dataset.rvt), t = prompt('Número da mesa para esta reserva:', r.table_label || '');
+      if (t == null) return; await rpc('set_reservation', { p_id: r.id, p_status: r.status, p_table: t }); return load();
+    }
     const m = tables.find(x => x.table === (b.dataset.bill || b.dataset.closeT)); if (!m) return;
     if (b.dataset.bill) return printBill(S, m);
     closeTableDialog(S, m, load);
   });
   const stop = live(S.id, () => load().catch(() => {}));
-  cleanup = () => { stop(); app.onclick = null; };
+  const tick = setInterval(() => load().catch(() => {}), 45000);   // reservas novas
+  cleanup = () => { stop(); clearInterval(tick); app.onclick = null; };
   await load();
 }
 
@@ -2492,6 +2660,7 @@ async function pConfig(S) {
       rpc('pix_settings', { p_tenant: S.id }).catch(() => null), rpc('billing_info', { p_tenant: S.id }).catch(() => null), rpc('coupon_usage', { p_tenant: S.id }).catch(() => ({})),
       q(sb.from('promotions').select('*').eq('tenant_id', S.id).order('id')).catch(() => []), q(sb.from('products').select('id, name, category').eq('tenant_id', S.id).order('sort'))]);
     const prodById = Object.fromEntries(prodList.map(p => [p.id, p]));
+    if ('reservations_on' in st) Object.assign(st, await q(sb.from('tenants').select('reservation_capacity, reservation_auto').eq('id', S.id).single()).catch(() => ({})));
     st0 = st;
     const link = storeLink(st);
     app.innerHTML = `<h2>Configurações</h2><p class="lead">Endereço da sua loja: <a href="${link}" target="_blank" rel="noopener">${esc(link)}</a> <button class="ghost sm" id="copy">Copiar</button></p>
@@ -2574,6 +2743,11 @@ async function pConfig(S) {
       <label class="chk"><input type="checkbox" id="mOn" ${st.allow_tables ? 'checked' : ''}> Aceitar pedidos na mesa pelo QR Code</label>
       <span class="row"><label>Quantidade de mesas<input id="mCount" type="number" min="1" max="200" value="${st.tables_count ?? 10}" style="width:120px"></label>${'service_percent' in st ? `<label>Taxa de serviço (%)<input id="mSvc" type="number" min="0" max="20" value="${st.service_percent || 0}" style="width:120px" title="0 = sem taxa. O cliente pode desmarcar."></label>` : ''}<button type="button" class="ghost" id="mPrint" ${st.allow_tables ? '' : 'disabled'}>Imprimir QR Codes das mesas</button></span>
       <p class="mut" style="margin:0">Cada mesa recebe um QR Code. O cliente escaneia, faz o pedido pelo celular e paga no caixa (ou por Pix, se ativo). O pedido chega na cozinha marcado com o número da mesa.</p>
+      ${'reservations_on' in st ? `<h3>Reserva de mesas</h3>
+      <label class="chk"><input type="checkbox" id="rsOn" ${st.reservations_on ? 'checked' : ''}> Aceitar pedidos de reserva pela loja online</label>
+      <span class="row"><label>Lugares por horário<input id="rsCap" type="number" min="1" max="1000" value="${st.reservation_capacity ?? 20}" style="width:120px"></label><label>Máximo de pessoas por reserva<input id="rsMax" type="number" min="1" max="200" value="${st.reservation_max_party ?? 12}" style="width:120px"></label></span>
+      <label class="chk"><input type="checkbox" id="rsAuto" ${st.reservation_auto ? 'checked' : ''}> Confirmar automaticamente (sem precisar aprovar)</label>
+      <p class="mut" style="margin:0">O cliente escolhe dia, horário e quantas pessoas, dentro do horário de funcionamento. "Lugares por horário" limita quantas pessoas com reserva podem chegar perto do mesmo horário (1h30 para cada lado). As reservas aparecem na aba <b>Mesas</b>.</p>` : ''}
       <h3>Programa de fidelidade</h3>
       <label class="chk"><input type="checkbox" id="lOn" ${st.loyalty_enabled ? 'checked' : ''}> Dar desconto para clientes fiéis</label>
       <div class="two" style="gap:10px"><label>A cada (pedidos entregues)<input id="lEvery" type="number" min="2" max="50" value="${st.loyalty_every ?? 10}"></label><label>Desconto no pedido seguinte (%)<input id="lPct" type="number" min="1" max="50" value="${st.loyalty_percent ?? 10}"></label></div>
@@ -2791,6 +2965,7 @@ async function pConfig(S) {
       await q(sb.from('tenants').update({ delivery_mode: mode, lat: m ? +m[1] : null, lng: m ? +m[2] : null, distance_tiers: tiers,
         free_delivery_above: above, loyalty_enabled: $('#lOn').checked, loyalty_every: every, loyalty_percent: pct,
         allow_tables: $('#mOn').checked, tables_count: Math.max(1, Math.min(200, +$('#mCount').value || 10)),
+        ...($('#rsOn') ? { reservations_on: $('#rsOn').checked, reservation_capacity: Math.max(1, Math.min(1000, +$('#rsCap').value || 20)), reservation_max_party: Math.max(1, Math.min(200, +$('#rsMax').value || 12)), reservation_auto: $('#rsAuto').checked } : {}),
         ...($('#mSvc') ? { service_percent: Math.max(0, Math.min(20, Math.round(+$('#mSvc').value || 0))) } : {}),
         ...($('#refRw') ? { referral_reward: (() => { const v = toCents($('#refRw').value || '0'); if (!Number.isInteger(v) || v < 0 || v > 10000) throw new Error('Indique e ganhe: de R$ 0 a R$ 100'); return v; })() } : {}),
         ...($('#cbPct') ? { cashback_percent: Math.max(0, Math.min(30, Math.round(+$('#cbPct').value || 0))), cashback_days: Math.max(7, Math.min(365, Math.round(+$('#cbDays').value || 90))) } : {}) }).eq('id', S.id));
@@ -2841,7 +3016,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
   '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql',
-  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql'];
+  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };

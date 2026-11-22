@@ -41,6 +41,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    28. `20261210000000_entregador_ao_vivo.sql` (entregador no mapa ao vivo e rota das entregas)
    29. `20261211000000_unidades_notas_produto.sql` (painel consolidado das unidades e avaliação por produto)
    30. `20261212000000_acerto_entregadores.sql` (acerto dos entregadores: forma de pagamento, período, pago e chave Pix)
+   31. `20261213000000_vale_reservas.sql` (vale-presente e reserva de mesas)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -241,7 +242,7 @@ O que já está pronto:
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 111 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 113 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;

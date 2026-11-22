@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -617,7 +617,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 30);
+  assert.equal(st.length, 31);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1417,4 +1417,75 @@ test('acerto dos entregadores: formas de pagamento, período, pago vira despesa 
   const pay2 = json(`courier_pay(${c}, '${yesterday}', '${today}', 'Pix', null)`, U.pizza);
   assert.equal(sql(`select amount from cash_moves where id = (select cash_move_id from courier_payouts where id = ${pay2.id})`), String(cashA + cashD));
   fails(`select courier_pay(${c}, '2020-01-01', '2020-01-02', 'Pix', '')`, U.pizza, /Nenhuma entrega/);
+});
+
+test('vale-presente: equipe vende, cliente usa no pedido, cobre tudo, estorna no cancelamento, caixa conta a venda', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', pix_online = true where id = '${pizzaId}'`);
+  if (json(`cash_status('${pizzaId}')`, U.staff).open !== true) sql(`select cash_open('${pizzaId}', 0)`, U.staff);
+  const cash0 = json(`cash_status('${pizzaId}')`, U.staff).cashSales;
+  const g = json(`gift_card_create('${pizzaId}', 5000, 'Ana', 'Bia', 'Feliz aniversário!', 'Dinheiro', 365)`, U.staff);
+  assert.match(g.code, /^VP[A-Z2-9]{8}$/);
+  assert.equal(json(`cash_status('${pizzaId}')`, U.staff).cashSales - cash0, 5000);
+  fails(`select gift_card_create('${pizzaId}', 5000, '', '', '', 'Cortesia', 365)`, U.staff, /Só o dono/);
+  fails(`select gift_card_create('${pizzaId}', 50, '', '', '', 'Pix', 365)`, U.staff, /Valor do vale/);
+  fails(`select gift_card_create('${pizzaId}', 5000, '', '', '', 'Pix', 365)`, U.burger, /Sem permissão/);
+  fails(`select * from gift_cards`, null, /permission denied/);
+  const pretty = g.code.slice(0, 2) + '-' + g.code.slice(2, 6) + ' ' + g.code.slice(6).toLowerCase();   // o cliente digita do jeito que quiser
+  assert.equal(json(`gift_card_check('forno-da-vila', '${pretty}')`, null).balance, 5000);
+  assert.equal(sql(`select coalesce(gift_card_check('forno-da-vila', 'VPXXXXXXXX')::text, 'null')`, null), 'null');
+  assert.equal(sql(`select coalesce(gift_card_check('brasa', '${g.code}')::text, 'null')`, null), 'null');   // vale é da loja
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const buy = (qty, pay, code = pretty) => order('forno-da-vila', { customer: { name: 'Cli Vale', phone: '11922223333' }, fulfillment: 'pickup', payment: pay, giftCode: code, items: [{ productId: p.id, qty }] });
+  const o1 = buy(2, 'Dinheiro');   // parte do vale
+  const row1 = json(`(select to_jsonb(o) from orders o where public_code = '${o1.code}')`);
+  assert.equal(row1.total, row1.subtotal - row1.gift_used); assert.ok(row1.gift_used > 0);
+  assert.equal(+sql(`select balance from gift_cards where code = '${g.code}'`), 5000 - row1.gift_used);
+  const o2 = buy(1, 'Pix online');   // vale cobre tudo: não fica esperando Pix
+  const row2 = json(`(select to_jsonb(o) from orders o where public_code = '${o2.code}')`);
+  assert.equal(row2.total, 0); assert.equal(row2.payment, 'Vale-presente'); assert.equal(row2.status, 'novo'); assert.equal(row2.payment_status, 'na');
+  const left = +sql(`select balance from gift_cards where code = '${g.code}'`);
+  sql(`update orders set status = 'cancelado' where public_code = '${o2.code}'`);
+  assert.equal(+sql(`select balance from gift_cards where code = '${g.code}'`), left + row2.gift_used);
+  sql(`update orders set status = 'cancelado' where public_code = '${o2.code}'`);   // não devolve duas vezes
+  assert.equal(+sql(`select balance from gift_cards where code = '${g.code}'`), left + row2.gift_used);
+  assert.throws(() => buy(1, 'Dinheiro', 'VP00000000'), /Vale-presente inválido/);
+  // dono cancela
+  const id = sql(`select id from gift_cards where code = '${g.code}'`);
+  fails(`select gift_card_cancel(${id})`, U.staff, /Sem permissão/);
+  sql(`select gift_card_cancel(${id})`, U.pizza);
+  assert.throws(() => buy(1, 'Dinheiro'), /Vale-presente inválido/);
+  // vencido
+  const g2 = json(`gift_card_create('${pizzaId}', 1000, '', '', '', 'Pix', 30)`, U.pizza);
+  sql(`update gift_cards set expires_at = now() - interval '1 day' where code = '${g2.code}'`);
+  assert.equal(sql(`select coalesce(gift_card_check('forno-da-vila', '${g2.code}')::text, 'null')`, null), 'null');
+});
+
+test('reservas: cliente pede, lotação por horário, equipe confirma, cliente cancela', () => {
+  sql(`update tenants set is_open = false, auto_hours = true, billing_status = 'free', reservations_on = true, reservation_capacity = 10, reservation_max_party = 8, reservation_auto = false,
+       hours = '{"0":[["11:00","23:00"]],"1":[["11:00","23:00"]],"2":[["11:00","23:00"]],"3":[["11:00","23:00"]],"4":[["11:00","23:00"]],"5":[["11:00","23:00"]],"6":[["11:00","23:00"]]}' where id = '${pizzaId}'`);
+  const at = sql(`select to_char(((now() at time zone 'America/Sao_Paulo')::date + 2 + time '20:00') at time zone 'America/Sao_Paulo', 'YYYY-MM-DD"T"HH24:MI:SSOF')`);
+  const late = sql(`select to_char(((now() at time zone 'America/Sao_Paulo')::date + 2 + time '04:00') at time zone 'America/Sao_Paulo', 'YYYY-MM-DD"T"HH24:MI:SSOF')`);
+  const req = (x, phone = '11977778888') => json(`request_reservation('forno-da-vila', '${JSON.stringify({ name: 'Carla Reserva', phone, party: 4, at, ...x })}'::jsonb)`, null);
+  const r1 = req({});   // loja pausada agora não impede reserva para outro dia
+  assert.equal(r1.status, 'pendente');
+  const v = json(`reservation_view('${r1.code}')`, null);
+  assert.equal(v.party, 4); assert.equal(v.store.slug, 'forno-da-vila'); assert.equal(v.canCancel, true);
+  assert.throws(() => req({ at: late }, '11977770001'), /não abre nesse horário/);
+  assert.throws(() => req({ party: 9 }, '11977770002'), /de 1 a 8 pessoas/);
+  req({ party: 6 }, '11977770003');
+  assert.throws(() => req({ party: 1 }, '11977770004'), /lotado/);   // 4 + 6 = 10
+  assert.throws(() => req({ at: '2020-01-01T20:00:00Z' }, '11977770005'), /antecedência/);
+  fails(`select * from reservations`, null, /permission denied/);
+  const id = sql(`select id from reservations where code = '${r1.code}'`);
+  fails(`select set_reservation(${id}, 'confirmada', '5')`, U.burger, /Sem permissão/);
+  sql(`select set_reservation(${id}, 'confirmada', '5')`, U.staff);
+  assert.equal(json(`reservation_view('${r1.code}')`, null).table, '5');
+  sql(`select reservation_cancel('${r1.code}')`, null);
+  assert.equal(json(`reservation_view('${r1.code}')`, null).status, 'cancelada');
+  fails(`select reservation_cancel('${r1.code}')`, null, /não pode mais ser cancelada/);
+  req({ party: 4 }, '11977770006');   // vaga liberada
+  sql(`update tenants set reservation_auto = true where id = '${pizzaId}'`);
+  assert.equal(req({ party: 1, at: at.replace('T20:00', 'T13:00') }, '11977770007').status, 'confirmada');
+  sql(`update tenants set reservations_on = false, is_open = true, auto_hours = false where id = '${pizzaId}'`);
+  assert.throws(() => req({}, '11977770008'), /não aceita reservas/);
 });
