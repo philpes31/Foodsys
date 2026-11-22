@@ -441,3 +441,14 @@ body.kiosk .opts button{min-height:56px;font-size:17px}
   .giftcard .gcode{font:700 20pt monospace;letter-spacing:2px;border:1px dashed #999;border-radius:3mm;padding:3mm;margin:5mm 0}
 }
 .giftbox{display:grid;gap:6px}
+
+/* totem: Pix na tela */
+.ks-pix{gap:12px}
+.ks-amount{font:900 clamp(44px,6vw,64px)/1 Inter,sans-serif;color:var(--k-ink);letter-spacing:-.03em}
+.ks-qr{width:min(320px,60vw);height:min(320px,60vw);border:1px solid var(--k-line);border-radius:18px;padding:10px;background:#fff;image-rendering:pixelated}
+.ks-wait{width:min(320px,60vw);height:min(320px,60vw);display:grid;place-items:center;border-radius:18px;background:var(--k-bg);color:var(--k-mut);font-weight:600}
+.ks-status{display:flex;align-items:center;gap:8px;font-weight:700;color:var(--k-mut)!important}
+.ks-dot{width:10px;height:10px;border-radius:50%;background:#e9a23b;animation:kblink 1.2s ease-in-out infinite}
+@keyframes kblink{50%{opacity:.25}}
+.ks-pix-actions{display:flex;gap:18px;flex-wrap:wrap;justify-content:center}
+.kw-paylbl{font-weight:600;font-size:15px}
