@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -617,7 +617,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 28);
+  assert.equal(st.length, 29);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1333,4 +1333,36 @@ test('entregador ao vivo: posição só em rota, cliente vê só o próprio pedi
   assert.equal(sql(`select coalesce(track_courier('${a.code}')::text, 'null')`, null), 'null');   // entregue: não mostra mais
   sql(`select courier_deliver('${tok}', ${id(b)})`, null);
   assert.equal(sql(`select coalesce(last_at::text, 'null') from couriers where id = ${c}`), 'null');
+});
+
+test('painel das unidades: soma e compara as lojas do dono; equipe não vê', () => {
+  const r = json(`units_report(30)`, U.pizza);
+  assert.equal(r.days, 30);
+  assert.ok(r.units.length >= 2, 'dono tem a matriz e a filial');
+  const mine = r.units.find(u => u.id === pizzaId);
+  const real = +sql(`select count(*) from orders where tenant_id = '${pizzaId}' and status not in ('cancelado', 'pagamento') and created_at >= '${r.from}'`);
+  assert.equal(mine.orders, real);
+  assert.equal(mine.revenue, +sql(`select coalesce(sum(total), 0) from orders where tenant_id = '${pizzaId}' and status not in ('cancelado', 'pagamento') and created_at >= '${r.from}'`));
+  assert.equal(r.daily.length, 30);
+  const dsum = r.daily.reduce((a, d) => a + (d.units[pizzaId] || 0), 0);
+  assert.equal(dsum, mine.revenue);
+  assert.ok(r.products.length > 0 && r.products[0].byUnit[pizzaId] > 0);
+  assert.deepEqual(json(`units_report(30)`, U.staff).units, []);   // equipe não é dona
+  fails(`select units_report(30)`, null, /permission denied|Faça login/);
+});
+
+test('avaliação por produto: nota do pedido vale para os itens; loja online mostra com 3+ avaliações', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', referral_reward = 0 where id = '${pizzaId}'`);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const rate = (n, txt) => { const r = order('forno-da-vila', { customer: { name: 'Nota ' + n, phone: '1193333000' + n }, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 1 }] });
+    sql(`update orders set status = 'entregue' where public_code = '${r.code}'`); sql(`select review_order('${r.code}', ${n}, '${txt}')`, null); };
+  const before = json(`store_product_ratings('forno-da-vila')`, null)[p.id];
+  rate(2, 'Veio quente'); rate(5, ''); rate(5, 'Ótima');
+  const pr = json(`product_ratings('${pizzaId}', 30)`, U.staff).find(x => x.productId === p.id);
+  assert.ok(pr.count >= 3); assert.ok(pr.low >= 1);
+  assert.equal(pr.comments[0].comment, 'Veio quente');   // as piores primeiro
+  const pub = json(`store_product_ratings('forno-da-vila')`, null)[p.id];
+  assert.ok(pub.count >= 3 && pub.count >= (before?.count || 0) + 3);
+  assert.deepEqual(json(`product_ratings('${pizzaId}', 30)`, U.burger), []);
+  fails(`select product_ratings('${pizzaId}', 30)`, null, /permission denied/);
 });

@@ -669,6 +669,7 @@ async function vShop(slug) {
     q(sb.from('zones').select('id, name, fee').eq('tenant_id', S.id).order('name'))]);
   const products = sortMenu(rawP), OS = openState(S), DIST = S.delivery_mode === 'distance';
   const RV = await rpc('store_reviews', { p_slug: slug, p_limit: 10 }).catch(() => null);
+  const PR = await rpc('store_product_ratings', { p_slug: slug }).catch(() => ({}));   // { productId: { avg, count } } com 3+ avaliações
   const [PROMOS, POP, ETA] = await Promise.all([q(sb.from('promotions').select('*').eq('tenant_id', S.id).eq('active', true)).catch(() => []),
     rpc('popular_products', { p_slug: slug }).catch(() => []), rpc('store_eta', { p_slug: slug }).catch(() => null)]);
   const byId = Object.fromEntries(products.map(p => [p.id, p]));
@@ -752,7 +753,7 @@ async function vShop(slug) {
     <div class="shop"><section>
       <div class="cats">${cats.map(c => `<button class="${c === cat ? 'on' : ''}" data-cat="${esc(c)}">${esc(c)}${c !== TOP && !catNow(c) ? ` <span class="mut" style="font-weight:400">· ${esc(catHoursText(S, c))}</span>` : ''}</button>`).join('')}</div>
       ${cat !== TOP && !catNow(cat) ? `<p class="banner" style="text-align:left;border-radius:12px;margin:0 0 12px">${esc(cat)}: disponível ${esc(catHoursText(S, cat))}.${SLOTS.length ? ' Dá para agendar um pedido para esse horário.' : ''}</p>` : ''}
-      <div class="menu">${list.map(p => `<article class="item">${picture(p, S.color)}<div class="b">${PROMOS.some(pm => promoActive(pm, S.timezone) && promoMatches(pm, p)) ? '<span class="badge b-g">Em promoção</span>' : ''}<h3>${esc(p.name)}</h3><span class="mut">${esc(p.description)}</span>
+      <div class="menu">${list.map(p => `<article class="item">${picture(p, S.color)}<div class="b">${PROMOS.some(pm => promoActive(pm, S.timezone) && promoMatches(pm, p)) ? '<span class="badge b-g">Em promoção</span>' : ''}<h3>${esc(p.name)}</h3>${PR?.[p.id] ? `<span class="prate" title="Nota dos pedidos que tinham este produto">★ ${String(PR[p.id].avg).replace('.', ',')} <span class="mut">(${PR[p.id].count})</span></span>` : ''}<span class="mut">${esc(p.description)}</span>
         <div class="foot"><span class="price">${p.groups.some(g => g.min_sel && g.options.some(o => o.price)) ? '<span class="mut">a partir de </span>' : ''}<b>${brl(p.price)}</b></span>
         ${p.stock === 0 ? '<span class="badge b-r">Esgotado</span>' : `<button class="pri sm" data-add="${p.id}" ${CAN_ORDER && (catNow(p.category) || SLOTS.length) ? '' : 'disabled'}>Adicionar</button>`}</div>${p.stock > 0 && p.stock <= 5 ? `<span class="badge b-a">Últimas ${p.stock} unidade${p.stock > 1 ? 's' : ''}</span>` : ''}</div></article>`).join('') || '<p class="empty">Cardápio vazio.</p>'}</div>
     </section>
@@ -2152,9 +2153,36 @@ async function pWaiter(S) {
 }
 
 /* ---------- várias unidades ---------- */
+// Cores fixas por unidade (paleta categórica validada; a cor segue a loja, não a posição no ranking)
+const UNIT_COLORS = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948'];
+function unitsChart(el, rep, colorOf) {
+  const W = el.clientWidth || 800, H = 240, P = { l: 56, r: 16, t: 12, b: 26 }, days = rep.daily, ids = rep.units.slice(0, 8).map(u => u.id);
+  const max = Math.max(1, ...days.flatMap(d => ids.map(id => d.units[id] || 0)));
+  const step = 10 ** Math.floor(Math.log10(max)), nice = Math.ceil(max / step) * step;
+  const x = i => P.l + (days.length < 2 ? 0 : i * (W - P.l - P.r) / (days.length - 1)), y = v => P.t + (H - P.t - P.b) * (1 - v / nice);
+  const grid = [0, .25, .5, .75, 1].map(f => `<line x1="${P.l}" x2="${W - P.r}" y1="${y(nice * f)}" y2="${y(nice * f)}" class="gl"/><text x="${P.l - 6}" y="${y(nice * f) + 4}" text-anchor="end" class="ax">${f ? brl(nice * f).replace(/,00$/, '') : '0'}</text>`).join('');
+  const every = Math.ceil(days.length / 8), xl = days.map((d, i) => (i % every === 0 && days.length - 1 - i >= every / 2) || i === days.length - 1 ? `<text x="${x(i)}" y="${H - 6}" text-anchor="middle" class="ax">${d.day.slice(8, 10)}/${d.day.slice(5, 7)}</text>` : '').join('');
+  const lines = ids.map(id => `<polyline fill="none" stroke="${colorOf(id)}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="${days.map((d, i) => `${x(i).toFixed(1)},${y(d.units[id] || 0).toFixed(1)}`).join(' ')}"/>`).join('');
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Vendas por dia de cada unidade">${grid}${xl}${lines}<line id="ucx" y1="${P.t}" y2="${H - P.b}" class="cx" hidden/>${ids.map(id => `<circle data-u="${id}" r="4" fill="${colorOf(id)}" stroke="var(--card)" stroke-width="2" hidden/>`).join('')}<rect x="${P.l}" y="0" width="${W - P.l - P.r}" height="${H}" fill="transparent" id="uhit"/></svg><div class="utip" hidden></div>`;
+  const svg = el.querySelector('svg'), tip = el.querySelector('.utip'), cx = el.querySelector('#ucx');
+  const hide = () => { tip.hidden = true; cx.setAttribute('hidden', ''); el.querySelectorAll('circle').forEach(c => c.setAttribute('hidden', '')); };
+  svg.addEventListener('pointermove', e => {
+    const r = svg.getBoundingClientRect(), px = (e.clientX - r.left) * W / r.width;
+    const i = Math.max(0, Math.min(days.length - 1, Math.round((px - P.l) / ((W - P.l - P.r) / Math.max(1, days.length - 1))))), d = days[i];
+    cx.setAttribute('x1', x(i)); cx.setAttribute('x2', x(i)); cx.removeAttribute('hidden');
+    el.querySelectorAll('circle').forEach(c => { c.setAttribute('cx', x(i)); c.setAttribute('cy', y(d.units[c.dataset.u] || 0)); c.removeAttribute('hidden'); });
+    const rows = rep.units.slice(0, 8).map(u => ({ u, v: d.units[u.id] || 0 })).sort((a, b) => b.v - a.v);
+    tip.innerHTML = `<b>${d.day.split('-').reverse().join('/')}</b>${rows.map(({ u, v }) => `<div class="tr"><span class="sw" style="background:${colorOf(u.id)}"></span><span>${esc(u.name)}</span><b>${brl(v)}</b></div>`).join('')}<div class="mut">Total ${brl(rows.reduce((a, r) => a + r.v, 0))}</div>`;
+    tip.hidden = false; const left = x(i) * r.width / W; tip.style.left = `${Math.min(Math.max(left + 12, 0), r.width - tip.offsetWidth - 4)}px`;
+  });
+  svg.addEventListener('pointerleave', hide);
+}
 async function pUnits(S) {
+  let days = 30, rep = null;
+  const loadRep = async () => { rep = await rpc('units_report', { p_days: days }).catch(() => null); };
   const draw = async () => {
     const us = await rpc('my_units');
+    const order = [...us].sort((a, b) => String(a.id).localeCompare(String(b.id))), colorOf = id => UNIT_COLORS[order.findIndex(u => u.id === id) % 8] || '#888';
     const sum = k => us.reduce((a, u) => a + u[k].revenue, 0), cnt = k => us.reduce((a, u) => a + u[k].orders, 0);
     app.innerHTML = `<div class="row between"><div><h2>Unidades</h2><p class="lead">Todas as lojas da sua conta num lugar só. Cada unidade tem cardápio, pedidos, equipe e assinatura próprios.</p></div>
       <button class="pri" id="uNew">+ Nova unidade</button></div>
@@ -2168,11 +2196,33 @@ async function pUnits(S) {
         <td data-l="Hoje" class="n"><span class="price">${brl(u.today.revenue)}</span><br><span class="mut">${u.today.orders} ped.</span></td>
         <td data-l="No mês" class="n"><span class="price">${brl(u.month.revenue)}</span><br><span class="mut">${u.month.orders} ped.</span></td>
         <td data-l="Em andamento" class="n">${u.openOrders}</td>
-        <td data-l=""><span class="row">${u.id === S.id ? '' : `<button class="ghost sm" data-go="${u.id}">Abrir painel</button>`}<a class="btn ghost sm" href="${esc(storeLink({ slug: u.slug, custom_domain: u.domain }))}" target="_blank" rel="noopener">Ver loja</a></span></td></tr>`).join('')}</tbody></table></div></div>`;
+        <td data-l=""><span class="row">${u.id === S.id ? '' : `<button class="ghost sm" data-go="${u.id}">Abrir painel</button>`}<a class="btn ghost sm" href="${esc(storeLink({ slug: u.slug, custom_domain: u.domain }))}" target="_blank" rel="noopener">Ver loja</a></span></td></tr>`).join('')}</tbody></table></div></div>
+    ${rep && us.length > 1 ? (() => { const T = rep.units.reduce((a, u) => ({ rev: a.rev + u.revenue, n: a.n + u.orders, c: a.c + u.customers }), { rev: 0, n: 0, c: 0 });
+      return `<div class="row between" style="margin-top:28px"><h3 style="margin:0">Desempenho da rede</h3><div class="segs" style="grid-template-columns:repeat(3,auto)">${[7, 30, 90].map(d => `<button data-udays="${d}" class="${d === days ? 'on' : ''}">${d} dias</button>`).join('')}</div></div>
+      <div class="kpis"><div class="kpi"><span class="mut">Vendas (${days} dias)</span><b class="price">${brl(T.rev)}</b><span class="mut">${T.n} pedido(s)</span></div>
+        <div class="kpi"><span class="mut">Ticket médio da rede</span><b class="price">${T.n ? brl(Math.round(T.rev / T.n)) : '—'}</b><span class="mut">por pedido</span></div>
+        <div class="kpi"><span class="mut">Clientes</span><b>${T.c}</b><span class="mut">telefones diferentes (somando as lojas)</span></div>
+        <div class="kpi"><span class="mut">Melhor unidade</span><b style="font-size:20px">${esc(rep.units[0]?.name || '—')}</b><span class="mut">${T.rev ? Math.round(rep.units[0].revenue * 100 / T.rev) : 0}% das vendas</span></div></div>
+      <div class="panel" style="margin-top:16px"><h3 style="margin-top:0">Vendas por dia</h3>
+        <div class="ulegend">${rep.units.slice(0, 8).map(u => `<span><span class="sw" style="background:${colorOf(u.id)}"></span>${esc(u.name)}</span>`).join('')}${rep.units.length > 8 ? `<span class="mut">+${rep.units.length - 8} unidade(s) fora do gráfico (veja a tabela)</span>` : ''}</div>
+        <div id="uChart" class="uchart"></div></div>
+      <div class="panel" style="margin-top:16px"><div class="scroll"><table class="stack"><thead><tr><th>Unidade</th><th class="n">Vendas</th><th>Participação</th><th class="n">Pedidos</th><th class="n">Ticket</th><th class="n">Cancelados</th><th class="n">Preparo</th><th class="n">Nota</th></tr></thead><tbody>
+        ${rep.units.map(u => { const sh = T.rev ? u.revenue * 100 / T.rev : 0; return `<tr><td data-l="Unidade"><span class="sw" style="background:${colorOf(u.id)}"></span><b>${esc(u.name)}</b></td>
+          <td data-l="Vendas" class="n price">${brl(u.revenue)}</td>
+          <td data-l="Participação"><span class="share"><span style="width:${sh.toFixed(1)}%;background:${colorOf(u.id)}"></span></span> ${Math.round(sh)}%</td>
+          <td data-l="Pedidos" class="n">${u.orders}</td><td data-l="Ticket" class="n">${u.ticket ? brl(u.ticket) : '—'}</td>
+          <td data-l="Cancelados" class="n">${u.cancelRate != null ? `${String(u.cancelRate).replace('.', ',')}%` : '—'}</td>
+          <td data-l="Preparo" class="n">${u.prepMin != null ? `${u.prepMin} min` : '—'}</td>
+          <td data-l="Nota" class="n">${u.rating ? `★ ${String(u.rating).replace('.', ',')} <span class="mut">(${u.ratings})</span>` : '—'}</td></tr>`; }).join('')}</tbody></table></div>
+        <p class="mut" style="margin:8px 0 0">Preparo = tempo mediano do pedido feito até ficar pronto. Cancelados = % dos pedidos do período.</p></div>
+      ${rep.products.length ? `<div class="panel" style="margin-top:16px"><h3 style="margin-top:0">Mais vendidos da rede</h3><div class="scroll"><table class="stack"><thead><tr><th>Produto</th><th class="n">Total</th>${rep.units.slice(0, 8).map(u => `<th class="n"><span class="sw" style="background:${colorOf(u.id)}"></span>${esc(u.name)}</th>`).join('')}<th class="n">Vendas</th></tr></thead><tbody>
+        ${rep.products.map(p => `<tr><td data-l="Produto">${esc(p.name)}</td><td data-l="Total" class="n"><b>${p.qty}</b></td>${rep.units.slice(0, 8).map(u => `<td data-l="${esc(u.name)}" class="n">${p.byUnit[u.id] || '—'}</td>`).join('')}<td data-l="Vendas" class="n price">${brl(p.revenue)}</td></tr>`).join('')}</tbody></table></div></div>` : ''}`; })() : ''}`;
+    if (rep && us.length > 1 && $('#uChart')) unitsChart($('#uChart'), rep, colorOf);
   };
   app.onclick = attempt(async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.dataset.go) { local.set('tenant', b.dataset.go); return go('/painel'); }
+    if (b.dataset.udays) { days = +b.dataset.udays; await loadRep(); return draw(); }
     if (b.id === 'uNew') {
       dialog(`<h2>Nova unidade</h2><p class="mut" style="margin:0">A nova loja começa com uma cópia do cardápio (com opções e fotos), das taxas de entrega, das promoções, dos horários e das regras de <b>${esc(S.name)}</b>. Endereço, telefone, equipe, cupons e Mercado Pago você configura depois.</p>
         <form id="fUnit"><label>Nome da unidade<input id="uN" required maxlength="80" placeholder="${esc(S.name)} — Centro"></label>
@@ -2189,7 +2239,7 @@ async function pUnits(S) {
     }
   });
   cleanup = () => { app.onclick = null; };
-  await draw();
+  await loadRep(); await draw();
 }
 
 // Planilha de pedidos do período (para o contador): uma linha por pedido, itens numa coluna. Busca em lotes de 1.000.
@@ -2234,6 +2284,18 @@ async function pReports(S) {
   let month = new Date().toLocaleDateString('en-CA', { timeZone: S.timezone || 'America/Sao_Paulo' }).slice(0, 7);
   const CATS = ['Aluguel', 'Salários', 'Energia', 'Água', 'Gás', 'Embalagens', 'Ingredientes avulsos', 'Marketing', 'Taxas e impostos', 'Aplicativos', 'Manutenção', 'Outros'];
   // Engenharia de cardápio: popularidade × margem (método Kasavana & Smith) + curva ABC da receita
+  // Avaliação por produto: a nota de cada pedido vale para os produtos dele
+  const drawPRat = async () => {
+    const box = $('#prat'); if (!box) return;
+    const d = Math.max(days, 30), all = await rpc('product_ratings', { p_tenant: S.id, p_days: d }).catch(() => null);
+    if (!all || !all.length) { box.innerHTML = ''; return; }
+    const rows = all.filter(x => x.count >= 2), worst = rows.filter(x => x.avg < 4).slice(0, 5), best = [...rows].sort((a, b) => b.avg - a.avg || b.count - a.count).slice(0, 5);
+    const stars = v => `<span class="stars">${'★'.repeat(Math.round(v))}${'☆'.repeat(5 - Math.round(v))}</span> <b>${String(v).replace('.', ',')}</b>`;
+    box.innerHTML = `<div class="panel" style="margin-top:20px"><h3>Avaliação por produto <span class="mut" style="font-weight:400">· últimos ${d} dias</span></h3>
+      <p class="mut" style="margin:0 0 10px">A nota de cada pedido vale para os produtos que estavam nele. Produtos com menos de 2 avaliações não entram. Na loja online, a nota aparece a partir de 3 avaliações.</p>
+      ${rows.length ? `<div class="two"><div><h4 style="margin:0 0 6px">Mais elogiados</h4>${best.map(x => `<div class="ci"><span>${esc(x.name)}<br><small class="mut">${x.count} avaliação(ões)</small></span><span>${stars(x.avg)}</span></div>`).join('')}</div>
+        <div><h4 style="margin:0 0 6px">Precisam de atenção</h4>${worst.map(x => `<div class="ci"><span>${esc(x.name)}<br><small class="mut">${x.low} nota(s) baixa(s) de ${x.count}</small>${x.comments.filter(c => c.rating <= 3).slice(0, 2).map(c => `<br><small>“${esc(c.comment)}”</small>`).join('')}</span><span>${stars(x.avg)}</span></div>`).join('') || '<p class="mut">Nenhum produto com nota abaixo de 4. 👏</p>'}</div></div>` : '<p class="mut">Ainda há poucas avaliações para comparar os produtos.</p>'}</div>`;
+  };
   const drawEng = async () => {
     const box = $('#eng'); if (!box) return;
     const d = Math.max(days, 30), all = await rpc('menu_engineering', { p_tenant: S.id, p_days: d }).catch(() => null);
@@ -2301,7 +2363,7 @@ async function pReports(S) {
     const bars = (rows, label, val, fmt, color) => { const m = Math.max(1, ...rows.map(val)); return rows.map(x => `<div class="bar"><span>${esc(label(x))}</span><i style="width:${val(x) / m * 100}%;${color ? `background:${color}` : ''}"></i><span class="price">${fmt(x)}</span></div>`).join('') || '<p class="empty">Sem dados no período</p>'; };
     app.innerHTML = `<div class="row between"><div><h2>Relatórios</h2><p class="lead">Pedidos não cancelados no período escolhido.</p></div>
       <span class="row">${[1, 7, 30, 90].map(d => `<button class="sm ${d === days ? 'pri' : 'ghost'}" data-days="${d}">${d === 1 ? 'Hoje' : d + ' dias'}</button>`).join('')}<button class="ghost sm" id="ordersCsv">Baixar pedidos (CSV)</button></span></div>
-    <div id="fin"></div><div id="eng"></div><div id="acts"></div>
+    <div id="fin"></div><div id="eng"></div><div id="prat"></div><div id="acts"></div>
     <div class="kpis"><div class="kpi"><span class="mut">Faturamento</span><b class="price">${brl(r.revenue)}</b></div><div class="kpi"><span class="mut">Pedidos</span><b>${r.orders}</b><span class="mut">${r.cancelled} cancelado(s)</span></div>
       <div class="kpi"><span class="mut">Ticket médio</span><b class="price">${brl(r.avgTicket)}</b></div><div class="kpi"><span class="mut">Tempo médio até entregar</span><b>${r.avgDeliveryMin ?? '—'}${r.avgDeliveryMin != null ? ' min' : ''}</b></div></div>
     <div class="two"><div class="panel"><h3>Faturamento por dia</h3><div class="bars">${bars(r.byDay, x => x.d.split('-').reverse().slice(0, 2).join('/'), x => x.revenue, x => brl(x.revenue))}</div></div>
@@ -2314,7 +2376,7 @@ async function pReports(S) {
         ${x.comment ? `<p style="margin:0">${esc(x.comment)}</p>` : ''}
         <form class="row" data-reply="${x.order_id}" style="flex-wrap:nowrap"><input name="reply" maxlength="500" placeholder="Responder publicamente" value="${esc(x.reply || '')}"><button class="ghost sm">${x.reply ? 'Atualizar' : 'Responder'}</button></form>
         <span class="mut" style="font-size:13px">${new Date(x.created_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</span></div>`).join('') || '<p class="mut" style="margin:0">Nenhuma avaliação ainda. Depois da entrega, o cliente pode avaliar pela página do pedido.</p>'}</div>`;
-    drawFin().catch(() => {}); drawActs().catch(() => {}); drawEng().catch(() => {});
+    drawFin().catch(() => {}); drawActs().catch(() => {}); drawEng().catch(() => {}); drawPRat().catch(() => {});
   };
   app.onclick = attempt(async e => {
     const xd = e.target.closest('button[data-expdel]');
@@ -2707,7 +2769,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
   '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql',
-  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql'];
+  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };

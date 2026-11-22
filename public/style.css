@@ -348,3 +348,20 @@ body.kiosk .opts button{min-height:54px;font-size:17px}
 .omap .osm{position:absolute;right:4px;bottom:3px;font-size:10px;background:#fffc;color:#333;padding:1px 5px;border-radius:4px;z-index:4;text-decoration:none}
 .courier .live{display:grid;gap:6px}
 .stopn{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;background:var(--red);color:#fff;font-size:15px;vertical-align:middle}
+
+/* nota do produto na loja */
+.prate{font-size:13px;color:#b7791f;font-weight:700}
+.prate .mut{font-weight:400}
+/* painel das unidades */
+.sw{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:middle}
+.ulegend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--mut);margin:-4px 0 8px}
+.uchart{position:relative;width:100%}
+.uchart svg{display:block;width:100%;height:auto;overflow:visible}
+.uchart .gl{stroke:var(--line);stroke-width:1}
+.uchart .ax{font-size:11px;fill:var(--mut)}
+.uchart .cx{stroke:var(--mut);stroke-width:1;stroke-dasharray:3 3}
+.utip{position:absolute;top:6px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 10px;font-size:13px;box-shadow:0 6px 20px #0002;pointer-events:none;min-width:180px;z-index:3}
+.utip .tr{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:8px;margin-top:3px}
+.utip .tr .sw{margin:0}
+.share{display:inline-block;width:80px;height:8px;border-radius:4px;background:var(--line);overflow:hidden;vertical-align:middle}
+.share span{display:block;height:100%;border-radius:4px}
