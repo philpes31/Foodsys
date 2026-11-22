@@ -685,6 +685,16 @@ const MENU_COLS = 'id, category, name, description, price, icon, image_path, ava
 
 // Montador de produto com grupos de opções (usado na loja e no lançamento de pedidos do painel)
 const unitOfP = (p, ids) => p.price + p.groups.flatMap(g => g.options).filter(o => ids.includes(o.id)).reduce((t, o) => t + o.price, 0);
+// Preço "a partir de": soma as opções obrigatórias mais baratas (ex.: tamanho) ao preço base
+function fromPrice(p) {
+  let price = p.price, from = false;
+  for (const g of p.groups || []) if (g.min_sel > 0 && g.options?.length) {
+    const cheap = g.options.map(o => o.price || 0).sort((a, b) => a - b).slice(0, g.min_sel).reduce((a, v) => a + v, 0);
+    if (g.options.some(o => o.price)) from = true;
+    price += cheap;
+  }
+  return { price, from };
+}
 function openBuilder(p, onAdd) {
   if (!p.groups.length) return onAdd({ productId: p.id, name: p.name, optionIds: [], optText: '', unit: p.price, qty: 1, notes: '' });
   const sel = p.groups.map(g => g.options.slice(0, g.min_sel).map(o => o.id));
@@ -811,7 +821,7 @@ async function vShop(slug) {
       <div class="cats">${cats.map(c => `<button class="${c === cat ? 'on' : ''}" data-cat="${esc(c)}">${esc(c)}${c !== TOP && !catNow(c) ? ` <span class="mut" style="font-weight:400">· ${esc(catHoursText(S, c))}</span>` : ''}</button>`).join('')}</div>
       ${cat !== TOP && !catNow(cat) ? `<p class="banner" style="text-align:left;border-radius:12px;margin:0 0 12px">${esc(cat)}: disponível ${esc(catHoursText(S, cat))}.${SLOTS.length ? ' Dá para agendar um pedido para esse horário.' : ''}</p>` : ''}
       <div class="menu">${list.map(p => `<article class="item">${picture(p, S.color)}<div class="b">${PROMOS.some(pm => promoActive(pm, S.timezone) && promoMatches(pm, p)) ? '<span class="badge b-g">Em promoção</span>' : ''}<h3>${esc(p.name)}</h3>${PR?.[p.id] ? `<span class="prate" title="Nota dos pedidos que tinham este produto">★ ${String(PR[p.id].avg).replace('.', ',')} <span class="mut">(${PR[p.id].count})</span></span>` : ''}<span class="mut">${esc(p.description)}</span>
-        <div class="foot"><span class="price">${p.groups.some(g => g.min_sel && g.options.some(o => o.price)) ? '<span class="mut">a partir de </span>' : ''}<b>${brl(p.price)}</b></span>
+        <div class="foot"><span class="price">${fromPrice(p).from ? '<span class="mut">a partir de </span>' : ''}<b>${brl(fromPrice(p).price)}</b></span>
         ${p.stock === 0 ? '<span class="badge b-r">Esgotado</span>' : `<button class="pri sm" data-add="${p.id}" ${CAN_ORDER && (catNow(p.category) || SLOTS.length) ? '' : 'disabled'}>Adicionar</button>`}</div>${p.stock > 0 && p.stock <= 5 ? `<span class="badge b-a">Últimas ${p.stock} unidade${p.stock > 1 ? 's' : ''}</span>` : ''}</div></article>`).join('') || '<p class="empty">Cardápio vazio.</p>'}</div>
     </section>
     <aside class="cart" aria-label="Carrinho"><h3>Seu pedido</h3>
@@ -2274,36 +2284,50 @@ async function pKiosk(S) {
   const total = () => cart.reduce((t, c) => t + c.unit * c.qty, 0), count = () => cart.reduce((t, c) => t + c.qty, 0);
   const reset = () => { cart = []; name = ''; away = false; done = null; cat = null; stage = 'start'; closeDlg(); draw(); };
   const add = it => { const k = cart.find(c => c.productId === it.productId && c.optionIds.join() === it.optionIds.join() && c.notes === it.notes); k ? k.qty += it.qty : cart.push(it); toast(`${it.name} no pedido`); draw(); };
-  const logo = S.logo_path ? `<img class="klogo" src="${esc(imgUrl(S.logo_path))}" alt="">` : '';
+  const logo = cls => S.logo_path ? `<img class="${cls}" src="${esc(imgUrl(S.logo_path))}" alt="">` : `<span class="${cls} kw-mono">${esc(S.name.trim()[0] || '•')}</span>`;
+  const icon = { plus: '<svg class="ki" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>', minus: '<svg class="ki" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>',
+    bag: '<svg class="ki" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8h12l-1 12H7L6 8Z"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/></svg>', back: '<svg class="ki" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>' };
   const draw = () => {
-    const open = openState(S).open;
+    const os = openState(S);
     if (stage === 'start') {
-      app.innerHTML = `<div class="kstart" data-k="begin">${logo}<h1>${esc(S.name)}</h1>
-        ${open ? '<button class="pri kbig" data-k="begin">Toque para fazer seu pedido</button><p>Escolha, confirme e pague no caixa. Chamamos pelo número.</p>' : '<p class="kclosed">Estamos fechados agora</p>'}
+      app.innerHTML = `<div class="ks" data-k="begin">
+        <div class="ks-hero">${logo('ks-logo')}<h1>${esc(S.name)}</h1>
+          ${os.open ? `<p class="ks-sub">Faça seu pedido aqui e retire no balcão</p><button class="ks-cta" data-k="begin">Toque para começar</button>`
+            : `<p class="ks-closed">Estamos fechados agora</p>${os.label ? `<p class="ks-sub">${esc(os.label)}</p>` : ''}`}</div>
+        <ol class="ks-steps"><li><b>1</b><span>Escolha os itens</span></li><li><b>2</b><span>Confirme com seu nome</span></li><li><b>3</b><span>Pague no caixa e aguarde a chamada</span></li></ol>
         <button class="kexit" data-k="exit" aria-label="Sair do totem">🔒 Sair do totem</button></div>`;
       return;
     }
     if (stage === 'done') {
-      app.innerHTML = `<div class="kstart"><p class="kok">Pedido feito!</p><div class="knum">${done.number}</div>
-        <h2>${done.status === 'preparo' ? 'Já estamos preparando.' : 'Agora é só pagar no caixa.'}</h2>
-        <p>${done.status === 'preparo' ? 'Pague no caixa e aguarde: chamamos pelo número ' : 'Diga o número '}<b>${done.number}</b>${done.status === 'preparo' ? '.' : ' no caixa. Depois é só aguardar ser chamado.'}</p>
-        <p class="kprice">Total: ${brl(done.total)}</p><button class="pri kbig" data-k="new">Fazer outro pedido</button></div>`;
+      app.innerHTML = `<div class="ks ks-done"><div class="ks-ticket">
+        <span class="ks-ok">✓ Pedido recebido</span><span class="ks-lbl">Seu número</span><div class="ks-num">${done.number}</div>
+        <p>${done.status === 'preparo' ? 'Já começamos a preparar. Pague no caixa e aguarde: chamamos pelo número.' : `Vá ao caixa, diga o número <b>${done.number}</b> e faça o pagamento. Depois é só aguardar a chamada.`}</p>
+        <div class="ks-total"><span>Total</span><b>${brl(done.total)}</b></div>
+        <button class="ks-cta" data-k="new">Fazer outro pedido</button></div></div>`;
       return;
     }
     const cs = cats(); if (!cs.includes(cat)) cat = cs[0];
-    app.innerHTML = `<div class="kwrap">
-      <aside class="kcats">${logo}${cs.map(c => `<button class="${c === cat ? 'on' : ''}" data-cat="${esc(c)}">${esc(c)}</button>`).join('')}</aside>
-      <section class="kmenu"><h2>${esc(cat || '')}</h2><div class="kgrid">${items().filter(p => p.category === cat).map(p => `<button class="kitem" data-p="${p.id}">${picture(p, S.color)}<b>${esc(p.name)}</b><span class="mut">${esc(p.description || '')}</span><span class="price">${brl(p.price)}${p.groups.length ? ' <small class="mut">+ opções</small>' : ''}</span></button>`).join('') || '<p class="mut">Nada nesta categoria agora.</p>'}</div></section>
-      <aside class="kcart"><h2>Seu pedido</h2>
-        <div class="klist">${cart.map((c, i) => `<div class="kline"><div><b>${esc(c.name)}</b>${c.optText ? `<br><small class="mut">${esc(c.optText)}</small>` : ''}${c.notes ? `<br><small class="mut">${esc(c.notes)}</small>` : ''}<br><span class="price">${brl(c.unit * c.qty)}</span></div>
-          <span class="kq"><button data-q="${i}" data-d="-1" aria-label="Menos">−</button><b>${c.qty}</b><button data-q="${i}" data-d="1" aria-label="Mais">+</button></span></div>`).join('') || '<p class="mut">Toque nos produtos para adicionar.</p>'}</div>
-        <div class="tot"><span>Total</span><span class="price">${brl(total())}</span></div>
-        ${stage === 'menu' ? `<button class="pri kbig" data-k="finish" ${cart.length ? '' : 'disabled'}>Finalizar (${count()})</button>`
-        : `<form id="kF" class="grid" style="gap:10px"><label>Seu nome, para chamarmos<input id="kName" value="${esc(name)}" required maxlength="40" autocomplete="off" placeholder="Ex.: Ana"></label>
-            <div class="segs" style="grid-template-columns:1fr 1fr"><button type="button" data-away="0" class="${away ? '' : 'on'}">Comer aqui</button><button type="button" data-away="1" class="${away ? 'on' : ''}">Para levar</button></div>
-            <p class="mut" style="margin:0">Pagamento no caixa: dinheiro, Pix ou cartão.</p>
-            <button class="pri kbig" id="kSend">Confirmar pedido</button><button type="button" class="ghost" data-k="back">Voltar ao cardápio</button></form>`}
-        <button class="ghost" data-k="cancel">Cancelar pedido</button></aside></div>`;
+    const list = items().filter(p => p.category === cat);
+    app.innerHTML = `<div class="kw">
+      <aside class="kw-side"><div class="kw-brand">${logo('kw-logo')}<b>${esc(S.name)}</b></div>
+        <nav class="kw-cats">${cs.map(c => `<button class="${c === cat ? 'on' : ''}" data-cat="${esc(c)}"><span>${esc(c)}</span><small>${items().filter(p => p.category === c).length}</small></button>`).join('')}</nav>
+        <button class="kw-restart" data-k="cancel">${icon.back}Recomeçar</button></aside>
+      <section class="kw-menu"><div class="kw-head"><h2>${esc(cat || 'Cardápio')}</h2><span>${list.length} ${list.length === 1 ? 'opção' : 'opções'}</span></div>
+        <div class="kw-grid">${list.map(p => { const fp = fromPrice(p); return `<button class="kw-item" data-p="${p.id}"><span class="kw-img">${picture(p, S.color)}</span>
+          <span class="kw-body"><b>${esc(p.name)}</b>${p.description ? `<span class="kw-desc">${esc(p.description)}</span>` : ''}
+          <span class="kw-foot"><span class="kw-price">${fp.from ? '<small>a partir de</small>' : ''}${brl(fp.price)}</span><span class="kw-add">${icon.plus}</span></span></span></button>`; }).join('') || '<p class="kw-empty">Nada nesta categoria agora.</p>'}</div></section>
+      <aside class="kw-cart"><div class="kw-head"><h2>Seu pedido</h2>${count() ? `<span class="kw-count">${count()} ${count() === 1 ? 'item' : 'itens'}</span>` : ''}</div>
+        <div class="kw-list">${cart.map((c, i) => `<div class="kw-line"><div class="kw-line-txt"><b>${esc(c.name)}</b>${c.optText ? `<small>${esc(c.optText)}</small>` : ''}${c.notes ? `<small>${esc(c.notes)}</small>` : ''}<span class="kw-line-price">${brl(c.unit * c.qty)}</span></div>
+          <span class="kw-qty"><button data-q="${i}" data-d="-1" aria-label="Menos">${icon.minus}</button><b>${c.qty}</b><button data-q="${i}" data-d="1" aria-label="Mais">${icon.plus}</button></span></div>`).join('')
+          || `<div class="kw-cart-empty">${icon.bag}<b>Seu pedido está vazio</b><span>Toque em um produto para adicionar</span></div>`}</div>
+        <div class="kw-foot2">
+          ${stage === 'name' ? `<form id="kF" class="kw-form"><label>Seu nome, para chamarmos<input id="kName" value="${esc(name)}" required maxlength="40" autocomplete="off" placeholder="Ex.: Ana"></label>
+            <div class="kw-seg"><button type="button" data-away="0" class="${away ? '' : 'on'}">Comer aqui</button><button type="button" data-away="1" class="${away ? 'on' : ''}">Para levar</button></div>
+            <p class="kw-note">Pagamento no caixa: dinheiro, Pix ou cartão.</p></form>` : ''}
+          <div class="kw-total"><span>Total</span><b>${brl(total())}</b></div>
+          ${stage === 'menu' ? `<button class="kw-cta" data-k="finish" ${cart.length ? '' : 'disabled'}>Finalizar pedido</button>`
+            : `<button class="kw-cta" id="kSend" form="kF">Confirmar pedido</button><button type="button" class="kw-link" data-k="back">Voltar ao cardápio</button>`}
+        </div></aside></div>`;
     if (stage === 'name') $('#kName')?.focus();
   };
   // Sem toque por 90 s: pergunta se ainda tem alguém; mais 20 s, recomeça
