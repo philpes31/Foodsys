@@ -365,3 +365,4 @@ body.kiosk .opts button{min-height:54px;font-size:17px}
 .utip .tr .sw{margin:0}
 .share{display:inline-block;width:80px;height:8px;border-radius:4px;background:var(--line);overflow:hidden;vertical-align:middle}
 .share span{display:block;height:100%;border-radius:4px}
+.pseg{display:flex;flex-wrap:wrap}

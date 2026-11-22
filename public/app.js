@@ -1264,15 +1264,31 @@ const routeMsg = (S, os) => `Rota com ${os.length} entregas — ${S.name}\n\n${o
 
 // Mensagem de acerto para o entregador (WhatsApp): entregas, taxas e dinheiro a devolver.
 const settleMsg = (S, c, day) => `Acerto ${S.name} — ${day.split('-').reverse().join('/')}\n${c.name}\n\nEntregas: ${c.deliveries}${c.onRoute ? ` (+${c.onRoute} em rota)` : ''}\nTaxas de entrega: ${brl(c.fees)}\nDinheiro recebido dos clientes: ${brl(c.cash)}\n${c.cash >= c.fees ? `Devolver à loja: ${brl(c.cash - c.fees)}` : `A loja paga: ${brl(c.fees - c.cash)}`}\n\nPedidos: ${c.orders.map(o => `#${o.number} ${o.status === 'rota' ? '(em rota)' : ''}${o.payment === 'Dinheiro' && o.status === 'entregue' ? ` dinheiro ${brl(o.total)}` : ''}`).join(', ')}`;
-async function pDelivery(S) {
-  let ready = [], route = [], couriers = [], settle = null, onMap = null;
+// Acerto dos entregadores: textos e períodos
+const PAY_MODES = { taxa: 'Fica com a taxa de entrega', fixo: 'Valor fixo por entrega', diaria: 'Diária', diaria_fixo: 'Diária + valor por entrega' };
+const payModeTxt = c => c.mode === 'taxa' ? 'taxa de entrega' : c.mode === 'fixo' ? `${brl(c.per)} por entrega` : c.mode === 'diaria' ? `diária de ${brl(c.daily)}` : `diária de ${brl(c.daily)} + ${brl(c.per)} por entrega`;
+const dmy = d => d.split('-').reverse().slice(0, 2).join('/');
+const periodTxt = (f, t) => f === t ? dmy(f) : `${dmy(f)} a ${dmy(t)}`;
+const statementMsg = (S, c, f, t) => `Acerto ${S.name} — ${periodTxt(f, t)}\n${c.name}\n\nEntregas: ${c.deliveries}${c.days > 1 ? ` em ${c.days} dias` : ''}${c.onRoute ? ` (+${c.onRoute} em rota)` : ''}\nComo você ganha: ${payModeTxt(c)}\nSeus ganhos: ${brl(c.earnings)}\nDinheiro recebido dos clientes: ${brl(c.cash)}\n${c.cash > c.earnings ? `Devolver à loja: ${brl(c.cash - c.earnings)}` : c.cash < c.earnings ? `A loja paga a você: ${brl(c.earnings - c.cash)}` : 'Acerto zerado.'}${c.byDay?.length > 1 ? `\n\nPor dia:\n${c.byDay.map(d => `${dmy(d.day)}: ${d.n} entrega(s)${d.cash ? `, ${brl(d.cash)} em dinheiro` : ''}`).join('\n')}` : ''}`;
+function periodOf(key, today) {
+  const d = new Date(`${today}T12:00:00`), iso = x => x.toISOString().slice(0, 10), add = n => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  const dow = (d.getDay() + 6) % 7;   // segunda = 0
+  if (key === 'ontem') return [iso(add(-1)), iso(add(-1))];
+  if (key === 'semana') return [iso(add(-dow)), today];
+  if (key === 'semana-1') return [iso(add(-dow - 7)), iso(add(-dow - 1))];
+  if (key === 'mes') return [`${today.slice(0, 8)}01`, today];
+  return [today, today];
+}
+async function pDelivery(S, owner) {
+  let ready = [], route = [], couriers = [], settle = null, onMap = null, stmt = null, pay = {};
   const today = new Date().toLocaleDateString('en-CA', { timeZone: S.timezone || 'America/Sao_Paulo' });
-  let sday = today;
+  let sday = today, per = 'hoje', [pf, pt] = [today, today];
   const picked = new Set();
   const load = async () => {
     [ready, route, couriers, settle] = await Promise.all([fetchOrders(S.id, ['pronto']), fetchOrders(S.id, ['rota']), q(sb.from('couriers').select('id, tenant_id, name, phone, active').eq('tenant_id', S.id).order('id')),
       rpc('courier_settlement', { p_tenant: S.id, p_day: sday }).catch(() => null)]);
-    onMap = await rpc('courier_positions', { p_tenant: S.id }).catch(() => null);
+    [onMap, stmt] = await Promise.all([rpc('courier_positions', { p_tenant: S.id }).catch(() => null), rpc('courier_statement', { p_tenant: S.id, p_from: pf, p_to: pt }).catch(() => null)]);
+    pay = owner ? Object.fromEntries((await q(sb.from('couriers').select('id, pay_mode, pay_per_delivery, pay_daily, pix_key').eq('tenant_id', S.id)).catch(() => [])).map(c => [c.id, c])) : {};
     draw();
     if (onMap?.length) drawMap($('#dMap'), [...(S.lat != null ? [{ lat: S.lat, lng: S.lng, kind: 'store', label: S.name }] : []),
       ...onMap.map(c => ({ lat: c.lat, lng: c.lng, kind: 'moto', label: c.name })),
@@ -1291,13 +1307,61 @@ async function pDelivery(S) {
       ${onMap?.length ? `<div class="omap" id="dMap" hidden></div><p class="mut" style="margin:4px 0 10px">${onMap.map(c => `🛵 <b>${esc(c.name)}</b> · ${c.orders.length} entrega(s) · posição de ${hhmm(c.at)}`).join('<br>')}</p>` : ''}
       ${route.map(o => `<div class="tk go"><div class="top"><span>#${o.number} · ${esc(o.courier?.name || '—')}</span><span class="price">${mins(o.updated_at)} min</span></div><span class="mut">${esc(o.address)} — ${esc(o.zone_name)} · ${esc(o.payment)}</span>
         <span class="row"><button class="ok sm" data-st="entregue" data-id="${o.id}">Confirmar entrega</button>${waBtn(waLink(couriers.find(c => c.id === o.courier_id)?.phone, courierMsg(o)), 'Enviar ao entregador')}${waBtn(waLink(o.customer_phone, customerMsg(o, S.name)), 'Avisar cliente')}</span></div>`).join('') || '<p class="empty">Ninguém na rua agora</p>'}
-      ${settle ? `<div class="row between" style="margin-top:8px"><h3 style="margin:0">Acerto do dia</h3><input type="date" id="sDay" value="${sday}" max="${today}" style="width:auto"></div>
+      ${settle && !stmt ? `<div class="row between" style="margin-top:8px"><h3 style="margin:0">Acerto do dia</h3><input type="date" id="sDay" value="${sday}" max="${today}" style="width:auto"></div>
         <p class="mut" style="margin:4px 0 8px">Taxas = o que a loja repassa ao entregador. Dinheiro = o que ele recebeu dos clientes e devolve. Considera o modelo comum, em que o entregador fica com a taxa.</p>
         ${settle.length ? `<div class="scroll"><table class="stack"><thead><tr><th>Entregador</th><th class="n">Entregas</th><th class="n">Taxas</th><th class="n">Dinheiro</th><th class="n">Acerto</th><th></th></tr></thead><tbody>
         ${settle.map(c => `<tr><td data-l="Entregador"><b>${esc(c.name)}</b>${c.onRoute ? ` <span class="badge b-a">${c.onRoute} em rota</span>` : ''}</td><td data-l="Entregas" class="n">${c.deliveries}</td><td data-l="Taxas" class="n price">${brl(c.fees)}</td><td data-l="Dinheiro" class="n price">${brl(c.cash)}</td>
           <td data-l="Acerto" class="n"><b class="price">${c.cash >= c.fees ? `devolve ${brl(c.cash - c.fees)}` : `receber ${brl(c.fees - c.cash)}`}</b></td><td data-l="">${waBtn(waLink(c.phone, settleMsg(S, c, sday)), 'Enviar acerto')}</td></tr>`).join('')}</tbody></table></div>` : '<p class="empty" style="margin:0">Nenhuma entrega com entregador nesse dia.</p>'}` : ''}
-      <h3>Entregadores</h3><table><tbody>${couriers.map(c => `<tr><td>${esc(c.name)}<br><span class="mut">${esc(c.phone)}</span></td><td>${route.some(o => o.courier_id === c.id) ? '<span class="badge b-a">Em rota</span>' : c.active ? '<span class="badge b-g">Disponível</span>' : '<span class="badge">Folga</span>'}</td><td class="n"><button class="ghost sm" data-cour="${c.id}">${c.active ? 'Dar folga' : 'Ativar'}</button></td></tr>`).join('') || '<tr><td class="mut">Cadastre entregadores em Configurações.</td></tr>'}</tbody></table>
-    </div></div>`;
+      <h3>Entregadores</h3><table><tbody>${couriers.map(c => `<tr><td>${esc(c.name)}<br><span class="mut">${esc(c.phone)}</span></td><td>${route.some(o => o.courier_id === c.id) ? '<span class="badge b-a">Em rota</span>' : c.active ? '<span class="badge b-g">Disponível</span>' : '<span class="badge">Folga</span>'}</td><td class="n"><span class="row" style="flex-wrap:nowrap;justify-content:flex-end">${owner && pay[c.id] ? `<button class="ghost sm" data-cpay="${c.id}" title="${esc(PAY_MODES[pay[c.id].pay_mode])}">Pagamento</button>` : ''}<button class="ghost sm" data-cour="${c.id}">${c.active ? 'Dar folga' : 'Ativar'}</button></span></td></tr>`).join('') || '<tr><td class="mut">Cadastre entregadores em Configurações.</td></tr>'}</tbody></table>
+    </div></div>
+    ${stmt ? `<div class="panel" style="margin-top:20px"><div class="row between"><h3 style="margin:0">Acerto dos entregadores</h3>
+        <span class="row"><span class="segs pseg">${[['hoje', 'Hoje'], ['ontem', 'Ontem'], ['semana', 'Esta semana'], ['semana-1', 'Semana passada'], ['mes', 'Este mês']].map(([k, l]) => `<button data-per="${k}" class="${per === k ? 'on' : ''}">${l}</button>`).join('')}</span>
+          <input type="date" id="pFrom" value="${pf}" max="${today}" style="width:auto" aria-label="De"><input type="date" id="pTo" value="${pt}" max="${today}" style="width:auto" aria-label="Até"></span></div>
+      <p class="mut" style="margin:6px 0 10px">Ganhos = o que o entregador recebe no período, pela forma de pagamento dele. Dinheiro = o que ele recebeu em espécie dos clientes. O acerto é a diferença. ${owner ? 'Ao marcar como pago, o valor vira despesa "Entregadores" no financeiro e, com o caixa aberto, a gaveta é acertada sozinha.' : ''}</p>
+      ${stmt.filter(c => c.deliveries || c.onRoute || c.payouts.length).length ? `<div class="scroll"><table class="stack"><thead><tr><th>Entregador</th><th class="n">Entregas</th><th class="n">Ganhos</th><th class="n">Dinheiro</th><th class="n">Acerto</th><th>Situação</th><th></th></tr></thead><tbody>
+      ${stmt.filter(c => c.deliveries || c.onRoute || c.payouts.length).map(c => { const net = c.earnings - c.cash, paid = c.payouts;
+        return `<tr><td data-l="Entregador"><b>${esc(c.name)}</b><br><span class="mut">${esc(payModeTxt(c))}</span></td>
+        <td data-l="Entregas" class="n">${c.deliveries}${c.days > 1 ? `<br><span class="mut">${c.days} dias</span>` : ''}${c.onRoute ? `<br><span class="badge b-a">${c.onRoute} em rota</span>` : ''}</td>
+        <td data-l="Ganhos" class="n price">${brl(c.earnings)}</td><td data-l="Dinheiro" class="n price">${brl(c.cash)}</td>
+        <td data-l="Acerto" class="n">${paid.length ? `<span class="mut price">${net > 0 ? brl(net) : net < 0 ? `devolveu ${brl(-net)}` : 'zerado'}</span>` : `<b class="price">${net > 0 ? `pagar ${brl(net)}` : net < 0 ? `devolve ${brl(-net)}` : 'zerado'}</b>`}</td>
+        <td data-l="Situação">${paid.length ? paid.map(p => `<span class="badge b-g">Pago ${periodTxt(p.from, p.to)} · ${esc(p.method)}</span>${owner ? ` <button class="ghost sm" data-undo="${p.id}" title="Desfazer este acerto">Desfazer</button>` : ''}`).join('<br>') : c.deliveries ? '<span class="badge b-a">A acertar</span>' : '—'}</td>
+        <td data-l=""><span class="row" style="flex-wrap:nowrap">${waBtn(waLink(c.phone, statementMsg(S, c, pf, pt)), 'Enviar acerto')}${owner && c.deliveries && !paid.length ? `<button class="pri sm" data-pay="${c.id}">Marcar como pago</button>` : ''}</span></td></tr>`; }).join('')}</tbody></table></div>`
+      : '<p class="empty" style="margin:0">Nenhuma entrega com entregador nesse período.</p>'}</div>` : ''}`;
+  };
+  const payDialog = c => {
+    const net = c.earnings - c.cash;
+    dialog(`<h2>Acerto · ${esc(c.name)}</h2><p class="mut" style="margin:0">${periodTxt(pf, pt)} · ${c.deliveries} entrega(s)${c.days > 1 ? ` em ${c.days} dias` : ''} · ${esc(payModeTxt(c))}</p>
+      <div class="ci"><span>Ganhos do entregador</span><span class="price">${brl(c.earnings)}</span></div>
+      <div class="ci"><span>Dinheiro dos clientes que ficou com ele</span><span class="price">− ${brl(c.cash)}</span></div>
+      <div class="tot"><span>${net > 0 ? 'A loja paga' : net < 0 ? 'Ele devolve à loja' : 'Acerto zerado'}</span><span class="price">${brl(Math.abs(net))}</span></div>
+      ${net > 0 && c.pixKey ? `<label>Chave Pix do entregador<span class="row" style="flex-wrap:nowrap"><input readonly value="${esc(c.pixKey)}"><button type="button" class="ghost sm" data-copy="${esc(c.pixKey)}">Copiar</button></span></label>` : net > 0 ? '<p class="mut" style="margin:0">Sem chave Pix cadastrada. Cadastre em <b>Pagamento</b>, na lista de entregadores.</p>' : ''}
+      <label>Como foi acertado<select id="pyM"><option>Pix</option><option>Dinheiro</option><option>Transferência</option></select></label>
+      <label>Observação (opcional)<input id="pyN" maxlength="200" placeholder="Ex.: pago junto com a semana"></label>
+      <div class="row"><button class="pri" id="pyGo">Confirmar acerto</button><button class="ghost" data-close>Cancelar</button></div>`);
+    $('#dlgBody').onclick = attempt(async e => {
+      const cp = e.target.closest('[data-copy]'); if (cp) return navigator.clipboard?.writeText(cp.dataset.copy).then(() => toast('Chave copiada'));
+      const g = e.target.closest('#pyGo'); if (!g) return; g.disabled = true;
+      try { const r = await rpc('courier_pay', { p_courier: c.id, p_from: pf, p_to: pt, p_method: $('#pyM').value, p_note: $('#pyN').value });
+        closeDlg(); toast(`Acerto registrado${r.cashMove ? ' · gaveta do caixa ajustada' : ''}`); await load(); } finally { g.disabled = false; }
+    });
+  };
+  const payModeDialog = (c, p) => {
+    const draw2 = mode => { $('#pmPer').closest('label').hidden = !['fixo', 'diaria_fixo'].includes(mode); $('#pmDay').closest('label').hidden = !['diaria', 'diaria_fixo'].includes(mode); };
+    dialog(`<h2>Pagamento · ${esc(c.name)}</h2><form id="pmF" class="grid" style="gap:10px">
+      <label>Como ele ganha<select id="pmMode">${Object.entries(PAY_MODES).map(([k, l]) => `<option value="${k}" ${p.pay_mode === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label>Valor por entrega (R$)<input id="pmPer" inputmode="decimal" value="${p.pay_per_delivery ? fromCents(p.pay_per_delivery) : ''}" placeholder="Ex.: 6,00"></label>
+      <label>Valor da diária (R$)<input id="pmDay" inputmode="decimal" value="${p.pay_daily ? fromCents(p.pay_daily) : ''}" placeholder="Ex.: 60,00"></label>
+      <label>Chave Pix (para pagar o acerto)<input id="pmPix" maxlength="140" value="${esc(p.pix_key || '')}" placeholder="CPF, celular, e-mail ou chave aleatória"></label>
+      <p class="mut" style="margin:0">A diária conta os dias em que ele fez pelo menos 1 entrega. A mudança vale para os acertos ainda não pagos.</p>
+      <div class="row"><button class="pri">Salvar</button><button type="button" class="ghost" data-close>Cancelar</button></div></form>`);
+    draw2(p.pay_mode);
+    $('#pmMode').onchange = e => draw2(e.target.value);
+    $('#dlgBody').onsubmit = attempt(async e => {
+      e.preventDefault();
+      const cents = id => { const v = $(id).value.trim(); if (!v) return 0; const n = toCents(v); if (!Number.isInteger(n) || n < 0) throw new Error('Valor inválido'); return n; };
+      await rpc('set_courier_pay', { p_courier: c.id, p_mode: $('#pmMode').value, p_per: cents('#pmPer'), p_daily: cents('#pmDay'), p_pix: $('#pmPix').value });
+      closeDlg(); toast('Forma de pagamento salva'); await load();
+    });
   };
   const openRoute = () => {
     const os = planRoute(S, ready.filter(o => picked.has(o.id))), free = couriers.filter(c => c.active);
@@ -1322,11 +1386,19 @@ async function pDelivery(S) {
   };
   app.onchange = e => {
     if (e.target.id === 'sDay' && e.target.value) { sday = e.target.value; return load().catch(err => toast(err.message)); }
+    if ((e.target.id === 'pFrom' || e.target.id === 'pTo') && e.target.value) {
+      const f = $('#pFrom').value, t = $('#pTo').value; if (!f || !t) return;
+      [pf, pt] = f <= t ? [f, t] : [t, f]; per = ''; return load().catch(err => toast(err.message));
+    }
     const id = e.target.dataset.pick; if (!id) return; e.target.checked ? picked.add(+id) : picked.delete(+id); draw(); };
   app.onclick = attempt(async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.id === 'pickAll') { const dels = ready.filter(o => o.fulfillment === 'delivery'); picked.size === dels.length ? picked.clear() : dels.forEach(o => picked.add(o.id)); return draw(); }
     if (b.id === 'mkRoute') return openRoute();
+    if (b.dataset.per) { per = b.dataset.per; [pf, pt] = periodOf(per, today); return load(); }
+    if (b.dataset.undo) { if (!sure(b)) return; await rpc('courier_pay_undo', { p_payout: +b.dataset.undo }); toast('Acerto desfeito'); return load(); }
+    if (b.dataset.pay) return payDialog(stmt.find(c => c.id === +b.dataset.pay));
+    if (b.dataset.cpay) return payModeDialog(couriers.find(c => c.id === +b.dataset.cpay), pay[+b.dataset.cpay]);
     if (b.dataset.st) {
       await setStatus(+b.dataset.id, b.dataset.st, b.dataset.st === 'rota' ? +$('#c' + b.dataset.id).value : null);
       if (b.dataset.st === 'rota') toast('Despachado. Use “Enviar ao entregador” para mandar o endereço pelo WhatsApp.');
@@ -2769,7 +2841,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
   '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql',
-  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql'];
+  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };

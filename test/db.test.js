@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -617,7 +617,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 29);
+  assert.equal(st.length, 30);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1365,4 +1365,56 @@ test('avaliação por produto: nota do pedido vale para os itens; loja online mo
   assert.ok(pub.count >= 3 && pub.count >= (before?.count || 0) + 3);
   assert.deepEqual(json(`product_ratings('${pizzaId}', 30)`, U.burger), []);
   fails(`select product_ratings('${pizzaId}', 30)`, null, /permission denied/);
+});
+
+test('acerto dos entregadores: formas de pagamento, período, pago vira despesa e sangria, sem pagar duas vezes', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free' where id = '${pizzaId}'`);
+  const c = sql(`insert into couriers (tenant_id, name, phone) values ('${pizzaId}', 'Beto Acerto', '11911114444') returning id`);
+  const tok = sql(`select courier_link(${c})`, U.pizza);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const z = zones('forno-da-vila')[0];
+  const mk = pay => order('forno-da-vila', { customer: { name: 'Cli Acerto', phone: '11955550000' }, fulfillment: 'delivery', zoneId: z.id, address: 'Rua A, 1', payment: pay, items: [{ productId: p.id, qty: 1 }] });
+  const deliver = r => { const id = sql(`select id from orders where public_code = '${r.code}'`);
+    sql(`select change_order_status(${id}, 'preparo'); select change_order_status(${id}, 'pronto'); select change_order_status(${id}, 'rota', ${c})`, U.pizza);
+    sql(`select courier_deliver('${tok}', ${id})`, null); return id; };
+  const a = mk('Dinheiro'), b = mk('Pix'), d0 = mk('Dinheiro');
+  [a, b, d0].forEach(deliver);
+  const yesterday = sql(`select ((now() at time zone 'America/Sao_Paulo')::date - 1)::text`);
+  sql(`update orders set created_at = created_at - interval '1 day' where public_code = '${d0.code}'`);   // uma entrega ontem
+  const today = sql(`select (now() at time zone 'America/Sao_Paulo')::date::text`);
+  const fee = +sql(`select fee from orders where public_code = '${a.code}'`);
+  const cashA = +sql(`select total from orders where public_code = '${a.code}'`), cashD = +sql(`select total from orders where public_code = '${d0.code}'`);
+  const st = (f, t, as = U.pizza) => json(`courier_statement('${pizzaId}', '${f}', '${t}')`, as).find(x => x.id === +c);
+  let s1 = st(yesterday, today);
+  assert.equal(s1.mode, 'taxa'); assert.equal(s1.deliveries, 3); assert.equal(s1.days, 2); assert.equal(s1.earnings, fee * 3); assert.equal(s1.cash, cashA + cashD);
+  assert.equal(st(today, today).deliveries, 2);
+  // valor fixo por entrega e diária
+  fails(`select set_courier_pay(${c}, 'fixo', 0, 0, null)`, U.pizza, /valor por entrega/);
+  fails(`select set_courier_pay(${c}, 'fixo', 500, 0, null)`, U.staff, /Sem permissão/);
+  sql(`select set_courier_pay(${c}, 'fixo', 600, 0, 'beto@pix.com')`, U.pizza);
+  assert.equal(st(yesterday, today).earnings, 1800);
+  sql(`select set_courier_pay(${c}, 'diaria_fixo', 300, 5000, 'beto@pix.com')`, U.pizza);
+  s1 = st(yesterday, today);
+  assert.equal(s1.earnings, 2 * 5000 + 3 * 300); assert.equal(s1.pixKey, 'beto@pix.com');
+  assert.equal(json(`courier_portal('${tok}')`, null).today.fees, 5000 + 2 * 300);   // o entregador vê o que ganhou hoje
+  // pagar: caixa aberto recebe a sangria; vira despesa
+  if (json(`cash_status('${pizzaId}')`, U.staff).open !== true) sql(`select cash_open('${pizzaId}', 0)`, U.staff);
+  fails(`select courier_pay(${c}, '${yesterday}', '${today}', 'Pix', '')`, U.staff, /Sem permissão/);
+  fails(`select courier_pay(${c}, '${today}', ('${today}'::date + 1)::date, 'Pix', '')`, U.pizza, /futuro/);
+  const pay = json(`courier_pay(${c}, '${yesterday}', '${today}', 'Dinheiro', 'acerto semanal')`, U.pizza);
+  assert.equal(pay.earnings, 10900); assert.equal(pay.amount, 10900 - (cashA + cashD)); assert.equal(pay.cashMove, true);
+  assert.equal(+sql(`select amount from expenses where id = (select expense_id from courier_payouts where id = ${pay.id})`), 10900);
+  assert.equal(sql(`select kind || ':' || amount from cash_moves where id = (select cash_move_id from courier_payouts where id = ${pay.id})`), 'sangria:10900');
+  fails(`select courier_pay(${c}, '${today}', '${today}', 'Pix', '')`, U.pizza, /Já existe um acerto pago/);
+  assert.equal(st(yesterday, today).payouts.length, 1);
+  assert.deepEqual(st(yesterday, today, U.staff).payouts, []);   // equipe vê o cálculo, não os pagamentos
+  fails(`select * from courier_payouts`, null, /permission denied/);
+  // desfazer: some a despesa e a sangria
+  sql(`select courier_pay_undo(${pay.id})`, U.pizza);
+  assert.equal(sql(`select count(*) from courier_payouts where courier_id = ${c}`), '0');
+  assert.equal(sql(`select count(*) from expenses where description like 'Entregador Beto Acerto%'`), '0');
+  // por Pix: a sangria é só o dinheiro que ficou com ele
+  const pay2 = json(`courier_pay(${c}, '${yesterday}', '${today}', 'Pix', null)`, U.pizza);
+  assert.equal(sql(`select amount from cash_moves where id = (select cash_move_id from courier_payouts where id = ${pay2.id})`), String(cashA + cashD));
+  fails(`select courier_pay(${c}, '2020-01-01', '2020-01-02', 'Pix', '')`, U.pizza, /Nenhuma entrega/);
 });
