@@ -2280,7 +2280,7 @@ async function pKiosk(S) {
     if (stage === 'start') {
       app.innerHTML = `<div class="kstart" data-k="begin">${logo}<h1>${esc(S.name)}</h1>
         ${open ? '<button class="pri kbig" data-k="begin">Toque para fazer seu pedido</button><p>Escolha, confirme e pague no caixa. Chamamos pelo número.</p>' : '<p class="kclosed">Estamos fechados agora</p>'}
-        <button class="kexit" data-k="exit" aria-label="Sair do totem">⋯</button></div>`;
+        <button class="kexit" data-k="exit" aria-label="Sair do totem">🔒 Sair do totem</button></div>`;
       return;
     }
     if (stage === 'done') {

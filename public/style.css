@@ -310,7 +310,8 @@ body.kiosk main{padding:0}
 .kok{font-weight:800;color:#2f9e44!important;font-size:clamp(24px,3vw,36px)!important}
 .knum{font-size:clamp(110px,22vw,240px);font-weight:900;line-height:1;color:var(--red)}
 .kprice{font-weight:700;color:var(--ink)!important}
-.kexit{position:absolute;left:10px;bottom:10px;opacity:.25;background:none;border:0;font-size:22px;color:var(--mut);padding:10px;cursor:pointer}
+.kexit{position:absolute;left:14px;bottom:14px;opacity:.55;background:transparent;border:1px solid currentColor;border-radius:999px;font:600 14px Inter,sans-serif;color:var(--ink);padding:8px 14px;cursor:pointer;min-height:auto}
+.kexit:hover,.kexit:focus-visible{opacity:1}
 .klogo{width:84px;height:84px;object-fit:contain;border-radius:16px;background:#fff;display:block;margin:0 auto 10px}
 .kwrap{display:grid;grid-template-columns:200px 1fr 340px;height:100vh}
 .kcats{background:var(--red);padding:16px 10px;display:flex;flex-direction:column;gap:8px;overflow-y:auto}
