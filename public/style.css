@@ -452,3 +452,11 @@ body.kiosk .opts button{min-height:56px;font-size:17px}
 @keyframes kblink{50%{opacity:.25}}
 .ks-pix-actions{display:flex;gap:18px;flex-wrap:wrap;justify-content:center}
 .kw-paylbl{font-weight:600;font-size:15px}
+
+/* totem: cartão na maquininha */
+.ks-cardart{font-size:110px;line-height:1;margin:6px 0;animation:kfloat 2.4s ease-in-out infinite}
+@keyframes kfloat{50%{transform:translateY(-8px)}}
+.ks-fail{color:#c0392b!important;font-weight:700}
+.kw-seg3{grid-template-columns:1fr 1fr 1fr!important}
+.kw-seg3 button{padding:12px 6px;font-size:15px}
+.pointbox{display:grid;gap:6px;border-top:1px solid var(--line);padding-top:10px;margin-top:4px}

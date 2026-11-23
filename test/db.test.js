@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -617,7 +617,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 
 test('checagem: schema_status mostra todas as migrações em dia e funciona para visitantes', () => {
   const st = json(`public.schema_status()`, null);
-  assert.equal(st.length, 32);
+  assert.equal(st.length, 33);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, null).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1242,7 +1242,7 @@ test('totem: equipe lança pedido de retirada, pago no caixa, canal próprio', (
   assert.equal(r.status, 'novo');
   assert.equal(sql(`select channel || '|' || payment || '|' || fulfillment from orders where public_code = '${r.code}'`), 'totem|Pagar no caixa|pickup');
   fails(`select kiosk_place_order('${pizzaId}', ${body({ fulfillment: 'delivery' })})`, U.staff, /retirar no balcão/);
-  fails(`select kiosk_place_order('${pizzaId}', ${body({ payment: 'Dinheiro' })})`, U.staff, /Pix ou no caixa/);
+  fails(`select kiosk_place_order('${pizzaId}', ${body({ payment: 'Dinheiro' })})`, U.staff, /Pix, cartão ou no caixa/);
   fails(`select kiosk_place_order('${pizzaId}', ${body({})})`, U.burger, /Sem permissão/);
   fails(`select kiosk_place_order('${pizzaId}', ${body({})})`, null, /permission denied/);
   fails(`select kiosk_place_order('${pizzaId}', ${body({ customer: { name: '' } })})`, U.staff, /Informe o nome/);
@@ -1510,4 +1510,25 @@ test('totem com Pix: pedido espera o pagamento; pode virar "pagar no caixa" ou s
   sql(`update tenants set pix_online = false where id = '${pizzaId}'`);
   fails(`select kiosk_place_order('${pizzaId}', ${body})`, U.staff, /não aceita Pix online/);
   fails(`select kiosk_pay_at_counter('${pizzaId}', 'NAOEXISTE')`, U.staff, /não encontrado/);
+});
+
+test('totem com cartão na maquininha: só com maquininha configurada; pago pelo Mercado Pago entra como novo', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', point_terminal_id = null, auto_accept = false where id = '${pizzaId}'`);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const body = `'${JSON.stringify({ customer: { name: 'Totem Cartão' }, fulfillment: 'pickup', payment: 'Cartão no totem', items: [{ productId: p.id, qty: 2 }] })}'::jsonb`;
+  fails(`select kiosk_place_order('${pizzaId}', ${body})`, U.staff, /Nenhuma maquininha/);
+  fails(`update tenants set point_terminal_id = 'x; drop' where id = '${pizzaId}'`, U.pizza, /point_terminal_id_check|violates check/);
+  sql(`update tenants set point_terminal_id = 'NEWLAND_N950__N950NCB801293324' where id = '${pizzaId}'`, U.pizza);
+  sql(`insert into tenant_pix (tenant_id, mp_access_token) values ('${pizzaId}', 'APP_USR-test') on conflict (tenant_id) do update set mp_access_token = excluded.mp_access_token`);
+  const r = json(`kiosk_place_order('${pizzaId}', ${body})`, U.staff);
+  assert.equal(r.status, 'pagamento'); assert.equal(r.payment, 'Cartão no totem');
+  const o = json(`pix_order('${r.code}')`, 'service');
+  assert.equal(o.pointTerminal, 'NEWLAND_N950__N950NCB801293324'); assert.equal(o.channel, 'totem');
+  fails(`select point_save(${o.id}, 'ORD1')`, U.staff, /permission denied/);
+  sql(`select point_save(${o.id}, 'ORD1')`, 'service');
+  assert.equal(sql(`select pix_apply('${pizzaId}', ${o.id}, 'ORD1', 'failed', ${r.total})`, 'service'), 'pagamento');   // recusado: pode tentar de novo
+  assert.equal(sql(`select pix_apply('${pizzaId}', ${o.id}, 'ORD2', 'approved', ${r.total})`, 'service'), 'novo');
+  assert.equal(sql(`select payment_status from orders where id = ${o.id}`), 'paid');
+  fails(`select point_terminal_id from tenants where id = '${pizzaId}'`, null, /permission denied/);
+  sql(`update tenants set point_terminal_id = null where id = '${pizzaId}'`, U.pizza);
 });

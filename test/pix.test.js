@@ -149,3 +149,87 @@ test('check de cartão: procura a tentativa aprovada; webhook aceita pagamento c
   const w = await s.post({ type: 'payment', data: { id: '999' } }, `?action=webhook&t=${TENANT}`);
   assert.deepEqual(w.data, { ok: true, status: 'novo' });
 });
+
+// ---- maquininha Point no totem ----
+function setupPoint({ order = {}, mo = {}, member = true, owner = true } = {}) {
+  const calls = [];
+  const db = { order: { id: 9, number: 140, code: 'KIOSK1234567', total: 4700, status: 'pagamento', payment: 'Cartão no totem', paymentStatus: 'pending', pixRef: null,
+    customerName: 'Ana', tenantId: TENANT, storeName: 'Forno', token: 'APP_USR-x', pointTerminal: 'NEWLAND_N950__N950NCB801293324', channel: 'totem', ...order } };
+  const mpOrder = { id: 'ORD01ABC', status: 'at_terminal', external_reference: '9', total_amount: '47.00', transactions: { payments: [{ id: 'PAY1', amount: '47.00', status: 'created' }] }, ...mo };
+  const fetchImpl = async (url, init = {}) => {
+    const body = init.body ? JSON.parse(init.body) : null;
+    calls.push({ url, method: init.method || 'GET', headers: init.headers, body });
+    const res = (data, status = 200) => new Response(JSON.stringify(data), { status });
+    if (url.startsWith(`${SUPA}/rest/v1/rpc/`)) {
+      const fn = url.split('/').pop();
+      if (fn === 'is_member' || fn === 'is_owner') return res(init.headers.Authorization === 'Bearer user-jwt-aaaaaaaaaaaaaaaaaaaa' && init.headers.apikey === 'anon-key' && body.p_tenant === TENANT && (fn === 'is_member' ? member : owner));
+      if (fn === 'pix_order') return res(body.p_code === db.order.code ? db.order : null);
+      if (fn === 'pix_token') return res(body.p_tenant === TENANT ? 'APP_USR-x' : null);
+      if (fn === 'point_save') { db.order.pixRef = body.p_ref; return res(null); }
+      if (fn === 'pix_apply') return res(body.p_mp_status === 'approved' ? 'novo' : 'pagamento');
+    }
+    if (url === 'https://api.mercadopago.com/v1/orders' && init.method === 'POST') return res(mpOrder, 201);
+    if (url === 'https://api.mercadopago.com/v1/orders/ORD01ABC') return res(mpOrder);
+    if (url === 'https://api.mercadopago.com/v1/orders/ORD01ABC/cancel') return res({ ...mpOrder, status: 'canceled' });
+    if (url.startsWith('https://api.mercadopago.com/terminals/v1/list')) return res({ data: { terminals: [{ id: 'NEWLAND_N950__N950NCB801293324', pos_id: '1', store_id: '2', operating_mode: 'STANDALONE' }] } });
+    if (url === 'https://api.mercadopago.com/terminals/v1/setup' && init.method === 'PATCH') return res({ terminals: body.terminals });
+    return res({ message: 'rota inesperada ' + url }, 500);
+  };
+  const handler = makeHandler({ supabaseUrl: SUPA, serviceKey: 'sb_secret_x', anonKey: 'anon-key', fetchImpl, now: () => new Date('2026-11-23T12:00:00Z'), log: silent });
+  const post = async (body, auth = 'Bearer user-jwt-aaaaaaaaaaaaaaaaaaaa', qs = '') => { const r = await handler(new Request(`${SUPA}/functions/v1/pix${qs}`, { method: 'POST', headers: auth ? { authorization: auth } : {}, body: JSON.stringify(body) })); return { status: r.status, data: await r.json() }; };
+  return { post, calls, db };
+}
+
+test('point: dono lista as maquininhas e liga o modo integrado; equipe e anônimo não', async () => {
+  const { post, calls } = setupPoint();
+  const r = await post({ action: 'point_terminals', tenant: TENANT });
+  assert.deepEqual(r.data.terminals, [{ id: 'NEWLAND_N950__N950NCB801293324', mode: 'STANDALONE', posId: '1', storeId: '2' }]);
+  assert.equal(calls.find(c => c.url.includes('/terminals/v1/list')).headers.Authorization, 'Bearer APP_USR-x');
+  const s = await post({ action: 'point_setup', tenant: TENANT, terminal: 'NEWLAND_N950__N950NCB801293324' });
+  assert.equal(s.data.ok, true);
+  assert.deepEqual(calls.find(c => c.url.endsWith('/terminals/v1/setup')).body, { terminals: [{ id: 'NEWLAND_N950__N950NCB801293324', operating_mode: 'PDV' }] });
+  assert.equal((await setupPoint({ owner: false }).post({ action: 'point_terminals', tenant: TENANT })).status, 403);
+  assert.equal((await setupPoint().post({ action: 'point_terminals', tenant: TENANT }, null)).status, 401);
+  assert.equal((await setupPoint().post({ action: 'point_setup', tenant: TENANT, terminal: "x'; drop" })).status, 400);
+});
+
+test('point: cobra na maquininha com o valor do banco, confere e aplica quando aprovado', async () => {
+  const { post, calls, db } = setupPoint();
+  const r = await post({ action: 'point_charge', code: 'KIOSK1234567', total: 1 });
+  assert.equal(r.status, 200); assert.equal(r.data.mpStatus, 'at_terminal');
+  const mo = calls.find(c => c.url === 'https://api.mercadopago.com/v1/orders');
+  assert.equal(mo.body.type, 'point'); assert.equal(mo.body.external_reference, '9');
+  assert.equal(mo.body.transactions.payments[0].amount, '47.00');                  // vem do banco
+  assert.equal(mo.body.config.point.terminal_id, 'NEWLAND_N950__N950NCB801293324');
+  assert.ok(mo.headers['X-Idempotency-Key']);
+  assert.equal(db.order.pixRef, 'ORD01ABC');
+  // ainda na maquininha: não aplica
+  let c = await post({ action: 'point_check', code: 'KIOSK1234567' });
+  assert.equal(c.data.paid, false); assert.ok(!calls.some(x => x.url.endsWith('/pix_apply')));
+  // aprovado
+  const paid = setupPoint({ order: { pixRef: 'ORD01ABC' }, mo: { status: 'processed', transactions: { payments: [{ id: 'PAY1', amount: '47.00', status: 'processed' }] } } });
+  c = await paid.post({ action: 'point_check', code: 'KIOSK1234567' });
+  assert.equal(c.data.paid, true); assert.equal(c.data.status, 'novo');
+  assert.deepEqual(paid.calls.find(x => x.url.endsWith('/pix_apply')).body, { p_tenant: TENANT, p_order: 9, p_ref: 'ORD01ABC', p_mp_status: 'approved', p_amount: 4700 });
+  // order de outro pedido: recusa
+  const wrong = setupPoint({ order: { pixRef: 'ORD01ABC' }, mo: { external_reference: '77', status: 'processed' } });
+  assert.equal((await wrong.post({ action: 'point_check', code: 'KIOSK1234567' })).status, 400);
+});
+
+test('point: exige equipe da loja, pedido de cartão no totem e maquininha configurada', async () => {
+  assert.equal((await setupPoint({ member: false }).post({ action: 'point_charge', code: 'KIOSK1234567' })).status, 403);
+  assert.equal((await setupPoint().post({ action: 'point_charge', code: 'KIOSK1234567' }, null)).status, 401);
+  assert.equal((await setupPoint({ order: { payment: 'Pix online' } }).post({ action: 'point_charge', code: 'KIOSK1234567' })).status, 400);
+  assert.equal((await setupPoint({ order: { pointTerminal: null } }).post({ action: 'point_charge', code: 'KIOSK1234567' })).status, 400);
+  assert.deepEqual((await setupPoint({ order: { status: 'novo', paymentStatus: 'paid' } }).post({ action: 'point_charge', code: 'KIOSK1234567' })).data, { status: 'novo', paid: true });
+  const cancel = setupPoint({ order: { pixRef: 'ORD01ABC' } });
+  assert.equal((await cancel.post({ action: 'point_cancel', code: 'KIOSK1234567' })).data.ok, true);
+  assert.ok(cancel.calls.some(c => c.url.endsWith('/ORD01ABC/cancel')));
+});
+
+test('point: aviso do Mercado Pago (order) é reconferido na API', async () => {
+  const { post, calls } = setupPoint({ mo: { status: 'processed' } });
+  const r = await post({ type: 'order', data: { id: 'ORD01ABC' } }, null, `?action=webhook&t=${TENANT}`);
+  assert.deepEqual(r.data, { ok: true, status: 'novo' });
+  assert.ok(calls.some(c => c.url === 'https://api.mercadopago.com/v1/orders/ORD01ABC'));
+});
