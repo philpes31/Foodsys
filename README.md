@@ -44,6 +44,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    31. `20261213000000_vale_reservas.sql` (vale-presente e reserva de mesas)
    32. `20261214000000_totem_pix.sql` (pagamento por Pix no próprio totem)
    33. `20261215000000_totem_cartao_point.sql` (cartão no totem pela maquininha Mercado Pago Point; republique a função `pix`)
+   34. `20261216000000_seguranca_2.sql` (teste de segurança 2: configurações internas só para a equipe, conta de totem, avisos só para serviços conhecidos)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -244,7 +245,7 @@ O que já está pronto:
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 119 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 128 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;

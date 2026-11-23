@@ -66,6 +66,9 @@ export async function encryptPayload(payload, p256dh, authSecret, { salt = crypt
   return concat(salt, rs, new Uint8Array([65]), asPublic, cipher);
 }
 
+// Só serviços de notificação conhecidos (o banco também confere ao gravar a inscrição)
+export const PUSH_HOSTS = /^https:\/\/(fcm\.googleapis\.com|android\.googleapis\.com|updates\.push\.services\.mozilla\.com|push\.services\.mozilla\.com|web\.push\.apple\.com|[a-z0-9-]+\.notify\.windows\.com)\//;
+
 export function makeHandler({ supabaseUrl, serviceKey, vapid, secret, fetchImpl = fetch, log = console }) {
   if (!supabaseUrl || !serviceKey) throw new Error('Faltam SUPABASE_URL e a chave de serviço');
   const dbHeaders = { 'Content-Type': 'application/json', apikey: serviceKey, ...(serviceKey.startsWith('eyJ') ? { Authorization: `Bearer ${serviceKey}` } : {}) };
@@ -92,6 +95,7 @@ export function makeHandler({ supabaseUrl, serviceKey, vapid, secret, fetchImpl 
       let sent = 0, dropped = 0, failed = 0;
       for (const s of item.subs || []) {
         try {
+          if (!PUSH_HOSTS.test(String(s.endpoint))) { await rpc('push_drop', { p_sub: s.id }); dropped++; continue; }
           const bodyBytes = await encryptPayload(payload, s.p256dh, s.auth);
           const r = await fetchImpl(s.endpoint, { method: 'POST', body: bodyBytes, headers: {
             'Content-Encoding': 'aes128gcm', 'Content-Type': 'application/octet-stream', TTL: '3600', Urgency: 'high',

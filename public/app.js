@@ -57,6 +57,9 @@ async function pixCall(body) {
 }
 
 /* ---------- interface ---------- */
+// Configurações internas da loja (só a equipe lê; antes da migração 34, lê direto da tabela)
+const tset = (id, cols) => rpc('tenant_settings', { p_tenant: id }).then(r => { if (!r) throw new Error('Sem permissão'); return r; })
+  .catch(e => /tenant_settings|schema cache|does not exist/.test(e.message) ? q(sb.from('tenants').select(cols).eq('id', id).single()) : Promise.reject(e));
 function toast(m) { const t = $('#toast'); t.textContent = m; t.classList.add('show'); clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2800); }
 function dialog(html, wide = false) { $('#dlg').classList.toggle('wide', wide); $('#dlgBody').innerHTML = html; $('#dlg').classList.add('open'); $('#dlgBody').querySelector('input,select,button')?.focus(); }
 function closeDlg() { $('#dlg').classList.remove('open'); $('#dlgBody').onclick = $('#dlgBody').onchange = $('#dlgBody').onsubmit = null; }
@@ -1116,7 +1119,7 @@ async function vPanel(tab) {
   setColor(S.color); brand(S.name, S.logo_path);
   const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ...(S.allow_tables ? [['garcom', 'Garçom'], ['mesas', 'Mesas']] : []), ['cardapio', 'Cardápio'], ['estoque', 'Estoque'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['unidades', 'Unidades'], ['config', 'Configurações']] : [])];
   if (tab === 'kds') return pKitchenScreen(S);
-  if (tab === 'totem') return pKiosk(S);
+  if (tab === 'totem' || ME.role === 'totem') { if (tab !== 'totem') history.replaceState(null, '', '/painel/totem'); return pKiosk(S); }
   if (!tabs.some(t => t[0] === tab) && tab !== 'novo') tab = 'pedidos';
   $('#banner').innerHTML = billingBanner(S, owner);
   header(tabs.map(([k, n]) => `<a href="/painel/${k}" data-link class="${k === tab ? 'on' : ''}">${esc(n)}</a>`).join('') + `<a href="/loja/${S.slug}" target="_blank" rel="noopener">Ver loja ↗</a>` + (ME.isAdmin ? '<a href="/plataforma" data-link>Plataforma</a>' : ''));
@@ -1167,7 +1170,7 @@ async function pOrders(S, owner) {
   const markPrinted = ids => { ids.forEach(id => printed.add(id)); local.set(printedKey, [...printed].slice(-300)); };
   // Aceite automático: o pedido já chega "em preparo"; com impressão ligada (ao aceitar ou ao chegar), imprime na chegada
   let autoAcc = false;
-  const loadAuto = () => q(sb.from('tenants').select('auto_accept').eq('id', S.id).single()).then(r => { autoAcc = !!r.auto_accept; }).catch(() => { autoAcc = false; });
+  const loadAuto = () => tset(S.id, 'auto_accept').then(r => { autoAcc = !!r.auto_accept; }).catch(() => { autoAcc = false; });
   const printArrivals = () => {
     if (pmode === 'off' || (pmode === 'accept' && !autoAcc)) return;
     const fresh = orders.filter(o => !printed.has(o.id) && ((pmode === 'arrive' && o.status === 'novo') || (autoAcc && o.status === 'preparo'))).sort((a, b) => a.id - b.id);
@@ -1180,7 +1183,7 @@ async function pOrders(S, owner) {
   let steps = null;
   const loadSteps = () => owner && !local.get(`setup-done:${S.id}`, false) ? setupSteps(S).then(r => { steps = r.every(x => x.ok) ? null : r; }).catch(() => {}) : null;
   let goal = null; // meta do dia: { goal, total }
-  const loadGoal = () => q(sb.from('tenants').select('daily_goal').eq('id', S.id).single())
+  const loadGoal = () => tset(S.id, 'daily_goal')
     .then(async g => { goal = g.daily_goal ? { goal: g.daily_goal, total: (await rpc('cash_report', { p_tenant: S.id })).total } : null; }).catch(() => { goal = null; });
   const load = async () => {
     [orders] = await Promise.all([fetchOrders(S.id, ['novo', 'preparo', 'pronto']), loadLow(), loadGoal(), steps === null && !load.once ? loadSteps() : null, load.once ? null : loadAuto()]);
@@ -2282,9 +2285,11 @@ async function pKiosk(S) {
   // Pagamento no totem: Pix na tela (se a loja usa Pix online) ou no caixa
   let pay = S.pix_online ? 'pix' : 'caixa', pix = null, pixPoll = null, pixTick = 0, card = null;
   const stopPix = () => { clearInterval(pixPoll); pixPoll = null; pix = null; card = null; };
+  const kioskStatus = code => rpc('kiosk_status', { p_tenant: S.id, p_code: code }).then(r => r || {})
+    .catch(() => q(sb.from('orders').select('status, payment_status').eq('public_code', code).single()));
   // Maquininha Mercado Pago Point ligada ao totem (configurada pelo dono)
   let POINT = null;
-  q(sb.from('tenants').select('point_terminal_id').eq('id', S.id).single()).then(r => { POINT = r.point_terminal_id || null; if (stage === 'name') draw(); }).catch(() => {});
+  tset(S.id, 'point_terminal_id').then(r => { POINT = r.point_terminal_id || null; if (stage === 'name') draw(); }).catch(() => {});
   const payOpts = () => [...(S.pix_online ? [['pix', 'Pix aqui no totem']] : []), ...(POINT ? [['cartao', 'Cartão na maquininha']] : []), ['caixa', 'No caixa']];
   const items = () => all.filter(p => p.stock !== 0 && catOpen(S, p.category, new Date()));
   const cats = () => [...new Set(items().map(p => p.category))];
@@ -2383,7 +2388,7 @@ async function pKiosk(S) {
       if (stage !== 'pix') return stopPix();
       pixTick++;
       try {
-        const o = await q(sb.from('orders').select('status, payment_status').eq('public_code', done.code).single());
+        const o = await kioskStatus(done.code);
         if (o.payment_status === 'paid') return paid();
         if (o.status === 'cancelado') { toast('O Pix venceu. Faça o pedido de novo.'); return reset(); }
         if (pixTick % 5 === 0) { const c = await pixCall({ action: 'check', code: done.code }).catch(() => null); if (c?.paid) return paid(); }
@@ -2403,7 +2408,7 @@ async function pKiosk(S) {
       if (stage !== 'card') return clearInterval(pixPoll);
       pixTick++;
       try {
-        const o = await q(sb.from('orders').select('status, payment_status').eq('public_code', done.code).single());
+        const o = await kioskStatus(done.code);
         if (o.payment_status === 'paid') return paid();
         if (o.status === 'cancelado') { toast('O pedido foi cancelado.'); return reset(); }
         if (pixTick % 2 === 0) {
@@ -2425,7 +2430,9 @@ async function pKiosk(S) {
     $('#dlgBody').onclick = e => {
       if (!e.target.closest('#kOut')) return;
       if (pin && $('#kPin').value !== pin) return toast('PIN incorreto');
-      local.set('kioskLock', false); closeDlg(); go('/painel');
+      local.set('kioskLock', false); closeDlg();
+      if (ME.role === 'totem') { sb.auth.signOut().finally(() => go('/entrar')); return; }   // conta de totem não tem painel
+      go('/painel');
     };
   };
   app.onclick = attempt(async e => {
@@ -2692,7 +2699,7 @@ async function pReports(S) {
       q(sb.from('expenses').select('id, day, category, description, amount').eq('tenant_id', S.id).gte('day', month + '-01').lt('day', nextMonth(month) + '-01').order('day', { ascending: false }))]); }
     catch { box.innerHTML = ''; return; }
     const pct = v => f.revenue ? Math.round(v / f.revenue * 100) + '%' : '—';
-    const mg = await q(sb.from('tenants').select('monthly_goal').eq('id', S.id).single()).then(x => x.monthly_goal).catch(() => 0);
+    const mg = await tset(S.id, 'monthly_goal').then(x => x.monthly_goal).catch(() => 0);
     box.innerHTML = `<div class="panel" style="margin-bottom:16px"><div class="row between"><h3 style="margin:0">Resultado do mês</h3><span class="row"><input type="month" id="finM" value="${month}" style="width:auto"><button class="pri sm" id="expNew">+ Despesa</button></span></div>
       <div class="kpis" style="margin:10px 0"><div class="kpi"><span class="mut">Faturamento</span><b class="price">${brl(f.revenue)}</b><span class="mut">${f.orders} pedidos</span></div>
         <div class="kpi"><span class="mut">Insumos vendidos</span><b class="price">${brl(f.ingredients)}</b><span class="mut">${pct(f.ingredients)} · pela ficha técnica</span></div>
@@ -2759,7 +2766,7 @@ let pointList = null;
 async function pointBox() {
   const box = $('#pointBox'); if (!box) return;
   const S = ME.tenant;
-  let cur; try { cur = (await q(sb.from('tenants').select('point_terminal_id').eq('id', S.id).single())).point_terminal_id; } catch { box.innerHTML = ''; return; }
+  let cur; try { cur = (await tset(S.id, 'point_terminal_id')).point_terminal_id; } catch { box.innerHTML = ''; return; }
   const sel = pointList?.find(t => t.id === cur);
   box.innerHTML = `<h4 style="margin:6px 0 2px">Cartão no totem (maquininha Mercado Pago Point)</h4>
     <p class="mut" style="margin:0">Com uma <b>Point Smart</b> ou <b>Point Pro 2</b> da mesma conta do Mercado Pago da loja, o cliente paga com cartão no totem: o sistema manda o valor para a maquininha e confirma sozinho. A maquininha precisa estar no <b>modo integrado (PDV)</b>.</p>
@@ -2789,7 +2796,7 @@ async function pConfig(S) {
       rpc('pix_settings', { p_tenant: S.id }).catch(() => null), rpc('billing_info', { p_tenant: S.id }).catch(() => null), rpc('coupon_usage', { p_tenant: S.id }).catch(() => ({})),
       q(sb.from('promotions').select('*').eq('tenant_id', S.id).order('id')).catch(() => []), q(sb.from('products').select('id, name, category').eq('tenant_id', S.id).order('sort'))]);
     const prodById = Object.fromEntries(prodList.map(p => [p.id, p]));
-    if ('reservations_on' in st) Object.assign(st, await q(sb.from('tenants').select('reservation_capacity, reservation_auto').eq('id', S.id).single()).catch(() => ({})));
+    if ('reservations_on' in st) Object.assign(st, await tset(S.id, 'reservation_capacity, reservation_auto').catch(() => ({})));
     st0 = st;
     const link = storeLink(st);
     app.innerHTML = `<h2>Configurações</h2><p class="lead">Endereço da sua loja: <a href="${link}" target="_blank" rel="noopener">${esc(link)}</a> <button class="ghost sm" id="copy">Copiar</button></p>
@@ -2907,9 +2914,9 @@ async function pConfig(S) {
     <div class="panel"><h3>Entregadores</h3><table><tbody>${couriers.map(c => `<tr><td>${esc(c.name)}<br><span class="mut">${esc(c.phone)}</span></td><td class="n"><span class="row" style="justify-content:flex-end"><button class="ghost sm" data-clink="${c.id}">Enviar link</button><button class="ghost sm" data-crot="${c.id}">Novo link</button><button class="ghost sm" data-del="couriers:${c.id}" aria-label="Remover">×</button></span></td></tr>`).join('')}</tbody></table>
       <p class="mut" style="margin:0">Cada entregador recebe um link próprio para ver as entregas dele no celular e marcar "Entreguei", sem precisar de senha. "Novo link" desativa o anterior.</p>
       <form id="fCour" class="row" style="flex-wrap:nowrap"><input id="crN" placeholder="Nome" required maxlength="60"><input id="crP" placeholder="Telefone"><button class="ghost">Adicionar</button></form></div>
-    <div class="panel"><h3>Equipe</h3><table><tbody>${team.map(u => `<tr><td>${esc(u.email)}</td><td>${u.role === 'owner' ? 'Dono' : 'Atendente'}</td><td class="n">${u.role === 'staff' ? `<button class="ghost sm" data-staff="${u.user_id}" aria-label="Remover">×</button>` : ''}</td></tr>`).join('')}</tbody></table>
-      <form id="fTeam" class="row" style="flex-wrap:nowrap"><input id="tE" type="email" placeholder="E-mail do atendente" required><button class="ghost">Adicionar</button></form>
-      <p class="mut" style="margin:0">O atendente precisa criar uma conta em /entrar/cadastro antes. Ele opera pedidos, entregas e disponibilidade do cardápio, sem acesso a relatórios e configurações.</p></div>
+    <div class="panel"><h3>Equipe</h3><table><tbody>${team.map(u => `<tr><td>${esc(u.email)}</td><td>${u.role === 'owner' ? 'Dono' : u.role === 'totem' ? 'Totem' : 'Atendente'}</td><td class="n">${u.role !== 'owner' ? `<button class="ghost sm" data-staff="${u.user_id}" aria-label="Remover">×</button>` : ''}</td></tr>`).join('')}</tbody></table>
+      <form id="fTeam" class="row" style="flex-wrap:nowrap"><input id="tE" type="email" placeholder="E-mail da pessoa ou do tablet" required><select id="tR" style="width:auto"><option value="staff">Atendente</option><option value="totem">Totem</option></select><button class="ghost">Adicionar</button></form>
+      <p class="mut" style="margin:0">A conta precisa ser criada antes em /entrar/cadastro. O <b>atendente</b> opera pedidos, entregas e disponibilidade do cardápio, sem relatórios e configurações. A conta de <b>totem</b> só abre o totem de autoatendimento: não vê pedidos, clientes nem nada do painel. Use uma conta de totem no tablet do totem.</p></div>
     <form class="panel" id="fPix"><h3>Pix e cartão online (Mercado Pago)</h3>
       ${pix ? `<p class="mut" style="margin:0">Situação: ${pix.enabled ? '<span class="badge b-g">Ativo na loja</span>' : '<span class="badge">Desligado</span>'}
         ${pix.configured ? ` · Access Token cadastrado (${esc(pix.hint)})${pix.test ? ' · <span class="badge b-a">modo de teste</span>' : ''}` : ''}</p>` : '<p class="mut" style="margin:0">Rode a migração do Pix no Supabase para usar este recurso.</p>'}
@@ -2947,10 +2954,10 @@ async function pConfig(S) {
     <form class="panel danger" id="fDel"><h3>Excluir loja</h3><p class="mut" style="margin:0">Apaga a loja e todos os dados dela (cardápio, pedidos, clientes, equipe). <b>Não tem volta.</b> Cancele a assinatura antes.</p>
       <label>Para confirmar, digite o endereço da loja: <b>${esc(st.slug)}</b><input id="delSlug" autocomplete="off"></label>
       <button class="ghost">Excluir loja definitivamente</button></form></div>`;
-    q(sb.from('tenants').select('daily_goal, monthly_goal').eq('id', S.id).single()).then(g => { if ($('#gD')) { $('#gD').value = g.daily_goal ? fromCents(g.daily_goal) : ''; $('#gM').value = g.monthly_goal ? fromCents(g.monthly_goal) : ''; } })
+    tset(S.id, 'daily_goal, monthly_goal').then(g => { if ($('#gD')) { $('#gD').value = g.daily_goal ? fromCents(g.daily_goal) : ''; $('#gM').value = g.monthly_goal ? fromCents(g.monthly_goal) : ''; } })
       .catch(() => { const f = $('#fGoals'); if (f) f.hidden = true; });
-    q(sb.from('tenants').select('auto_accept').eq('id', S.id).single()).then(r => { if ($('#fAuto')) { $('#aaOn').checked = !!r.auto_accept; $('#fAuto').hidden = false; } }).catch(() => {});
-    q(sb.from('tenants').select('call_names').eq('id', S.id).single()).then(r => { if ($('#fCall')) { $('#cnOn').checked = !!r.call_names; $('#fCall').hidden = false; } }).catch(() => {});
+    tset(S.id, 'auto_accept').then(r => { if ($('#fAuto')) { $('#aaOn').checked = !!r.auto_accept; $('#fAuto').hidden = false; } }).catch(() => {});
+    tset(S.id, 'call_names').then(r => { if ($('#fCall')) { $('#cnOn').checked = !!r.call_names; $('#fCall').hidden = false; } }).catch(() => {});
     if (ME.role === 'owner') pointBox().catch(() => {});
   };
   const refreshBrand = async () => { await loadMe(); setColor(ME.tenant.color); brand(ME.tenant.name, ME.tenant.logo_path); };
@@ -3122,7 +3129,9 @@ async function pConfig(S) {
         min_subtotal: min, valid_until: until, max_uses: +$('#cuMax').value || null, max_per_customer: +$('#cuPer').value || null, first_order_only: $('#cuFirst').checked }));
     }
     if (id === 'fCour') await q(sb.from('couriers').insert({ tenant_id: S.id, name: $('#crN').value.trim(), phone: $('#crP').value.trim() }));
-    if (id === 'fTeam') await rpc('add_staff', { p_tenant: S.id, p_email: $('#tE').value });
+    if (id === 'fTeam') { const role = $('#tR')?.value || 'staff';
+      await (role === 'staff' ? rpc('add_member', { p_tenant: S.id, p_email: $('#tE').value, p_role: 'staff' }).catch(e => /add_member|schema cache/.test(e.message) ? rpc('add_staff', { p_tenant: S.id, p_email: $('#tE').value }) : Promise.reject(e))
+        : rpc('add_member', { p_tenant: S.id, p_email: $('#tE').value, p_role: role })); }
     if (id === 'fDel') { await rpc('delete_my_tenant', { p_tenant: S.id, p_confirm_slug: $('#delSlug').value }); local.set('tenant', null); toast('Loja excluída'); return go('/'); }
     toast('Salvo'); await draw();
   });
@@ -3151,7 +3160,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
   '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql',
-  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql'];
+  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };

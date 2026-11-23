@@ -162,7 +162,7 @@ function setupPoint({ order = {}, mo = {}, member = true, owner = true } = {}) {
     const res = (data, status = 200) => new Response(JSON.stringify(data), { status });
     if (url.startsWith(`${SUPA}/rest/v1/rpc/`)) {
       const fn = url.split('/').pop();
-      if (fn === 'is_member' || fn === 'is_owner') return res(init.headers.Authorization === 'Bearer user-jwt-aaaaaaaaaaaaaaaaaaaa' && init.headers.apikey === 'anon-key' && body.p_tenant === TENANT && (fn === 'is_member' ? member : owner));
+      if (fn === 'is_kiosk' || fn === 'is_owner') return res(init.headers.Authorization === 'Bearer user-jwt-aaaaaaaaaaaaaaaaaaaa' && init.headers.apikey === 'anon-key' && body.p_tenant === TENANT && (fn === 'is_kiosk' ? member : owner));
       if (fn === 'pix_order') return res(body.p_code === db.order.code ? db.order : null);
       if (fn === 'pix_token') return res(body.p_tenant === TENANT ? 'APP_USR-x' : null);
       if (fn === 'point_save') { db.order.pixRef = body.p_ref; return res(null); }

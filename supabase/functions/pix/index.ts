@@ -172,7 +172,7 @@ export function makeHandler({ supabaseUrl, serviceKey, anonKey, fetchImpl = fetc
   }
   async function pointOrder(req, code) {
     const o = await loadOrder(code, ['Cartão no totem']);
-    await userCan(req, 'is_member', o.tenantId);
+    await userCan(req, 'is_kiosk', o.tenantId);   // equipe ou conta de totem da loja
     return o;
   }
   // Status da order no Mercado Pago -> pago? (processed = aprovado)

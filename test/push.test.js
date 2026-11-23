@@ -60,14 +60,15 @@ test('push: envia para cada aparelho, apaga inscrição vencida, exige o segredo
   const v = await vapidKeys(), d1 = await device(), d2 = await device();
   const calls = [], got = [];
   const item = { title: 'Forno', body: 'Pedido #7 saiu para entrega.', url: '/pedido/X', subs: [
-    { id: 1, endpoint: 'https://push.example/a', p256dh: d1.p256dh, auth: d1.auth },
-    { id: 2, endpoint: 'https://push.example/b', p256dh: d2.p256dh, auth: d2.auth }] };
+    { id: 1, endpoint: 'https://fcm.googleapis.com/fcm/send/a', p256dh: d1.p256dh, auth: d1.auth },
+    { id: 2, endpoint: 'https://updates.push.services.mozilla.com/wpush/v2/b', p256dh: d2.p256dh, auth: d2.auth },
+    { id: 3, endpoint: 'https://169.254.169.254/latest/meta-data', p256dh: d2.p256dh, auth: d2.auth }] };
   const fetchImpl = async (url, init = {}) => {
     calls.push({ url, init });
     if (url.endsWith('/rpc/push_take')) return new Response(JSON.parse(init.body).p_id === 5 ? JSON.stringify(item) : 'null');
     if (url.endsWith('/rpc/push_drop')) return new Response('');
-    if (url === 'https://push.example/a') { got.push(await decrypt(init.body, d1)); return new Response('', { status: 201 }); }
-    if (url === 'https://push.example/b') return new Response('', { status: 410 });
+    if (url === 'https://fcm.googleapis.com/fcm/send/a') { got.push(await decrypt(init.body, d1)); return new Response('', { status: 201 }); }
+    if (url === 'https://updates.push.services.mozilla.com/wpush/v2/b') return new Response('', { status: 410 });
     throw new Error('url inesperada ' + url);
   };
   const h = makeHandler({ supabaseUrl: 'https://proj.supabase.co', serviceKey: 'sb_secret_x', vapid: v, secret: 's'.repeat(40), fetchImpl, log: { error() {} } });
@@ -76,12 +77,13 @@ test('push: envia para cada aparelho, apaga inscrição vencida, exige o segredo
   assert.equal((await h(req({ id: 5 }, 'errado'))).status, 401);
   assert.equal(calls.length, 0, 'sem segredo não toca no banco');
   const r = await (await h(req({ id: 5 }))).json();
-  assert.deepEqual(r, { sent: 1, dropped: 1, failed: 0 });
+  assert.deepEqual(r, { sent: 1, dropped: 2, failed: 0 });
+  assert.ok(!calls.some(c => c.url.includes('169.254')), 'endereço interno nunca é chamado');
   assert.deepEqual(JSON.parse(got[0]), { title: 'Forno', body: 'Pedido #7 saiu para entrega.', url: '/pedido/X' });
-  const sendA = calls.find(c => c.url === 'https://push.example/a');
+  const sendA = calls.find(c => c.url === 'https://fcm.googleapis.com/fcm/send/a');
   assert.equal(sendA.init.headers['Content-Encoding'], 'aes128gcm');
   assert.match(sendA.init.headers.Authorization, /^vapid t=.+, k=/);
-  assert.equal(JSON.parse(calls.find(c => c.url.endsWith('/rpc/push_drop')).init.body).p_sub, 2);
+  assert.deepEqual(calls.filter(c => c.url.endsWith('/rpc/push_drop')).map(c => JSON.parse(c.init.body).p_sub).sort(), [2, 3]);
   assert.equal(calls.find(c => c.url.endsWith('/rpc/push_take')).init.headers.apikey, 'sb_secret_x');
   assert.deepEqual(await (await h(req({ id: 6 }))).json(), { sent: 0, skipped: true });   // já enviado
   assert.equal((await h(req({ id: 'x' }))).status, 400);

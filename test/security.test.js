@@ -188,3 +188,117 @@ test('concorrência: 20 pedidos ao mesmo tempo não furam o limite de usos do cu
   assert.equal(sql(`select count(*) from orders where coupon_code = 'SOTRES'`), '3');
   assert.equal(sql(`select count(*) from (select number from orders where tenant_id = '${pizzaId}' group by number having count(*) > 1) x`), '0');
 });
+
+// ---------- recursos novos (migrações 21 a 34) ----------
+test('visitante não lê as tabelas novas (vales, reservas, pagamentos, avisos, indicações)', () => {
+  for (const t of ['table_payments', 'gift_cards', 'gift_card_moves', 'reservations', 'courier_payouts', 'referral_codes', 'push_subscriptions', 'push_queue', 'platform_settings'])
+    nothing(`select count(*) from ${t}`, null);
+  for (const t of ['referral_codes', 'push_subscriptions', 'push_queue', 'platform_settings']) nothing(`select count(*) from ${t}`, U.stranger);
+});
+
+test('configurações internas da loja não aparecem para quem só tem conta', () => {
+  for (const c of ['daily_goal', 'monthly_goal', 'auto_accept', 'call_names', 'point_terminal_id', 'reservation_capacity', 'reservation_auto'])
+    denied(`select ${c} from tenants where id = '${pizzaId}'`, U.stranger);
+  assert.equal(sql(`select coalesce(tenant_settings('${pizzaId}')::text, 'null')`, U.stranger), 'null');
+  assert.equal(sql(`select coalesce(tenant_settings('${pizzaId}')::text, 'null')`, U.burger), 'null');
+  assert.ok(json(`tenant_settings('${pizzaId}')`, U.staff).daily_goal !== undefined);
+});
+
+test('outra loja não usa as funções novas na loja alvo', () => {
+  const p = simpleProduct(pizzaId);
+  denied(`select set_product_suggest(${p.id}, true)`, U.burger);
+  denied(`select bulk_reprice('${pizzaId}', null, 50, 0, 'none', false, true)`, U.burger);
+  denied(`select set_category_availability('${pizzaId}', '${p.category}', false)`, U.burger);
+  denied(`select close_table_split('${pizzaId}', '1', ${lit([{ method: 'Pix', amount: 100 }])})`, U.burger);
+  denied(`select kiosk_place_order('${pizzaId}', ${lit({ customer: { name: 'X' }, fulfillment: 'pickup', payment: 'Pagar no caixa', items: [{ productId: p.id, qty: 1 }] })})`, U.burger);
+  denied(`select kiosk_pay_at_counter('${pizzaId}', '${pizzaCode}')`, U.burger);
+  denied(`select kiosk_cancel('${pizzaId}', '${pizzaCode}')`, U.burger);
+  assert.equal(sql(`select coalesce(kiosk_status('${pizzaId}', '${pizzaCode}')::text, 'null')`, U.burger), 'null');
+  denied(`select gift_card_create('${pizzaId}', 5000, '', '', '', 'Pix', 365)`, U.burger);
+  denied(`select courier_statement('${pizzaId}', current_date, current_date)`, U.burger);
+  assert.deepEqual(json(`courier_positions('${pizzaId}')`, U.burger), []);
+  assert.deepEqual(json(`product_ratings('${pizzaId}', 30)`, U.burger), []);
+  assert.ok(!json(`units_report(30)`, U.burger).units.some(u => u.id === pizzaId));
+  denied(`select push_setup('${'B'.repeat(87)}', '${'s'.repeat(40)}', 'https://x.supabase.co/functions/v1/push')`, U.burger);
+  denied(`select push_status()`, U.pizza);
+  // não mexe em registros da loja alvo mesmo sabendo os ids
+  const c = sql(`insert into couriers (tenant_id, name, phone) values ('${pizzaId}', 'Moto Alvo', '11900000001') returning id`);
+  denied(`select set_courier_pay(${c}, 'fixo', 100000, 0, 'golpe@pix')`, U.burger);
+  denied(`select courier_pay(${c}, current_date, current_date, 'Pix', '')`, U.burger);
+  const g = json(`gift_card_create('${pizzaId}', 5000, '', '', '', 'Pix', 365)`, U.pizza);
+  const gid = sql(`select id from gift_cards where code = '${g.code}'`);
+  denied(`select gift_card_cancel(${gid})`, U.burger);
+  assert.equal(sql(`select coalesce(gift_card_check('atacante', '${g.code}')::text, 'null')`, null), 'null');   // vale de outra loja não vale aqui
+  nothing(`update gift_cards set balance = 999999 where id = ${gid}`, U.burger);
+});
+
+test('funcionário não faz o que é só do dono nas funções novas', () => {
+  const p = simpleProduct(pizzaId);
+  denied(`select bulk_reprice('${pizzaId}', null, 10, 0, 'none', false, true)`, U.staff);
+  denied(`select set_product_suggest(${p.id}, true)`, U.staff);
+  denied(`select gift_card_create('${pizzaId}', 5000, '', '', '', 'Cortesia', 365)`, U.staff, /Só o dono/);
+  const c = sql(`select id from couriers where tenant_id = '${pizzaId}' limit 1`);
+  denied(`select set_courier_pay(${c}, 'fixo', 600, 0, null)`, U.staff);
+  denied(`select courier_pay(${c}, current_date, current_date, 'Pix', '')`, U.staff);
+  denied(`select add_member('${pizzaId}', 'qualquer@um.t', 'staff')`, U.staff);
+  for (const col of ['auto_accept = true', 'referral_reward = 10000', 'call_names = true', "logo_path = null", "point_terminal_id = 'X1234'", 'reservations_on = true'])
+    nothing(`with u as (update tenants set ${col} where id = '${pizzaId}' returning 1) select count(*) from u`, U.staff);
+});
+
+test('conta de totem só faz pedido pelo totem: não vê pedidos, clientes nem configurações', () => {
+  const T = randomUUID();
+  sql(`insert into auth.users (id, email) values ('${T}', 'totem@pizza.t')`);
+  denied(`select add_member('${pizzaId}', 'totem@pizza.t', 'owner')`, U.pizza, /Papel inválido/);
+  sql(`select add_member('${pizzaId}', 'totem@pizza.t', 'totem')`, U.pizza);
+  for (const t of ['orders', 'order_items', 'cashback_ledger', 'gift_cards', 'reservations', 'expenses', 'cash_sessions', 'couriers', 'blocked_phones']) nothing(`select count(*) from ${t}`, T);
+  assert.equal(sql(`select is_member('${pizzaId}')`, T), 'f');
+  assert.deepEqual(json(`tenant_settings('${pizzaId}')`, T), { point_terminal_id: null });
+  denied(`select set_category_availability('${pizzaId}', 'Bebidas', false)`, T);
+  denied(`select gift_card_create('${pizzaId}', 5000, '', '', '', 'Dinheiro', 365)`, T);
+  const p = simpleProduct(pizzaId);
+  const r = json(`kiosk_place_order('${pizzaId}', ${lit({ customer: { name: 'Totem' }, fulfillment: 'pickup', payment: 'Pagar no caixa', items: [{ productId: p.id, qty: 1 }] })})`, T);
+  assert.equal(r.status, 'novo');
+  assert.equal(json(`kiosk_status('${pizzaId}', '${r.code}')`, T).status, 'novo');
+  assert.equal(sql(`select coalesce(kiosk_status('${pizzaId}', '${pizzaCode}')::text, 'null')`, T), 'null');   // só pedidos do totem
+  sql(`select remove_staff('${pizzaId}', '${T}')`, U.pizza);
+  denied(`select kiosk_place_order('${pizzaId}', ${lit({ customer: { name: 'Totem' }, fulfillment: 'pickup', payment: 'Pagar no caixa', items: [{ productId: p.id, qty: 1 }] })})`, T);
+});
+
+test('valores: formas de pagamento internas e vale-presente não são forjados pelo cliente', () => {
+  const p = simpleProduct(pizzaId);
+  for (const pay of ['Vale-presente', 'Dividido', 'Cartão no totem'])
+    assert.throws(() => sql(`select place_order('alvo', ${lit({ customer: { name: 'Forja', phone: '11933330000' }, fulfillment: 'pickup', payment: pay, items: [{ productId: p.id, qty: 1 }] })})`, null), /Forma de pagamento inválida|pague/);
+  assert.throws(() => sql(`select place_order('alvo', ${lit({ customer: { name: 'Forja', phone: '11933330001' }, fulfillment: 'pickup', payment: 'Dinheiro', giftCode: 'VP' + 'A'.repeat(8), items: [{ productId: p.id, qty: 1 }] })})`, null), /Vale-presente inválido/);
+  denied(`select gift_card_create('${pizzaId}', -5000, '', '', '', 'Pix', 365)`, U.pizza, /Valor do vale/);
+  denied(`update tenants set referral_reward = 1000000 where id = '${pizzaId}'`, U.pizza, /check constraint|violates/);
+});
+
+test('avisos no celular: endereço interno ou desconhecido é recusado', () => {
+  for (const ep of ['https://169.254.169.254/latest/meta-data', 'https://localhost/x', 'https://evil.example/fcm.googleapis.com/', 'http://fcm.googleapis.com/fcm/send/x'])
+    assert.throws(() => sql(`select push_subscribe('${pizzaCode}', ${lit({ endpoint: ep, keys: { p256dh: 'B'.repeat(87), auth: 'a'.repeat(22) } })})`, null), /Inscrição inválida/);
+  assert.equal(sql(`select push_subscribe('${pizzaCode}', ${lit({ endpoint: 'https://fcm.googleapis.com/fcm/send/ok', keys: { p256dh: 'B'.repeat(87), auth: 'a'.repeat(22) } })})`, null), 't');
+});
+
+test('funções internas não ficam expostas ao público', () => {
+  for (const f of ['_audit()', '_cashback_on_status()', '_ingredients_on_item()', '_ingredients_on_status()', '_push_on_status()', '_gift_on_status()', '_referral_on_status()', '_auto_accept()', '_courier_forget()', 'schema_status()', 'push_take(bigint)', 'push_drop(bigint)', 'point_save(bigint, text)', 'pix_apply(uuid, bigint, text, text, integer)', '_courier_calc(bigint, date, date)', '_short_name(text)', 'cashback_balance(uuid, text)'])
+    assert.equal(sql(`select has_function_privilege('anon', 'public.${f}', 'execute')`), 'f', f);
+  // nenhuma função do banco roda como dono sem search_path fixo
+  assert.equal(sql(`select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and prosecdef and not exists (select 1 from unnest(coalesce(proconfig, '{}')) c where c like 'search_path=%')`), '0');
+  // toda tabela tem RLS
+  assert.equal(sql(`select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and relkind = 'r' and not relrowsecurity`), '0');
+});
+
+test('abuso: força bruta de vale-presente e enxurrada de reservas são barradas', () => {
+  {
+    let blocked = false;
+    for (let i = 0; i < 20 && !blocked; i++) { try { sql(`select gift_card_check('alvo', 'VP${String(i).padStart(8, 'A')}')`, null); } catch (e) { blocked = /Muitas tentativas/.test(e.message); } }
+    assert.ok(blocked, 'tentar códigos de vale em sequência é bloqueado');
+    sql(`update tenants set reservations_on = true where id = '${pizzaId}'`);
+    blocked = false;
+    for (let i = 0; i < 12 && !blocked; i++) {
+      try { sql(`select request_reservation('alvo', ${lit({ name: 'Spam', phone: '119' + String(10000000 + i), party: 2, at: new Date(Date.now() + 864e5).toISOString() })})`, null); }
+      catch (e) { blocked = /Muitas tentativas/.test(e.message); }
+    }
+    assert.ok(blocked, 'pedidos de reserva em massa são bloqueados');
+  }
+});
