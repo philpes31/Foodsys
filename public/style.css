@@ -460,3 +460,8 @@ body.kiosk .opts button{min-height:56px;font-size:17px}
 .kw-seg3{grid-template-columns:1fr 1fr 1fr!important}
 .kw-seg3 button{padding:12px 6px;font-size:15px}
 .pointbox{display:grid;gap:6px;border-top:1px solid var(--line);padding-top:10px;margin-top:4px}
+
+.ks-back{margin:14px 0 6px;font-size:15px;color:#6b6b6b;text-align:center}
+.ks-bar{width:100%;align-self:stretch;height:4px;border-radius:4px;background:#0001;overflow:hidden}
+.ks-bar i{display:block;height:100%;background:var(--red);transform-origin:left;animation:kback linear forwards}
+@keyframes kback{from{transform:scaleX(1)}to{transform:scaleX(0)}}

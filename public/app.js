@@ -2281,6 +2281,7 @@ async function pKiosk(S) {
   document.body.classList.add('kds-on', 'kiosk'); setColor(S.color); brand(S.name, S.logo_path);
   local.set('kioskLock', true);
   const all = sortMenu(await q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id).eq('available', true)));
+  const DONE_SECS = 10;
   let stage = 'start', cart = [], cat = null, name = '', away = false, done = null, idleT, warnT, backT;
   // Pagamento no totem: Pix na tela (se a loja usa Pix online) ou no caixa
   let pay = S.pix_online ? 'pix' : 'caixa', pix = null, pixPoll = null, pixTick = 0, card = null;
@@ -2294,7 +2295,7 @@ async function pKiosk(S) {
   const items = () => all.filter(p => p.stock !== 0 && catOpen(S, p.category, new Date()));
   const cats = () => [...new Set(items().map(p => p.category))];
   const total = () => cart.reduce((t, c) => t + c.unit * c.qty, 0), count = () => cart.reduce((t, c) => t + c.qty, 0);
-  const reset = () => { stopPix(); cart = []; name = ''; away = false; done = null; cat = null; pay = S.pix_online ? 'pix' : POINT ? 'cartao' : 'caixa'; stage = 'start'; closeDlg(); draw(); };
+  const reset = () => { stopPix(); clearInterval(backT); cart = []; name = ''; away = false; done = null; cat = null; pay = S.pix_online ? 'pix' : POINT ? 'cartao' : 'caixa'; stage = 'start'; closeDlg(); draw(); };
   const add = it => { const k = cart.find(c => c.productId === it.productId && c.optionIds.join() === it.optionIds.join() && c.notes === it.notes); k ? k.qty += it.qty : cart.push(it); toast(`${it.name} no pedido`); draw(); };
   const logo = cls => S.logo_path ? `<img class="${cls}" src="${esc(imgUrl(S.logo_path))}" alt="">` : `<span class="${cls} kw-mono">${esc(S.name.trim()[0] || '•')}</span>`;
   const icon = { plus: '<svg class="ki" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>', minus: '<svg class="ki" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>',
@@ -2336,7 +2337,11 @@ async function pKiosk(S) {
         <span class="ks-ok">✓ ${done.paid ? 'Pagamento aprovado' : 'Pedido recebido'}</span><span class="ks-lbl">Seu número</span><div class="ks-num">${done.number}</div>
         <p>${done.paid ? 'Tudo certo! Agora é só aguardar: chamamos pelo número no painel.' : done.status === 'preparo' ? 'Já começamos a preparar. Pague no caixa e aguarde: chamamos pelo número.' : `Vá ao caixa, diga o número <b>${done.number}</b> e faça o pagamento. Depois é só aguardar a chamada.`}</p>
         <div class="ks-total"><span>Total</span><b>${brl(done.total)}</b></div>
-        <button class="ks-cta" data-k="new">Fazer outro pedido</button></div></div>`;
+        <button class="ks-cta" data-k="new">Fazer outro pedido</button>
+        <p class="ks-back" id="kBack">Voltando ao início em <b>${DONE_SECS}</b> s</p><div class="ks-bar"><i style="animation-duration:${DONE_SECS}s"></i></div></div></div>`;
+      // Volta sozinho para a tela inicial, mesmo que alguém toque na tela
+      clearInterval(backT); let left = DONE_SECS;
+      backT = setInterval(() => { left--; const b = $('#kBack b'); if (b) b.textContent = left; if (left <= 0) { clearInterval(backT); if (stage === 'done') reset(); } }, 1000);
       return;
     }
     const cs = cats(); if (!cs.includes(cat)) cat = cs[0];
@@ -2369,11 +2374,11 @@ async function pKiosk(S) {
     clearTimeout(idleT); clearTimeout(warnT);
     if (stage === 'start') return;
     if (stage === 'pix' || stage === 'card') { idleT = setTimeout(() => cancelPix(true), (stage === 'card' ? 5 : 8) * 60000); return; }   // ninguém pagou: cancela
+    if (stage === 'done') return;   // a tela de número tem contagem própria
     idleT = setTimeout(() => {
-      if (stage === 'done') return reset();
       dialog('<h2>Ainda está aí?</h2><p>Toque em continuar para manter seu pedido.</p><div class="row"><button class="pri kbig" data-close>Continuar</button></div>');
       warnT = setTimeout(reset, 20000);
-    }, stage === 'done' ? 15000 : 90000);
+    }, 90000);
   };
   const onAny = () => poke();
   // Pix: QR Code na tela; confere o pedido a cada 3 s (o Mercado Pago avisa o banco) e pergunta ao Mercado Pago a cada 15 s
