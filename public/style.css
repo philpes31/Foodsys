@@ -503,3 +503,14 @@ body.kiosk .opts button{min-height:56px;font-size:17px}
 .faq-hint{background:var(--soft);border-radius:12px;padding:10px 14px;margin:0 0 10px}
 .faq-hint .faq{padding:6px 0}
 #faqQ{margin:4px 0 6px}
+
+/* Combos */
+.cb-slot{margin:8px 0;padding:12px 14px}
+.cb-items{margin:8px 0}
+.cb-it{display:flex;align-items:center;gap:10px;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line)}
+.cb-it:last-child{border-bottom:0}
+.cb-pick{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;max-height:120px;overflow:auto}
+.cb-sum{margin-top:10px;padding:10px 14px;background:var(--soft)}
+.link-tag{align-self:center;font-size:14px;cursor:help}
+.kw-img{position:relative}
+.kw-save{position:absolute;left:8px;top:8px;background:#1f8a4c;color:#fff;font-weight:800;font-size:12px;padding:3px 8px;border-radius:99px}

@@ -707,14 +707,41 @@ async function tenantsQuery(build) {
   }
   throw new Error('Não foi possível ler a loja');
 }
-let MENU_COLS = 'id, category, name, description, price, icon, image_path, available, stock, sort, option_groups(id, name, min_sel, max_sel, pricing, sort, options(id, name, price, sort))';
+let MENU_COLS = 'id, category, name, description, price, icon, image_path, available, stock, sort, option_groups(id, name, min_sel, max_sel, pricing, sort, options(id, name, price, sort, product_id))';
 // Lê o cardápio; se a migração 35 (meio a meio) ainda não rodou, lê sem a forma de cobrança dos grupos
 async function menuQ(build) {
-  const { data, error } = await build(MENU_COLS);
-  if (!error) return data;
-  if (!/pricing/.test(error.message || '')) throw new Error(tr(error.message || 'Erro'));
-  MENU_COLS = MENU_COLS.replace(' pricing,', '');
+  for (let i = 0; i < 3; i++) {
+    const { data, error } = await build(MENU_COLS);
+    if (!error) { registerMenu(data); return data; }
+    // migração ainda não rodou: lê sem a coluna nova (forma de cobrança 35, item de combo 40)
+    const m = String(error.message || '');
+    if (/pricing/.test(m) && MENU_COLS.includes(' pricing,')) MENU_COLS = MENU_COLS.replace(' pricing,', '');
+    else if (/product_id/.test(m) && MENU_COLS.includes(', product_id)')) MENU_COLS = MENU_COLS.replace(', product_id)', ')');
+    else throw new Error(tr(m || 'Erro'));
+  }
   return q(build(MENU_COLS));
+}
+// Combos: itens que apontam para produtos do cardápio. Guardamos preço e disponibilidade dos produtos
+// carregados para esconder item esgotado e calcular a economia do combo.
+const LINKED = new Map();
+function registerMenu(rows) {
+  LINKED.clear();
+  for (const p of rows || []) LINKED.set(p.id, { name: p.name, price: p.price, ok: p.available !== false && p.stock !== 0 });
+}
+const isCombo = p => (p.groups || []).length > 0 && p.groups.every(g => g.options.length && g.options.every(o => o.product_id));
+const optOk = o => !o.product_id || !!LINKED.get(o.product_id)?.ok;
+const visOpts = g => g.options.filter(optOk);
+// Quanto o cliente economiza no combo em relação aos itens avulsos (só quando todo grupo obrigatório é de produtos)
+function comboSavings(p) {
+  let avulso = 0, linked = false;
+  for (const g of p.groups || []) {
+    if (!(g.min_sel > 0)) continue;
+    const vo = visOpts(g);
+    if (!vo.length || vo.some(o => !o.product_id)) return 0;
+    linked = true;
+    avulso += vo.map(o => LINKED.get(o.product_id).price).sort((a, b) => a - b).slice(0, g.min_sel).reduce((a, v) => a + v, 0);
+  }
+  return linked ? Math.max(0, avulso - fromPrice(p).price) : 0;
 }
 
 // Montador de produto com grupos de opções (usado na loja e no lançamento de pedidos do painel)
@@ -730,26 +757,28 @@ const optTextOf = (p, ids) => p.groups.flatMap(g => { const on = g.options.filte
 // Preço "a partir de": soma as opções obrigatórias mais baratas (ex.: tamanho) ao preço base
 function fromPrice(p) {
   let price = p.price, from = false;
-  for (const g of p.groups || []) if (g.min_sel > 0 && g.options?.length) {
-    const sorted = g.options.map(o => o.price || 0).sort((a, b) => a - b);
+  for (const g of p.groups || []) if (g.min_sel > 0 && visOpts(g).length) {
+    const sorted = visOpts(g).map(o => o.price || 0).sort((a, b) => a - b);
     const cheap = SPLIT(g) ? sorted[0] : sorted.slice(0, g.min_sel).reduce((a, v) => a + v, 0);   // meio a meio: o sabor mais barato inteiro
-    if (g.options.some(o => o.price)) from = true;
+    if (visOpts(g).some(o => o.price)) from = true;
     price += cheap;
   }
   return { price, from };
 }
 function openBuilder(p, onAdd) {
   if (!p.groups.length) return onAdd({ productId: p.id, name: p.name, optionIds: [], optText: '', unit: p.price, qty: 1, notes: '' });
-  const sel = p.groups.map(g => g.options.slice(0, g.min_sel).map(o => o.id));
+  const sel = p.groups.map(g => visOpts(g).slice(0, g.min_sel).map(o => o.id));
+  const short = p.groups.find(g => visOpts(g).length < g.min_sel);   // combo com item obrigatório todo esgotado
   let qty = 1, notes = '';
   const draw = () => {
     dialog(`<h2>${esc(p.name)}</h2><span class="mut">${esc(p.description)}</span>
     ${p.groups.map((g, i) => `<div class="grp"><h3><span>${esc(g.name)}</span><span class="badge ${g.min_sel ? 'b-a' : ''}">${g.min_sel ? (g.min_sel === g.max_sel ? `Escolha ${g.min_sel}` : `Mín. ${g.min_sel}, máx. ${g.max_sel}`) : g.max_sel > 1 ? `Até ${g.max_sel}` : 'Opcional'}</span></h3>
       ${SPLIT(g) && g.max_sel > 1 ? `<p class="mut split-hint">Escolha até ${g.max_sel} sabores. ${g.pricing === 'max' ? 'Vale o preço do sabor mais caro.' : 'O preço é a média dos sabores.'}</p>` : ''}
-      <div class="opts">${g.options.map(o => `<button data-g="${i}" data-o="${o.id}" class="${sel[i].includes(o.id) ? 'on' : ''}" aria-pressed="${sel[i].includes(o.id)}">${esc(o.name)}${o.price ? (SPLIT(g) ? ' ' : ' +') + brl(o.price) : ''}</button>`).join('')}</div></div>`).join('')}
+      <div class="opts">${visOpts(g).map(o => `<button data-g="${i}" data-o="${o.id}" class="${sel[i].includes(o.id) ? 'on' : ''}" aria-pressed="${sel[i].includes(o.id)}">${esc(o.name)}${o.price ? (SPLIT(g) ? ' ' : ' +') + brl(o.price) : ''}</button>`).join('')}</div></div>`).join('')}
     <label>Observação<input id="bObs" value="${esc(notes)}" maxlength="140" placeholder="Ex.: sem cebola"></label>
     <div class="row between"><span class="row"><button class="ghost sm" data-q="-1" aria-label="Menos">−</button><b>${qty}</b><button class="ghost sm" data-q="1" aria-label="Mais">+</button></span><span class="tot price">${brl(unitOfP(p, sel.flat()) * qty)}</span></div>
-    <div class="row" style="justify-content:flex-end"><button class="ghost" id="bX">Cancelar</button><button class="pri" id="bOk">Adicionar</button></div>`);
+    ${short ? `<p class="banner warn" style="text-align:left;margin:0">${esc(short.name)}: os itens deste combo estão esgotados no momento.</p>` : ''}
+    <div class="row" style="justify-content:flex-end"><button class="ghost" id="bX">Cancelar</button><button class="pri" id="bOk" ${short ? 'disabled' : ''}>Adicionar</button></div>`);
     $('#dlgBody').onclick = e => {
       const b = e.target.closest('button'); if (!b) return; notes = $('#bObs').value;
       if (b.dataset.g) {
@@ -864,7 +893,7 @@ async function vShop(slug) {
     <div class="shop"><section>
       <div class="cats">${cats.map(c => `<button class="${c === cat ? 'on' : ''}" data-cat="${esc(c)}">${esc(c)}${c !== TOP && !catNow(c) ? ` <span class="mut" style="font-weight:400">· ${esc(catHoursText(S, c))}</span>` : ''}</button>`).join('')}</div>
       ${cat !== TOP && !catNow(cat) ? `<p class="banner" style="text-align:left;border-radius:12px;margin:0 0 12px">${esc(cat)}: disponível ${esc(catHoursText(S, cat))}.${SLOTS.length ? ' Dá para agendar um pedido para esse horário.' : ''}</p>` : ''}
-      <div class="menu">${list.map(p => `<article class="item">${picture(p, S.color)}<div class="b">${PROMOS.some(pm => promoActive(pm, S.timezone) && promoMatches(pm, p)) ? '<span class="badge b-g">Em promoção</span>' : ''}<h3>${esc(p.name)}</h3>${PR?.[p.id] ? `<span class="prate" title="Nota dos pedidos que tinham este produto">★ ${String(PR[p.id].avg).replace('.', ',')} <span class="mut">(${PR[p.id].count})</span></span>` : ''}<span class="mut">${esc(p.description)}</span>
+      <div class="menu">${list.map(p => `<article class="item">${picture(p, S.color)}<div class="b">${PROMOS.some(pm => promoActive(pm, S.timezone) && promoMatches(pm, p)) ? '<span class="badge b-g">Em promoção</span>' : ''}${comboSavings(p) >= 100 ? `<span class="badge b-g">Economize ${brl(comboSavings(p))}</span>` : ''}<h3>${esc(p.name)}</h3>${PR?.[p.id] ? `<span class="prate" title="Nota dos pedidos que tinham este produto">★ ${String(PR[p.id].avg).replace('.', ',')} <span class="mut">(${PR[p.id].count})</span></span>` : ''}<span class="mut">${esc(p.description)}</span>
         <div class="foot"><span class="price">${fromPrice(p).from ? '<span class="mut">a partir de </span>' : ''}<b>${brl(fromPrice(p).price)}</b></span>
         ${p.stock === 0 ? '<span class="badge b-r">Esgotado</span>' : `<button class="pri sm" data-add="${p.id}" ${CAN_ORDER && (catNow(p.category) || SLOTS.length) ? '' : 'disabled'}>Adicionar</button>`}</div>${p.stock > 0 && p.stock <= 5 ? `<span class="badge b-a">Últimas ${p.stock} unidade${p.stock > 1 ? 's' : ''}</span>` : ''}</div></article>`).join('') || '<p class="empty">Cardápio vazio.</p>'}</div>
     </section>
@@ -1874,13 +1903,13 @@ async function pMenu(S, owner) {
   };
   const draw = () => {
     const cats = [...new Set(prods.map(p => p.category))];
-    app.innerHTML = `<div class="row between"><div><h2>Cardápio</h2><p class="lead">${owner ? 'Crie produtos com grupos de opções: tamanhos, sabores, adicionais, combos.' : 'Marque itens esgotados ou ajuste o estoque.'} Estoque em branco = sem controle; com número, baixa a cada pedido e volta se o pedido for cancelado.</p></div>${owner ? '<span class="row"><button class="ghost" id="menuPrint">Imprimir cardápio</button><button class="ghost" id="menuCsv">Baixar planilha</button><button class="ghost" id="menuRep">Reajustar preços</button><label class="btn ghost" style="cursor:pointer">Importar planilha<input type="file" id="menuImp" accept=".csv,text/csv" hidden></label><button class="pri" id="newP">Novo produto</button></span>' : ''}</div>
+    app.innerHTML = `<div class="row between"><div><h2>Cardápio</h2><p class="lead">${owner ? 'Crie produtos com grupos de opções: tamanhos, sabores, adicionais, combos.' : 'Marque itens esgotados ou ajuste o estoque.'} Estoque em branco = sem controle; com número, baixa a cada pedido e volta se o pedido for cancelado.</p></div>${owner ? '<span class="row"><button class="ghost" id="menuPrint">Imprimir cardápio</button><button class="ghost" id="menuCsv">Baixar planilha</button><button class="ghost" id="menuRep">Reajustar preços</button><label class="btn ghost" style="cursor:pointer">Importar planilha<input type="file" id="menuImp" accept=".csv,text/csv" hidden></label><button class="ghost" id="newCombo">Montar combo</button><button class="pri" id="newP">Novo produto</button></span>' : ''}</div>
     ${cats.map(c => `<div class="panel" style="margin-bottom:16px"><div class="row between"><h3>${esc(c)}${(S.category_hours || {})[c] ? ` <span class="badge b-a">${esc(catHoursText(S, c))}</span>` : ''}</h3><span class="row">${owner && 'stations' in S ? `<label class="chk" style="gap:6px;margin:0">Estação <select data-station="${esc(c)}" style="width:auto;min-height:34px;padding:2px 8px">${[...new Set([...stationList(S), 'Bar'])].map(n => `<option ${((S.stations || {})[c] || 'Cozinha') === n ? 'selected' : ''}>${esc(n)}</option>`).join('')}<option value="__new">Outra…</option></select></label>` : ''}${owner && 'category_hours' in S ? `<button class="ghost sm" data-chours="${esc(c)}">Horário da categoria</button>` : ''}${(() => { const ps = prods.filter(p => p.category === c), on = ps.some(p => p.available); return `<button class="ghost sm" data-catav="${esc(c)}" data-to="${on ? 0 : 1}" title="${on ? 'Marca todos os produtos da categoria como esgotados' : 'Volta todos os produtos da categoria'}">${on ? 'Esgotar categoria' : 'Voltar categoria'}</button>`; })()}</span></div><div class="scroll"><table class="stack"><thead><tr><th>Produto</th><th>Opções</th><th class="n">Preço</th><th>Estoque</th><th>Disponível</th><th></th></tr></thead><tbody>
       ${prods.filter(p => p.category === c).map(p => `<tr><td data-l="Produto"><span class="row" style="flex-wrap:nowrap"><span class="thumb">${picture(p, S.color)}</span><span><b>${esc(p.name)}</b><br><span class="mut">${esc(p.description)}</span></span></span></td>
         <td data-l="Opções"><span class="mut">${p.groups.map(g => `${esc(g.name)} (${g.options.length})`).join(', ') || '—'}</span></td><td data-l="Preço" class="n price">${brl(p.price)}</td>
         <td data-l="Estoque"><input class="stockin" type="number" min="0" inputmode="numeric" data-stock="${p.id}" value="${p.stock ?? ''}" placeholder="sem controle" aria-label="Estoque de ${esc(p.name)}">${p.stock === 0 ? ' <span class="badge b-r">zerado</span>' : ''}</td>
         <td data-l="Disponível"><button class="sm ${p.available ? 'ok' : 'ghost'}" data-av="${p.id}">${p.available ? 'Sim' : 'Esgotado'}</button></td>
-        <td data-l="">${owner ? `<span class="row" style="flex-wrap:nowrap;gap:6px">${sugg ? `<button class="sm ${sugg.has(p.id) ? 'ok' : 'ghost'}" data-sug="${p.id}" title="Aparece em &quot;Que tal adicionar?&quot; no carrinho da loja">${sugg.has(p.id) ? '★ Sugerido' : '☆ Sugerir'}</button>` : ''}<button class="ghost sm" data-ed="${p.id}">Editar</button></span>` : ''}</td></tr>`).join('')}</tbody></table></div></div>`).join('') || '<p class="empty">Nenhum produto ainda.</p>'}`;
+        <td data-l="">${owner ? `<span class="row" style="flex-wrap:nowrap;gap:6px">${sugg ? `<button class="sm ${sugg.has(p.id) ? 'ok' : 'ghost'}" data-sug="${p.id}" title="Aparece em &quot;Que tal adicionar?&quot; no carrinho da loja">${sugg.has(p.id) ? '★ Sugerido' : '☆ Sugerir'}</button>` : ''}${isCombo(p) ? `<button class="ghost sm" data-combo="${p.id}">Combo</button>` : ''}<button class="ghost sm" data-ed="${p.id}">Editar</button></span>` : ''}</td></tr>`).join('')}</tbody></table></div></div>`).join('') || '<p class="empty">Nenhum produto ainda.</p>'}`;
   };
   const exportMenu = () => {
     const rows = [MENU_HEAD, ...prods.map(p => [p.category, p.name, p.description || '', fromCents(p.price), p.available ? 'sim' : 'não'])];
@@ -1935,6 +1964,71 @@ async function pMenu(S, owner) {
         closeDlg(); toast(`${r.created} criado(s), ${r.updated} atualizado(s)`); await load(); } finally { go.disabled = false; }
     });
   };
+  // Montador de combo: cada grupo é uma "etapa" com produtos do cardápio (ex.: Pizza, Bebida)
+  const comboEditor = c => {
+    const pool = prods.filter(x => !isCombo(x) && x.id !== c?.id);
+    if (!pool.length) return toast('Cadastre primeiro os produtos que vão entrar no combo');
+    const st = c ? { name: c.name, category: c.category, price: c.price, description: c.description || '', icon: c.icon, available: c.available, image_path: c.image_path,
+        slots: c.groups.map(g => ({ name: g.name, n: g.min_sel || 1, items: g.options.filter(o => o.product_id).map(o => ({ id: o.product_id, extra: o.price || 0 })) })) }
+      : { name: '', category: 'Combos', price: 0, description: '', icon: 'box', available: true, image_path: null, slots: [{ name: 'Lanche', n: 1, items: [] }, { name: 'Bebida', n: 1, items: [] }] };
+    let filt = '';
+    const byId = id => pool.find(x => x.id === id) || prods.find(x => x.id === id);
+    const avulso = () => st.slots.reduce((t, sl) => t + sl.items.map(it => byId(it.id)?.price || 0).sort((a, b) => a - b).slice(0, sl.n).reduce((a, v) => a + v, 0), 0);
+    const read = () => {
+      st.name = $('#cbN').value; st.category = $('#cbC').value; st.price = toCents($('#cbP').value || '0'); st.description = $('#cbD').value;
+      st.slots.forEach((sl, i) => { sl.name = $(`#cbS${i}`).value; sl.n = Math.max(1, Math.min(9, +$(`#cbQ${i}`).value || 1));
+        sl.items.forEach((it, k) => { it.extra = toCents($(`#cbX${i}_${k}`).value || '0'); }); });
+      filt = $('#cbF')?.value || '';
+    };
+    const draw = () => {
+      const av = avulso(), save = av - st.price;
+      dialog(`<h2>${c ? 'Editar combo' : 'Montar combo'}</h2>
+      <p class="mut" style="margin-top:-6px">Escolha os produtos de cada etapa. O combo baixa o estoque e a ficha técnica dos itens escolhidos, e item esgotado some da escolha.</p>
+      <form id="fCb" novalidate>
+        <div class="two"><label>Nome do combo<input id="cbN" value="${esc(st.name)}" maxlength="80" placeholder="Ex.: Combo Família" required></label>
+          <label>Categoria<input id="cbC" value="${esc(st.category)}" maxlength="40" list="cbCats"><datalist id="cbCats">${[...new Set(prods.map(x => x.category))].map(x => `<option value="${esc(x)}">`).join('')}</datalist></label></div>
+        <div class="two"><label>Preço do combo (R$)<input id="cbP" inputmode="decimal" value="${st.price ? fromCents(st.price) : ''}" placeholder="59,90"></label>
+          <label>Descrição (opcional)<input id="cbD" value="${esc(st.description)}" maxlength="200" placeholder="Ex.: 1 pizza grande + 1 refri 2L"></label></div>
+        <input id="cbF" type="search" placeholder="Filtrar produtos (ex.: coca, pizza)" value="${esc(filt)}" style="margin:6px 0">
+        ${st.slots.map((sl, i) => `<div class="panel cb-slot"><div class="row between"><span class="row" style="flex:1"><input id="cbS${i}" value="${esc(sl.name)}" maxlength="60" placeholder="Etapa (ex.: Bebida)" style="flex:1;min-width:140px">
+            <label class="chk" style="gap:6px;margin:0">Escolher <input id="cbQ${i}" type="number" min="1" max="9" value="${sl.n}" style="width:64px"></label></span>
+            <button type="button" class="ghost sm" data-rs="${i}">Remover etapa</button></div>
+          ${sl.items.length ? `<div class="cb-items">${sl.items.map((it, k) => { const pr = byId(it.id); return `<div class="cb-it"><span><b>${esc(pr?.name || 'Produto removido')}</b> <span class="mut">${pr ? brl(pr.price) + ' avulso' : ''}${pr && (pr.available === false || pr.stock === 0) ? ' · esgotado' : ''}</span></span>
+              <label class="chk" style="gap:6px;margin:0">+R$ <input id="cbX${i}_${k}" inputmode="decimal" value="${it.extra ? fromCents(it.extra) : ''}" placeholder="0,00" style="width:80px" title="Valor a mais se o cliente escolher este item"></label>
+              <button type="button" class="ghost sm" data-ri="${i}_${k}" aria-label="Tirar">×</button></div>`; }).join('')}</div>` : '<p class="mut" style="margin:6px 0">Nenhum produto nesta etapa ainda.</p>'}
+          <div class="cb-pick">${pool.filter(x => !sl.items.some(it => it.id === x.id) && (!filt || faqNorm(`${x.name} ${x.category}`).includes(faqNorm(filt)))).slice(0, 40)
+            .map(x => `<button type="button" class="ghost sm" data-add="${i}_${x.id}">+ ${esc(x.name)}</button>`).join('') || '<span class="mut">Nenhum produto para adicionar.</span>'}</div></div>`).join('')}
+        <button type="button" class="ghost sm" id="cbAddSlot">+ Etapa</button>
+        <div class="panel cb-sum">${av ? `Itens avulsos a partir de <b>${brl(av)}</b> · ${save > 0 ? `o cliente economiza <b>${brl(save)}</b>` : save < 0 ? `<span style="color:var(--red)">o combo está ${brl(-save)} mais caro que os itens avulsos</span>` : 'mesmo preço dos avulsos'}` : 'Adicione produtos às etapas para ver a economia.'}</div>
+        <div class="row" style="margin-top:12px"><button class="pri">Salvar combo</button><button type="button" class="ghost" data-close>Cancelar</button></div>
+      </form>`, true);
+      const body = $('#dlgBody');
+      body.oninput = e => { if (e.target.id === 'cbF' || e.target.id === 'cbP' || /^cbX|^cbQ/.test(e.target.id)) { read(); clearTimeout(draw.t); draw.t = setTimeout(() => { const id = document.activeElement?.id, pos = document.activeElement?.selectionStart; draw(); const el = id && $('#' + id); if (el) { el.focus(); try { el.setSelectionRange(pos, pos); } catch {} } }, 400); } };
+      body.onclick = e => {
+        const b = e.target.closest('button'); if (!b || b.type === 'submit' || b.hasAttribute('data-close')) return;
+        read();
+        if (b.dataset.add) { const [i, id] = b.dataset.add.split('_').map(Number); st.slots[i].items.push({ id, extra: 0 }); }
+        else if (b.dataset.ri) { const [i, k] = b.dataset.ri.split('_').map(Number); st.slots[i].items.splice(k, 1); }
+        else if (b.dataset.rs) { st.slots.splice(+b.dataset.rs, 1); }
+        else if (b.id === 'cbAddSlot') { st.slots.push({ name: '', n: 1, items: [] }); }
+        else return;
+        draw();
+      };
+      body.onsubmit = attempt(async e => {
+        e.preventDefault(); read();
+        if (!st.name.trim()) throw new Error('Dê um nome ao combo');
+        if (!st.price) throw new Error('Informe o preço do combo');
+        if (!st.slots.length) throw new Error('Adicione pelo menos uma etapa');
+        for (const sl of st.slots) { if (!sl.name.trim()) throw new Error('Toda etapa precisa de nome'); if (sl.items.length < 1) throw new Error(`Adicione produtos em "${sl.name}"`); }
+        const payload = { category: st.category.trim() || 'Combos', name: st.name.trim(), description: st.description.trim(), price: st.price, icon: st.icon, available: st.available, image_path: st.image_path,
+          groups: st.slots.map(sl => ({ name: sl.name.trim(), min_sel: Math.min(sl.n, sl.items.length), max_sel: Math.min(sl.n, sl.items.length),
+            options: sl.items.map(it => ({ name: byId(it.id)?.name || 'Item', price: it.extra || 0, productId: it.id })) })) };
+        await rpc('save_product', { p_tenant: S.id, p_id: c?.id ?? null, p: payload });
+        closeDlg(); toast(c ? 'Combo salvo' : 'Combo criado. Ele já aparece na loja.'); await load();
+      });
+    };
+    draw();
+  };
   const editor = p => {
     const cats = [...new Set(prods.map(x => x.category))];
     const st = p ? JSON.parse(JSON.stringify(p)) : { category: cats[0] || '', name: '', description: '', price: 0, icon: 'box', available: true, image_path: null, groups: [] };
@@ -1957,7 +2051,7 @@ async function pMenu(S, owner) {
         <b>Pizza meio a meio:</b> preço base 0, um grupo "Sabores" com mínimo 1 e máximo 2 (ou 3, 4), o preço de cada sabor na opção e "cobrar o sabor mais caro". No pedido aparece "1/2 Calabresa, 1/2 Mussarela".</p>
       ${st.groups.map((g, i) => `<div class="ged"><div class="g3"><label>Nome do grupo<input id="gN${i}" value="${esc(g.name)}" placeholder="Ex.: Tamanho"></label><label>Mínimo<input id="gMin${i}" type="number" min="0" value="${g.min_sel}"></label><label>Máximo<input id="gMax${i}" type="number" min="1" value="${g.max_sel}"></label><button type="button" class="ghost sm" data-rg="${i}">Remover</button></div>
         <label class="gpr">Como cobrar este grupo<select id="gPr${i}">${[['sum', 'Somar o preço das opções escolhidas'], ['max', 'Pizza meio a meio: cobrar o sabor mais caro'], ['avg', 'Pizza meio a meio: cobrar a média dos sabores']].map(([v, t]) => `<option value="${v}" ${(g.pricing || 'sum') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
-        ${g.options.map((o, k) => `<div class="o2"><input id="o${i}_${k}" value="${esc(o.name)}" placeholder="Opção" aria-label="Nome da opção"><input id="op${i}_${k}" inputmode="decimal" value="${fromCents(o.price)}" aria-label="Preço adicional"><button type="button" class="ghost sm" data-ro="${i}_${k}" aria-label="Remover opção">×</button></div>`).join('')}
+        ${g.options.map((o, k) => `<div class="o2"><input id="o${i}_${k}" value="${esc(o.name)}" placeholder="Opção" aria-label="Nome da opção"><input id="op${i}_${k}" inputmode="decimal" value="${fromCents(o.price)}" aria-label="Preço adicional"><button type="button" class="ghost sm" data-ro="${i}_${k}" aria-label="Remover opção">×</button>${o.product_id ? `<span class="link-tag" title="Ligado ao produto ${esc(LINKED.get(o.product_id)?.name || '')}: baixa o estoque dele">🔗</span>` : ''}</div>`).join('')}
         <button type="button" class="ghost sm" data-ao="${i}">+ Opção</button></div>`).join('')}
       <div class="row between">${p ? '<button type="button" class="ghost" id="delP">Excluir produto</button>' : '<span></span>'}<span class="row"><button type="button" class="ghost" id="eX">Cancelar</button><button class="pri">Salvar</button></span></div></form>`, true);
     drawEd();
@@ -1984,7 +2078,7 @@ async function pMenu(S, owner) {
       if (!Number.isInteger(st.price) || st.price < 0) throw new Error('Preço base inválido');
       if (st.groups.some(g => g.options.some(o => !Number.isInteger(o.price) || o.price < 0))) throw new Error('Preço de opção inválido');
       const body = { category: st.category, name: st.name, description: st.description, price: st.price, icon: st.icon, available: st.available, image_path: st.image_path,
-        groups: st.groups.map(g => ({ name: g.name, min_sel: g.min_sel, max_sel: g.max_sel, ...(g.pricing && g.pricing !== 'sum' ? { pricing: g.pricing } : {}), options: g.options.filter(o => o.name.trim()).map(o => ({ name: o.name, price: o.price })) })) };
+        groups: st.groups.map(g => ({ name: g.name, min_sel: g.min_sel, max_sel: g.max_sel, ...(g.pricing && g.pricing !== 'sum' ? { pricing: g.pricing } : {}), options: g.options.filter(o => o.name.trim()).map(o => ({ name: o.name, price: o.price, ...(o.product_id ? { productId: o.product_id } : {}) })) })) };
       await rpc('save_product', { p_tenant: S.id, p_id: p?.id ?? null, p: body });
       // apaga do Storage as fotos que deixaram de ser usadas
       const unused = [...uploaded, p?.image_path].filter(x => x && x !== st.image_path);
@@ -2029,6 +2123,8 @@ async function pMenu(S, owner) {
       toast(`${c}: ${n} produto(s) ${to ? 'disponíveis de novo' : 'esgotados'}`); return load();
     }
     if (b.id === 'newP') editor(null);
+    if (b.id === 'newCombo') comboEditor(null);
+    if (b.dataset.combo) comboEditor(prods.find(p => p.id === +b.dataset.combo));
     if (b.dataset.ed) editor(prods.find(p => p.id === +b.dataset.ed));
     if (b.dataset.av) { const p = prods.find(x => x.id === +b.dataset.av); await rpc('set_product_availability', { p_product: p.id, p_available: !p.available }); await load(); }
   });
@@ -2798,7 +2894,7 @@ async function pKiosk(S) {
         <nav class="kw-cats">${cs.map(c => `<button class="${c === cat ? 'on' : ''}" data-cat="${esc(c)}"><span>${esc(c)}</span><small>${items().filter(p => p.category === c).length}</small></button>`).join('')}</nav>
         <button class="kw-restart" data-k="cancel">${icon.back}Recomeçar</button></aside>
       <section class="kw-menu"><div class="kw-head"><h2>${esc(cat || 'Cardápio')}</h2><span>${list.length} ${list.length === 1 ? 'opção' : 'opções'}</span></div>
-        <div class="kw-grid">${list.map(p => { const fp = fromPrice(p); return `<button class="kw-item" data-p="${p.id}"><span class="kw-img">${picture(p, S.color)}</span>
+        <div class="kw-grid">${list.map(p => { const fp = fromPrice(p); return `<button class="kw-item" data-p="${p.id}"><span class="kw-img">${picture(p, S.color)}${comboSavings(p) >= 100 ? `<span class="kw-save">Economize ${brl(comboSavings(p))}</span>` : ''}</span>
           <span class="kw-body"><b>${esc(p.name)}</b>${p.description ? `<span class="kw-desc">${esc(p.description)}</span>` : ''}
           <span class="kw-foot"><span class="kw-price">${fp.from ? '<small>a partir de</small>' : ''}${brl(fp.price)}</span><span class="kw-add">${icon.plus}</span></span></span></button>`; }).join('') || '<p class="kw-empty">Nada nesta categoria agora.</p>'}</div></section>
       <aside class="kw-cart"><div class="kw-head"><h2>Seu pedido</h2>${count() ? `<span class="kw-count">${count()} ${count() === 1 ? 'item' : 'itens'}</span>` : ''}</div>

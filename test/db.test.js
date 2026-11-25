@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql', '20261219000000_avisos_loja_erros.sql', '20261220000000_fiado.sql', '20261221000000_search_path.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql', '20261219000000_avisos_loja_erros.sql', '20261220000000_fiado.sql', '20261221000000_search_path.sql', '20261222000000_combos.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -618,7 +618,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 test('checagem: schema_status mostra todas as migrações em dia (só para quem tem conta)', () => {
   fails(`select public.schema_status()`, null, /permission denied/);
   const st = json(`public.schema_status()`, U.pizza);
-  assert.equal(st.length, 39);
+  assert.equal(st.length, 40);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, U.pizza).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1733,4 +1733,42 @@ test('fiado: só equipe, conta liberada, limite, estorno no cancelamento, recebi
   fails(`select fiado_on from tenants`, null, /permission denied/);
   sql(`select cash_close('${pizzaId}', 0, null)`, U.staff);
   sql(`select set_fiado('${pizzaId}', false)`, U.pizza);
+});
+
+test('combos: itens ligados a produtos baixam estoque e receita, bloqueiam esgotados e devolvem no cancelamento', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', auto_accept = false, min_order = 0 where id = '${pizzaId}'`);
+  const mk = (name, price, stock = null) => sql(`select save_product('${pizzaId}', null, '${JSON.stringify({ category: 'Itens combo', name, price })}'::jsonb)`, U.pizza) && sql(`update products set stock = ${stock ?? 'null'} where tenant_id = '${pizzaId}' and name = '${name}' returning id`);
+  const coca = mk('Coca 2L combo', 1400, 5), guar = mk('Guaraná 2L combo', 1200, 0), piz = mk('Pizza G combo', 5500);
+  const mus = sql(`insert into ingredients (tenant_id, name, unit) values ('${pizzaId}', 'Queijo combo', 'g') returning id`, U.pizza);
+  sql(`select ingredient_move(${mus}, 'entrada', 2000, 8000, null)`, U.pizza);
+  sql(`select set_recipe(${piz}, '[{"ingredientId":${mus},"qty":300}]')`, U.pizza);
+  const combo = g => `'${JSON.stringify({ category: 'Combos', name: 'Combo Família', price: 5990, groups: g })}'::jsonb`;
+  const groups = [{ name: 'Pizza', min_sel: 1, max_sel: 1, options: [{ name: 'Pizza G', price: 0, productId: +piz }] },
+    { name: 'Bebida', min_sel: 1, max_sel: 1, options: [{ name: 'Coca 2L', price: 0, productId: +coca }, { name: 'Guaraná 2L', price: 0, productId: +guar }] }];
+  // produto de outra loja não entra no combo
+  const alheio = sql(`select id from products where tenant_id <> '${pizzaId}' limit 1`);
+  fails(`select save_product('${pizzaId}', null, ${combo([{ name: 'X', min_sel: 1, max_sel: 1, options: [{ name: 'Alheio', price: 0, productId: +alheio }] }])})`, U.pizza, /não é um produto desta loja/);
+  const id = sql(`select save_product('${pizzaId}', null, ${combo(groups)})`, U.pizza);
+  assert.equal(sql(`select count(*) from options o join option_groups g on g.id = o.group_id where g.product_id = ${id} and o.product_id is not null`), '3');
+  const p = menu('forno-da-vila').find(x => x.id === +id);
+  const [pz] = p.groups[0].options, [co, gu] = p.groups[1].options;
+  const ord = ids => order('forno-da-vila', { customer, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 2, optionIds: ids }] });
+  fails(`select place_order('forno-da-vila', '${JSON.stringify({ customer, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 1, optionIds: [pz.id, gu.id] }] })}'::jsonb)`, null, /Só restam 0 unidade\(s\) de Guaraná 2L combo/);
+  const r = ord([pz.id, co.id]);
+  assert.equal(r.total, 5990 * 2);
+  assert.equal(sql(`select stock from products where id = ${coca}`), '3');
+  assert.equal(+sql(`select stock from ingredients where id = ${mus}`), 2000 - 600);   // 2 combos × 300 g da pizza
+  assert.equal(sql(`select array_to_string(combo_products, ',') from order_items oi join orders o on o.id = oi.order_id where o.public_code = '${r.code}'`), `${piz},${coca}`);
+  // cancelou: devolve a bebida e o queijo
+  const oid = sql(`select id from orders where public_code = '${r.code}'`);
+  sql(`select change_order_status(${oid}, 'cancelado')`, U.pizza);
+  assert.equal(sql(`select stock from products where id = ${coca}`), '5');
+  assert.equal(+sql(`select stock from ingredients where id = ${mus}`), 2000);
+  // item desligado não pode ser escolhido
+  sql(`update products set available = false where id = ${coca}`);
+  fails(`select place_order('forno-da-vila', '${JSON.stringify({ customer, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 1, optionIds: [pz.id, co.id] }] })}'::jsonb)`, null, /esgotado no momento/);
+  // produto apagado: a opção continua, só perde a ligação
+  sql(`delete from products where id = ${guar}`);
+  assert.equal(sql(`select count(*) from options where name = 'Guaraná 2L' and product_id is null`), '1');
+  sql(`delete from products where id in (${id}, ${coca}, ${piz})`);
 });
