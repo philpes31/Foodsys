@@ -494,3 +494,12 @@ body.kiosk .opts button{min-height:56px;font-size:17px}
 .err{margin-bottom:10px;padding:14px 16px}
 .err.done{opacity:.6}
 .err-msg{display:block;font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink)}
+
+/* Central de ajuda */
+.faq{border-bottom:1px solid var(--line);padding:10px 0}
+.faq:last-child{border-bottom:0}
+.faq summary{cursor:pointer;font-weight:600}
+.faq p{margin:8px 0 0;line-height:1.5}
+.faq-hint{background:var(--soft);border-radius:12px;padding:10px 14px;margin:0 0 10px}
+.faq-hint .faq{padding:6px 0}
+#faqQ{margin:4px 0 6px}

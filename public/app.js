@@ -250,6 +250,7 @@ function promoLabel(pm, byId) {
 }
 
 /* ---------- WhatsApp ---------- */
+const fmtPhone = p => { const d = String(p || '').replace(/\D/g, '').slice(-11); return d.length === 11 ? `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}` : d.length === 10 ? `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}` : d; };
 const waNumber = phone => { const d = String(phone || '').replace(/\D/g, ''); return d.length >= 12 && d.startsWith('55') ? d : d.length >= 10 ? '55' + d : ''; };
 const waLink = (phone, text) => { const n = waNumber(phone); return n ? `https://wa.me/${n}?text=${encodeURIComponent(text)}` : ''; };
 const trackUrl = o => `${location.origin}/pedido/${o.public_code}`;
@@ -1232,6 +1233,58 @@ async function shotUrls(paths) {
   return out;
 }
 
+
+// Central de ajuda: respostas rápidas antes de abrir chamado. "k" são palavras extras para a busca.
+const FAQ = [
+  { q: 'Como cadastrar produtos, tamanhos e adicionais?', k: 'cardapio produto preço opção grupo borda tamanho adicional foto',
+    a: 'Em <b>Cardápio</b>, toque em <b>Novo produto</b>. Preencha nome, categoria e preço base. Para tamanhos, sabores ou adicionais, crie um <b>grupo de opções</b>: mínimo 1 e máximo 1 = escolha obrigatória (ex.: tamanho); máximo maior que 1 = várias escolhas (ex.: adicionais). O preço de cada opção soma ao preço base.' },
+  { q: 'Como montar pizza meio a meio (dois sabores)?', k: 'pizza sabores metade meia fracionada mais caro média',
+    a: 'Crie o produto com preço base 0 e um grupo "Sabores" com mínimo 1 e máximo 2 (ou 3, 4). Cadastre cada sabor com o preço da pizza inteira e, em <b>Como cobrar este grupo</b>, escolha <b>cobrar o sabor mais caro</b> ou <b>a média dos sabores</b>. O pedido sai como "1/2 Calabresa, 1/2 Mussarela".' },
+  { q: 'Como deixar um produto esgotado ou pausar uma categoria?', k: 'esgotado esgotou esgotar estoque acabou indisponível pausar categoria',
+    a: 'Em <b>Cardápio</b>, desligue o produto (fica fora da loja) ou use o estoque: com estoque 0 ele aparece como esgotado. Para uma categoria inteira, use o botão <b>Esgotar categoria</b> ao lado do nome dela (e <b>Voltar categoria</b> depois).' },
+  { q: 'Como definir o horário de funcionamento e feriados?', k: 'horario abrir fechar loja fechada feriado funcionamento',
+    a: 'Em <b>Configurações → Horário de funcionamento</b>, ligue o horário automático e preencha os dias. Datas especiais ficam em <b>Feriados e fechamentos especiais</b>. Com o horário automático, a loja abre e fecha sozinha.' },
+  { q: 'Como configurar bairros e taxa de entrega?', k: 'entrega taxa bairro frete distancia km raio',
+    a: 'Em <b>Configurações → Taxa de entrega</b>, escolha cobrar por bairro ou por distância. Por bairro, cadastre cada um em <b>Bairros e taxas</b>. Por distância, informe as faixas em km; o sistema calcula pelo endereço do cliente.' },
+  { q: 'Como ativar Pix e cartão online?', k: 'pix mercado pago cartão online pagamento access token qr code',
+    a: 'Em <b>Configurações → Pix e cartão online (Mercado Pago)</b>, cole o <b>Access Token</b> de produção da sua conta do Mercado Pago e ligue o Pix e/ou cartão. O dinheiro cai direto na sua conta do Mercado Pago, e o pedido só chega no Preparo depois de pago.' },
+  { q: 'Como imprimir as comandas automaticamente?', k: 'imprimir impressora comanda cupom térmica automática',
+    a: 'Na tela de <b>Pedidos</b>, em <b>Imprimir comanda</b>, escolha <b>ao aceitar</b> ou <b>assim que chegar</b>. A escolha vale só para aquele aparelho. O botão <b>?</b> ao lado explica como imprimir sem abrir a janela de impressão.' },
+  { q: 'Como receber aviso de pedido novo no celular?', k: 'aviso notificação celular push sino som pedido novo',
+    a: 'Na tela de <b>Pedidos</b>, toque em <b>🔔 Avisar neste aparelho</b> e aceite as notificações. Pedidos da loja online, do totem e das mesas passam a avisar mesmo com o painel fechado. No iPhone, abra o painel pela Tela de Início (Compartilhar → Adicionar à Tela de Início).' },
+  { q: 'Como cadastrar atendentes e a conta do totem?', k: 'equipe funcionário atendente usuário acesso totem login senha',
+    a: 'Em <b>Configurações → Equipe</b>, digite o e-mail da pessoa (ela precisa ter criado uma conta) e escolha o papel: <b>Atendente</b> opera pedidos, caixa e cardápio; <b>Totem</b> só faz pedidos pelo totem. Configurações, relatórios e clientes ficam só com o dono.' },
+  { q: 'Como abrir e fechar o caixa?', k: 'caixa abrir fechar gaveta troco sangria reforço fechamento',
+    a: 'Em <b>Caixa</b>, informe o troco inicial e toque em <b>Abrir caixa</b>. Durante o dia, registre <b>sangrias</b> e <b>reforços</b>. Para fechar, conte a gaveta e digite o valor: o sistema compara com o esperado e mostra se sobrou ou faltou.' },
+  { q: 'Como vender fiado?', k: 'fiado conta cliente prazo pendura receber dívida limite',
+    a: 'O dono liga em <b>Caixa → Fiado</b> e cadastra a conta do cliente (nome, telefone e limite opcional). No <b>Novo pedido</b>, digite o telefone e escolha a forma <b>Fiado</b>. Para receber, toque em <b>Receber</b> na conta; em dinheiro, o valor entra na gaveta.' },
+  { q: 'Como usar as mesas com QR Code?', k: 'mesa qr code garçom comanda conta dividir',
+    a: 'Em <b>Configurações → Pedidos na mesa (QR Code)</b>, ligue o recurso e imprima os QR Codes. O cliente escaneia, pede pelo celular e o pedido chega marcado com a mesa. As abas <b>Garçom</b> e <b>Mesas</b> mostram as contas abertas, inclusive para dividir a conta.' },
+  { q: 'Como cadastrar entregadores e acompanhar as entregas?', k: 'entregador motoboy entrega rota mapa acerto pagamento',
+    a: 'Cadastre os entregadores em <b>Configurações → Entregadores</b>. Na aba <b>Entregas</b>, atribua os pedidos prontos; cada entregador tem um link próprio para ver a rota e marcar como entregue. O acerto (por entrega ou diária) também fica na aba Entregas.' },
+  { q: 'Como criar cupons e promoções?', k: 'cupom desconto promoção happy hour leve pague frete grátis',
+    a: 'Cupons ficam em <b>Configurações → Cupons</b> (valor ou porcentagem, com validade). Promoções que entram sozinhas (happy hour, leve 3 pague 2) ficam em <b>Configurações → Promoções automáticas</b>. Frete grátis acima de um valor fica em <b>Taxa de entrega</b>.' },
+  { q: 'Como usar o totem de autoatendimento?', k: 'totem tablet autoatendimento sair pin',
+    a: 'Cadastre uma conta com papel <b>Totem</b> em <b>Configurações → Equipe</b> e entre com ela no tablet: ele abre direto no totem. Defina um PIN em <b>Configurações → Totem de autoatendimento</b> para que só a equipe consiga sair.' },
+  { q: 'Minha loja não está recebendo pedidos. O que verificar?', k: 'não recebe pedido loja fechada assinatura pendente erro',
+    a: 'Confira: 1) se a loja está <b>aberta</b>: em <b>Configurações → Loja</b>, a opção <b>Receber pedidos</b> precisa estar marcada, e o horário automático precisa estar dentro do horário; 2) se a <b>assinatura</b> está em dia (aviso no topo do painel); 3) se os produtos estão disponíveis; 4) se o pedido mínimo não está alto demais. Se tudo estiver certo, abra um chamado.' },
+  { q: 'Como usar um domínio próprio (www.minhaloja.com.br)?', k: 'domínio site endereço dns www próprio',
+    a: 'Em <b>Configurações → Domínio próprio</b>, informe o domínio e siga as instruções de DNS mostradas na tela. Depois que o DNS propagar, a administração da plataforma ativa o domínio.' },
+];
+const faqNorm = t => String(t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+// Busca simples: palavras raras valem mais (quem digita "pix" quer a resposta de Pix, não todas que falam de "loja")
+const FAQ_STOP = new Set(['nao', 'como', 'com', 'para', 'uma', 'que', 'por', 'meu', 'minha', 'meus', 'esta', 'tem', 'dos', 'das', 'sem', 'mais', 'aparece', 'consigo', 'funciona', 'quero', 'fazer', 'loja', 'sistema', 'quando', 'onde', 'qual', 'ela', 'ele', 'isso', 'esse', 'essa']);
+const FAQ_IDX = () => FAQ_IDX.c || (FAQ_IDX.c = FAQ.map(f => ({ f, title: faqNorm(`${f.q} ${f.k}`), hay: faqNorm(`${f.q} ${f.k} ${f.a.replace(/<[^>]+>/g, '')}`) })));
+function faqSearch(text, max = 4) {
+  const words = [...new Set(faqNorm(text).split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !FAQ_STOP.has(w)))];
+  if (!words.length) return [];
+  const idx = FAQ_IDX(), n = idx.length;
+  const weight = Object.fromEntries(words.map(w => [w, Math.log(1 + n / (1 + idx.filter(x => x.hay.includes(w)).length))]));
+  return idx.map(x => ({ f: x.f, score: words.reduce((t, w) => t + (x.title.includes(w) ? 3 : x.hay.includes(w) ? 1 : 0) * weight[w], 0) }))
+    .filter(x => x.score >= 2).sort((a, b) => b.score - a.score).slice(0, max).map(x => x.f);
+}
+const faqItem = (f, open) => `<details class="faq" ${open ? 'open' : ''}><summary>${esc(f.q)}</summary><p>${f.a}</p></details>`;
+
 function openTicketDialog(S, onDone, preset = {}) {
   const st = { file: null };
   dialog(`<h2>Abrir chamado</h2>
@@ -1239,6 +1292,7 @@ function openTicketDialog(S, onDone, preset = {}) {
     <form id="tkF">
       <label>Tipo<select id="tkC">${Object.entries(SUP_CAT).map(([k, v]) => `<option value="${k}" ${k === (preset.category || 'erro') ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
       <label>Assunto<input id="tkS" maxlength="120" required placeholder="Ex.: Não consigo fechar o caixa" value="${esc(preset.subject || '')}"></label>
+      <div id="tkFaq"></div>
       <label>Descrição<textarea id="tkB" rows="6" maxlength="4000" required placeholder="O que você estava fazendo, o que esperava que acontecesse e o que aconteceu. Se apareceu uma mensagem de erro, copie aqui.">${esc(preset.body || '')}</textarea></label>
       <div class="lbl">Print da tela <span class="mut">(opcional, ajuda muito)</span></div>${shotField('tkShot')}
       <label class="chk"><input type="checkbox" id="tkD" checked> Enviar informações técnicas para ajudar a achar o erro</label>
@@ -1247,6 +1301,9 @@ function openTicketDialog(S, onDone, preset = {}) {
       <div class="row end" style="margin-top:14px"><button type="button" class="ghost" data-close>Cancelar</button><button class="pri" id="tkGo">Enviar chamado</button></div>
     </form>`);
   const body = $('#dlgBody'); bindShot(body, 'tkShot', st);
+  const sugg = () => { const hits = faqSearch(`${$('#tkS').value} ${$('#tkB').value}`, 3);
+    $('#tkFaq').innerHTML = hits.length ? `<div class="faq-hint"><b>Talvez isso resolva:</b>${hits.map(f => faqItem(f, false)).join('')}</div>` : ''; };
+  body.oninput = e => { if (e.target.id === 'tkS' || e.target.id === 'tkB') { clearTimeout(sugg.t); sugg.t = setTimeout(sugg, 300); } };
   body.onsubmit = attempt(async e => {
     e.preventDefault(); const btn = $('#tkGo'); btn.disabled = true; btn.textContent = 'Enviando…';
     try {
@@ -1305,6 +1362,9 @@ async function ticketView(id, { admin, back, folder }) {
 }
 
 async function pHelp(S) {
+  let fq = '';
+  const faqList = () => { const hits = fq.trim() ? faqSearch(fq, 8) : FAQ;
+    return hits.length ? hits.map(f => faqItem(f, fq.trim() && hits.length <= 2)).join('') : '<p class="mut">Nada encontrado. Abra um chamado que a gente responde.</p>'; };
   const list = async () => {
     cleanup?.(); cleanup = null;
     let items;
@@ -1312,7 +1372,11 @@ async function pHelp(S) {
     catch (e) { if (/support_list|function|schema cache/i.test(e.message)) { app.innerHTML = '<div class="panel"><h2>Ajuda</h2><p>Os chamados ainda não estão ativos: falta rodar a migração <code>20261218000000_chamados.sql</code> no Supabase.</p></div>'; return; } throw e; }
     app.innerHTML = `<div class="row between"><div><h2 style="margin:0">Ajuda</h2><p class="lead" style="margin:4px 0 0">Tire dúvidas ou avise sobre um erro. A equipe de suporte responde por aqui.</p></div>
         <button class="pri" id="tkNew">Abrir chamado</button></div>
-      <div class="panel" style="margin-top:16px">${items.length ? items.map(t => { const [l, c] = supStatus(t.status, false);
+      <div class="panel" style="margin-top:16px"><h3 style="margin-top:0">Perguntas frequentes</h3>
+        <input id="faqQ" type="search" placeholder="Pesquise: ex. imprimir comanda, Pix, meio a meio" value="${esc(fq)}" autocomplete="off">
+        <div id="faqList">${faqList()}</div></div>
+      <h3 style="margin:20px 0 8px">Meus chamados</h3>
+      <div class="panel">${items.length ? items.map(t => { const [l, c] = supStatus(t.status, false);
         return `<a class="tk-row ci" href="#" data-tk="${t.id}"><span><b>${esc(t.subject)}</b> ${t.unread ? '<span class="badge b-g">Resposta nova</span>' : ''}<br>
           <span class="mut">#${t.id} · ${esc(SUP_CAT[t.category] || t.category)} · atualizado em ${supWhen(t.updatedAt)}</span></span><span class="badge ${c}">${l}</span></a>`; }).join('')
         : `<div class="empty"><p><b>Nenhum chamado ainda.</b></p><p class="mut">Se algo não funcionar como esperado, abra um chamado. Um print da tela ajuda muito:
@@ -1321,7 +1385,8 @@ async function pHelp(S) {
       if (e.target.closest('#tkNew')) return openTicketDialog(S, open);
       const r = e.target.closest('[data-tk]'); if (r) { e.preventDefault(); return open(+r.dataset.tk); }
     });
-    cleanup = () => { app.onclick = null; };
+    app.oninput = e => { if (e.target.id === 'faqQ') { fq = e.target.value; $('#faqList').innerHTML = faqList(); } };
+    cleanup = () => { app.onclick = app.oninput = null; };
     if (location.hash === '#novo') { history.replaceState(null, '', location.pathname); openTicketDialog(S, open); }
   };
   const open = async id => { cleanup?.(); cleanup = null; await ticketView(id, { admin: false, back: list, folder: S.id }); $('a[href="/painel/ajuda"] .nbadge')?.remove(); };
@@ -2032,6 +2097,24 @@ async function pNewOrder(S) {
   const products = sortMenu(rawP), DIST = S.delivery_mode === 'distance';
   const qs = new URLSearchParams(location.search), fromWaiter = qs.get('volta') === 'garcom', preTable = S.allow_tables ? qs.get('mesa') : null;
   let cart = [], st = { channel: preTable ? 'mesa' : 'balcao', ful: preTable ? 'table' : 'pickup', table: preTable || '1', name: '', phone: '', zone: zones[0]?.id || null, cep: '', rua: '', num: '', comp: '', pay: 'Pagar no caixa', change: '', term: '' }, geo = null, cepInfo = null;
+  // Fiado: aparece como forma de pagamento quando a loja trabalha com fiado; mostra quanto o cliente deve e quanto ainda cabe
+  let fiadoOn = false, credit = null, creditFor = '';
+  rpc('credit_lookup', { p_tenant: S.id, p_phone: '' }).then(r => { fiadoOn = !!r; if (fiadoOn) { read(); draw(); } }).catch(() => {});
+  const checkCredit = async () => {
+    const ph = String(st.phone || '').replace(/\D/g, '');
+    if (st.pay !== 'Fiado' || ph.length < 10) { credit = null; creditFor = ''; return; }
+    if (ph === creditFor) return;
+    creditFor = ph; credit = await rpc('credit_lookup', { p_tenant: S.id, p_phone: ph }).catch(() => null);
+    read(); draw();
+  };
+  const creditLine = () => {
+    if (st.pay !== 'Fiado') return '';
+    if (!credit) return '<p class="mut" style="margin:0">Digite o telefone do cliente para conferir a conta de fiado.</p>';
+    if (!credit.found) return '<p class="banner warn" style="margin:0;text-align:left">Este telefone não tem conta de fiado. O dono cadastra em <b>Caixa → Fiado</b>.</p>';
+    if (!credit.active) return '<p class="banner bad" style="margin:0;text-align:left">A conta de fiado deste cliente está <b>bloqueada</b>.</p>';
+    const total = sub() + fee(), over = credit.available != null && total > credit.available;
+    return `<p class="${over ? 'banner bad' : 'mut'}" style="margin:0;text-align:left">${esc(credit.name)} deve <b>${brl(credit.balance)}</b>${credit.limit != null ? ` · limite ${brl(credit.limit)} · cabe <b>${brl(credit.available)}</b>` : ' · sem limite'}${over ? '<br>Este pedido passa do limite.' : ''}</p>`;
+  };
   const sub = () => cart.reduce((t, c) => t + c.qty * c.unit, 0);
   const fee = () => st.ful !== 'delivery' ? 0 : DIST ? (geo?.quote?.fee || 0) : (zones.find(z => z.id === +st.zone)?.fee || 0);
   const read = () => { for (const k of ['name', 'phone', 'table', 'zone', 'cep', 'rua', 'num', 'comp', 'pay', 'change', 'term', 'gift']) { const el = $('#n_' + k); if (el) st[k] = el.value; } };
@@ -2055,7 +2138,8 @@ async function pNewOrder(S) {
         : `<label>Bairro<select id="n_zone">${zones.map(z => `<option value="${z.id}" ${+st.zone === z.id ? 'selected' : ''}>${esc(z.name)} · ${brl(z.fee)}</option>`).join('')}</select></label>
           <label>Endereço<input id="n_rua" value="${esc(st.rua)}" placeholder="Rua, número, complemento"></label>`) : ''}
       ${cart.map((x, i) => `<div class="ci"><div><b>${x.qty}× ${esc(x.name)}</b>${x.optText ? `<br><span class="mut">${esc(x.optText)}</span>` : ''}${x.notes ? `<br><span class="mut">Obs: ${esc(x.notes)}</span>` : ''}<br><button class="ghost sm" data-dec="${i}">−</button> <button class="ghost sm" data-inc="${i}">+</button></div><span class="price">${brl(x.qty * x.unit)}</span></div>`).join('') || '<p class="empty">Toque nos produtos para adicionar.</p>'}
-      <label>Pagamento<select id="n_pay">${['Pagar no caixa', 'Dinheiro', 'Cartão na entrega', 'Pix'].map(v => `<option value="${v}" ${st.pay === v ? 'selected' : ''}>${v === 'Cartão na entrega' ? 'Cartão' : v}</option>`).join('')}</select></label>
+      <label>Pagamento<select id="n_pay">${['Pagar no caixa', 'Dinheiro', 'Cartão na entrega', 'Pix', ...(fiadoOn ? ['Fiado'] : [])].map(v => `<option value="${v}" ${st.pay === v ? 'selected' : ''}>${v === 'Cartão na entrega' ? 'Cartão' : v}</option>`).join('')}</select></label>
+      ${creditLine()}
       ${st.pay === 'Dinheiro' ? `<label>Troco para (R$)<input id="n_change" inputmode="decimal" value="${esc(st.change)}"></label>` : ''}
       <label>Vale-presente (opcional)<input id="n_gift" value="${esc(st.gift || '')}" placeholder="VP-XXXX-XXXX" autocomplete="off"></label>
       <div class="ci"><span>Subtotal</span><span class="price">${brl(sub())}</span></div>${fee() ? `<div class="ci"><span>Entrega</span><span class="price">${brl(fee())}</span></div>` : ''}
@@ -2088,7 +2172,7 @@ async function pNewOrder(S) {
           payment: st.pay, changeFor: st.pay === 'Dinheiro' && st.change ? toCents(st.change) : undefined,
           ...(st.gift?.trim() ? { giftCode: st.gift.trim() } : {}),
           items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: c.notes })) } });
-        toast(`Pedido #${r.number} lançado · ${r.total ? `a pagar ${brl(r.total)}` : 'pago com vale-presente'}`); st.gift = '';
+        toast(`Pedido #${r.number} lançado · ${st.pay === 'Fiado' ? `${brl(r.total)} na conta do fiado` : r.total ? `a pagar ${brl(r.total)}` : 'pago com vale-presente'}`); st.gift = ''; credit = null; creditFor = '';
         if (local.get('printMode', local.get('autoPrint', false) ? 'accept' : 'off') !== 'off') { const o = (await q(sb.from('orders').select(ORDER_COLS).eq('id', r.id)))[0]; if (o) printOrder(S, o); }
         if (fromWaiter) return go('/painel/garcom');
         cart = []; st = { ...st, name: '', phone: '', rua: '', num: '', comp: '', cep: '', change: '' }; geo = null; draw();
@@ -2099,6 +2183,7 @@ async function pNewOrder(S) {
     read();
     if (e.target.id === 'n_ful') { st.ful = e.target.value; draw(); }
     if (['n_pay', 'n_zone'].includes(e.target.id)) draw();
+    if (['n_pay', 'n_phone'].includes(e.target.id)) checkCredit().catch(() => {});
     if (['n_cep', 'n_num', 'n_rua'].includes(e.target.id) && DIST) locate().catch(err => toast(err.message));
   };
   let tmr; app.oninput = e => { if (e.target.id !== 'n_term') return; clearTimeout(tmr); tmr = setTimeout(() => { read(); draw(); const el = $('#n_term'); el.focus(); el.setSelectionRange(el.value.length, el.value.length); }, 250); };
@@ -2117,7 +2202,7 @@ async function pCash(S, owner) {
     if (!cs.open) return `<div class="panel shift"><div class="row between"><div><h3 style="margin:0">Caixa fechado</h3>${cs.last ? `<p class="mut" style="margin:4px 0 0">Último turno: ${new Date(cs.last.opened_at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })} a ${hhmm(cs.last.closed_at)} · esperado ${brl(cs.last.expected_amount)} · contado ${brl(cs.last.counted_amount)} · <b class="${cs.last.diff < 0 ? 'neg' : ''}">${cs.last.diff === 0 ? 'bateu certinho' : (cs.last.diff > 0 ? 'sobrou ' : 'faltou ') + brl(Math.abs(cs.last.diff))}</b>${cs.last.note ? ` · ${esc(cs.last.note)}` : ''}</p>` : '<p class="mut" style="margin:4px 0 0">Abra o caixa no começo do turno com o troco que está na gaveta.</p>'}</div>
       <form class="row" id="fOpen"><label>Troco inicial (R$)<input id="csOpen" inputmode="decimal" placeholder="100,00" style="width:120px" required></label><button class="pri" style="align-self:end">Abrir caixa</button></form></div></div>`;
     return `<div class="panel shift"><div class="row between"><h3 style="margin:0">Caixa aberto <span class="badge b-g">desde ${hhmm(cs.openedAt)}</span></h3><span class="row"><button class="ghost sm" data-move="suprimento">+ Reforço</button><button class="ghost sm" data-move="sangria">− Sangria</button><button class="pri sm" id="csClose">Fechar caixa</button></span></div>
-      <div class="kpis" style="margin:10px 0 0"><div class="kpi"><span class="mut">Troco inicial</span><b class="price">${brl(cs.opening)}</b></div><div class="kpi"><span class="mut">Vendas em dinheiro</span><b class="price">${brl(cs.cashSales)}</b></div>
+      <div class="kpis" style="margin:10px 0 0"><div class="kpi"><span class="mut">Troco inicial</span><b class="price">${brl(cs.opening)}</b></div><div class="kpi"><span class="mut" title="Vendas em dinheiro, contas de mesa, vales e fiado recebidos em dinheiro">Entradas em dinheiro</span><b class="price">${brl(cs.cashSales)}</b></div>
         <div class="kpi"><span class="mut">Reforços − sangrias</span><b class="price">${brl(cs.supplies - cs.withdrawals)}</b></div><div class="kpi"><span class="mut">Deve ter na gaveta</span><b class="price">${brl(cs.expected)}</b></div></div>
       ${cs.moves.length ? `<p class="mut" style="margin:8px 0 0">${cs.moves.map(m => `${hhmm(m.at)} ${m.kind === 'sangria' ? 'sangria' : 'reforço'} ${brl(m.amount)}${m.note ? ` (${esc(m.note)})` : ''}`).join(' · ')}</p>` : ''}</div>`;
   };
@@ -2133,11 +2218,99 @@ async function pCash(S, owner) {
     ${r.open ? `<p class="banner warn" style="margin:0 0 16px">${r.open} pedido(s) do dia ainda não foram finalizados (entregues, retirados ou servidos).</p>` : ''}
     <div class="two"><div class="panel"><h3>Por forma de pagamento</h3><table><thead><tr><th>Forma</th><th class="n">Pedidos</th><th class="n">Valor</th></tr></thead><tbody>${rows(r.byPayment, x => x.payment)}</tbody></table>
       ${r.paidOnline ? `<p class="mut" style="margin:0">Já recebido online (Pix): <b>${brl(r.paidOnline)}</b>, cai direto na conta do Mercado Pago.</p>` : ''}
-      ${r.cashChange ? `<p class="mut" style="margin:0">Troco devolvido em dinheiro: <b>${brl(r.cashChange)}</b>.</p>` : ''}</div>
+      ${r.cashChange ? `<p class="mut" style="margin:0">Troco devolvido em dinheiro: <b>${brl(r.cashChange)}</b>.</p>` : ''}
+      ${r.creditReceived?.length ? `<p class="mut" style="margin:6px 0 0">Fiado recebido no dia: ${r.creditReceived.map(x => `${esc(x.method)} <b>${brl(x.total)}</b>`).join(' · ')}${r.creditReceived.some(x => x.method === 'Dinheiro') ? ' (o dinheiro já conta na gaveta)' : ''}.</p>` : ''}</div>
     <div class="panel"><h3>Por canal</h3><table><thead><tr><th>Canal</th><th class="n">Pedidos</th><th class="n">Valor</th></tr></thead><tbody>${rows(r.byChannel, x => CHANNEL[x.channel] || x.channel)}</tbody></table>
       <h3>Por tipo</h3><table><tbody>${rows(r.byFulfillment, x => FUL[x.fulfillment] || x.fulfillment)}</tbody></table></div></div>
-    <div id="gifts"></div>`;
-    drawGifts().catch(() => {});
+    <div id="gifts"></div><div id="fiado"></div>`;
+    drawGifts().catch(() => {}); drawFiado().catch(() => {});
+  };
+  // Fiado: contas dos clientes, recebimentos, extrato
+  let fq = '';
+  const drawFiado = async () => {
+    const box = $('#fiado'); if (!box) return;
+    let d; try { d = await rpc('credit_accounts_list', { p_tenant: S.id }); } catch { box.innerHTML = ''; return; }
+    if (!d.on) {
+      box.innerHTML = owner ? `<div class="panel" style="margin-top:20px"><div class="row between"><div><h3 style="margin:0">Fiado</h3>
+        <p class="mut" style="margin:4px 0 0">Venda a prazo para clientes de confiança: a equipe lança o pedido como "Fiado", o valor vai para a conta do cliente e você recebe depois. Cada cliente pode ter um limite.</p></div>
+        <button class="ghost" id="fOn">Ligar fiado</button></div></div>` : '';
+    } else {
+      const list = d.accounts.filter(a => !fq || `${a.name} ${a.phone}`.toLowerCase().includes(fq.toLowerCase().replace(/[^\p{L}\p{N} ]/gu, '')));
+      const owing = d.accounts.filter(a => a.balance > 0);
+      const days = t => t ? Math.floor((Date.now() - new Date(t)) / 864e5) : null;
+      box.innerHTML = `<div class="panel" style="margin-top:20px"><div class="row between"><div><h3 style="margin:0">Fiado</h3>
+          <p class="mut" style="margin:4px 0 0">${owing.length} cliente(s) devendo · <b>${brl(owing.reduce((t, a) => t + a.balance, 0))}</b> a receber. Para vender fiado, lance o pedido no painel com a forma de pagamento "Fiado".</p></div>
+        <span class="row"><input id="fSearch" placeholder="Buscar nome ou telefone" value="${esc(fq)}" style="width:200px">${owner ? '<button class="pri" id="fNew">Nova conta</button><button class="ghost sm" id="fOff">Desligar</button>' : ''}</span></div>
+        ${list.length ? `<div class="scroll" style="margin-top:10px"><table class="stack"><thead><tr><th>Cliente</th><th class="n">Deve</th><th class="n">Limite</th><th>Situação</th><th></th></tr></thead><tbody>
+          ${list.map(a => { const dd = days(a.oldestOpen), over = a.limit != null && a.balance > a.limit;
+            return `<tr><td data-l="Cliente"><b>${esc(a.name)}</b><br><span class="mut">${esc(fmtPhone(a.phone))}</span></td>
+            <td data-l="Deve" class="n price"><b>${brl(a.balance)}</b></td>
+            <td data-l="Limite" class="n">${a.limit != null ? `${brl(a.limit)}<br><span class="mut">cabe ${brl(Math.max(0, a.limit - a.balance))}</span>` : '<span class="mut">sem limite</span>'}</td>
+            <td data-l="Situação">${!a.active ? '<span class="badge b-r">Bloqueada</span>' : over ? '<span class="badge b-r">Acima do limite</span>' : a.balance > 0 ? `<span class="badge ${dd >= 30 ? 'b-r' : dd >= 15 ? 'b-a' : ''}">em aberto há ${dd ?? 0} dia(s)</span>` : '<span class="badge b-g">Em dia</span>'}
+              ${a.lastPayment ? `<br><span class="mut">último pagamento ${new Date(a.lastPayment).toLocaleDateString('pt-BR')}</span>` : ''}</td>
+            <td data-l=""><span class="row" style="flex-wrap:nowrap">${a.balance > 0 ? `<button class="ok sm" data-fpay="${a.id}">Receber</button>` : ''}<button class="ghost sm" data-fst="${a.id}">Extrato</button>${owner ? `<button class="ghost sm" data-fed="${a.id}">Editar</button>` : ''}</span></td></tr>`; }).join('')}</tbody></table></div>`
+          : `<p class="mut" style="margin:10px 0 0">${d.accounts.length ? 'Nenhuma conta encontrada.' : owner ? 'Nenhuma conta ainda. Toque em "Nova conta" para liberar um cliente.' : 'Nenhuma conta de fiado cadastrada.'}</p>`}</div>`;
+      $('#fSearch').oninput = e => { fq = e.target.value; clearTimeout(drawFiado.t); drawFiado.t = setTimeout(() => drawFiado().then(() => { const i = $('#fSearch'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }), 250); };
+    }
+    const acc = id => d.accounts.find(a => a.id === +id);
+    box.onclick = attempt(async e => {
+      const b = e.target.closest('button'); if (!b) return;
+      if (b.id === 'fOn' || b.id === 'fOff') { if (b.id === 'fOff' && !sure(b)) return; await rpc('set_fiado', { p_tenant: S.id, p_on: b.id === 'fOn' }); toast(b.id === 'fOn' ? 'Fiado ligado. Cadastre as contas dos clientes.' : 'Fiado desligado'); return drawFiado(); }
+      if (b.id === 'fNew' || b.dataset.fed) return fiadoAccountDialog(b.dataset.fed ? acc(b.dataset.fed) : null);
+      if (b.dataset.fpay) return fiadoPayDialog(acc(b.dataset.fpay));
+      if (b.dataset.fst) return fiadoStatement(+b.dataset.fst);
+    });
+  };
+  const fiadoAccountDialog = a => {
+    dialog(`<h2>${a ? 'Editar conta de fiado' : 'Nova conta de fiado'}</h2><form id="fAcc">
+      <label>Nome do cliente<input id="faN" maxlength="80" required value="${esc(a?.name || '')}"></label>
+      <label>Telefone (com DDD)<input id="faP" inputmode="tel" required value="${esc(a ? fmtPhone(a.phone) : '')}" placeholder="(11) 99999-9999"></label>
+      <label>Limite (R$)<input id="faL" inputmode="decimal" value="${a?.limit != null ? (a.limit / 100).toFixed(2).replace('.', ',') : ''}" placeholder="deixe vazio para sem limite"></label>
+      <label>Observação (opcional)<input id="faO" maxlength="300" value="${esc(a?.note || '')}" placeholder="ex.: paga todo dia 10"></label>
+      ${a ? `<label class="chk"><input type="checkbox" id="faA" ${a.active ? 'checked' : ''}> Pode comprar fiado (desmarque para bloquear)</label>` : ''}
+      <p class="mut" style="margin:0;font-size:13px">O cliente é reconhecido pelo telefone informado no pedido.</p>
+      <div class="row"><button class="pri">Salvar</button><button type="button" class="ghost" data-close>Cancelar</button></div></form>`);
+    $('#dlgBody').onsubmit = attempt(async ev => {
+      ev.preventDefault(); const lim = $('#faL').value.trim();
+      const limit = lim ? toCents(lim) : null; if (lim && (!Number.isFinite(limit) || limit < 0)) throw new Error('Limite inválido');
+      await rpc('credit_account_save', { p_tenant: S.id, p_id: a?.id ?? null, p_phone: $('#faP').value, p_name: $('#faN').value, p_limit: limit, p_active: a ? $('#faA').checked : true, p_note: $('#faO').value });
+      closeDlg(); toast('Conta salva'); await drawFiado();
+    });
+  };
+  const fiadoPayDialog = a => {
+    dialog(`<h2>Receber fiado</h2><p class="mut" style="margin:0">${esc(a.name)} deve <b>${brl(a.balance)}</b>.</p><form id="fPay">
+      <label>Valor recebido (R$)<input id="fpV" inputmode="decimal" required value="${(a.balance / 100).toFixed(2).replace('.', ',')}"></label>
+      <label>Forma<select id="fpM"><option>Dinheiro</option><option>Pix</option><option>Cartão</option></select></label>
+      <label>Observação (opcional)<input id="fpO" maxlength="300"></label>
+      <p class="mut" style="margin:0;font-size:13px">Em dinheiro, o valor entra na gaveta do caixa aberto.</p>
+      <div class="row"><button class="pri">Registrar recebimento</button><button type="button" class="ghost" data-close>Cancelar</button></div></form>`);
+    $('#dlgBody').onsubmit = attempt(async ev => {
+      ev.preventDefault(); const v = toCents($('#fpV').value || 'x'); if (!Number.isFinite(v) || v <= 0) throw new Error('Informe o valor recebido');
+      const left = await rpc('credit_pay', { p_tenant: S.id, p_account: a.id, p_amount: v, p_method: $('#fpM').value, p_note: $('#fpO').value });
+      closeDlg(); toast(left ? `Recebido. Ainda deve ${brl(left)}.` : 'Recebido. Conta quitada!'); await draw();
+    });
+  };
+  const fiadoStatement = async id => {
+    const st = await rpc('credit_statement', { p_tenant: S.id, p_account: id });
+    const K = { compra: 'Compra', pagamento: 'Pagamento', estorno: 'Estorno (cancelado)', ajuste: 'Ajuste' };
+    dialog(`<h2>Fiado · ${esc(st.name)}</h2><p class="mut" style="margin:0">${esc(fmtPhone(st.phone))} · deve <b>${brl(st.balance)}</b>${st.limit != null ? ` · limite ${brl(st.limit)}` : ''}${st.note ? ` · ${esc(st.note)}` : ''}</p>
+      <div class="scroll" style="max-height:50vh;margin-top:10px"><table><thead><tr><th>Data</th><th>Lançamento</th><th class="n">Valor</th></tr></thead><tbody>
+        ${st.moves.map(m => `<tr><td>${new Date(m.at).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}</td>
+          <td>${K[m.kind] || m.kind}${m.order ? ` · pedido #${m.order}` : ''}${m.method ? ` · ${esc(m.method)}` : ''}${m.note ? `<br><span class="mut">${esc(m.note)}</span>` : ''}${m.by ? `<br><span class="mut">${esc(m.by)}</span>` : ''}</td>
+          <td class="n price" style="color:${m.amount < 0 ? 'var(--basil)' : 'inherit'}">${m.amount < 0 ? '−' : '+'}${brl(Math.abs(m.amount))}</td></tr>`).join('') || '<tr><td colspan="3" class="mut">Sem lançamentos</td></tr>'}</tbody></table></div>
+      ${owner ? `<form id="fAdj" class="row" style="margin-top:10px;align-items:end"><label style="flex:1">Ajuste (R$, use − para abater)<input id="fjV" inputmode="decimal" placeholder="-10,00"></label><label style="flex:2">Motivo<input id="fjN" maxlength="300" placeholder="ex.: desconto combinado"></label><button class="ghost">Ajustar</button></form>` : ''}
+      <div class="row" style="margin-top:10px"><button class="ghost" id="fPrintSt">Imprimir extrato</button><button class="pri" data-close>Fechar</button></div>`, true);
+    $('#dlgBody').onsubmit = attempt(async ev => {
+      ev.preventDefault(); const raw = $('#fjV').value.trim(), neg = raw.startsWith('-'), v = toCents(raw.replace(/^[-−]/, '') || 'x');
+      if (!Number.isFinite(v) || v <= 0) throw new Error('Informe o valor do ajuste');
+      await rpc('credit_adjust', { p_tenant: S.id, p_account: id, p_amount: neg ? -v : v, p_note: $('#fjN').value }); toast('Ajuste registrado'); await fiadoStatement(id); await drawFiado();
+    });
+    $('#fPrintSt').onclick = () => {
+      $('#print').innerHTML = `<div class="tkt"><b class="big">${esc(S.name)}</b><div>EXTRATO DE FIADO</div><div><b>${esc(st.name)}</b> · ${esc(fmtPhone(st.phone))}</div><div>${new Date().toLocaleString('pt-BR')}</div><hr>
+        ${st.moves.slice().reverse().map(m => `<div class="row between"><span>${new Date(m.at).toLocaleDateString('pt-BR')} ${K[m.kind]}${m.order ? ' #' + m.order : ''}${m.method ? ' · ' + esc(m.method) : ''}</span><span>${m.amount < 0 ? '−' : ''}${brl(Math.abs(m.amount))}</span></div>`).join('')}<hr>
+        <div class="row between"><b>Saldo devedor</b><b class="big">${brl(st.balance)}</b></div></div>`;
+      window.print();
+    };
   };
   // Vale-presente: vender, listar, imprimir, cancelar
   let gq = '';
@@ -3103,7 +3276,7 @@ async function pConfig(S) {
       <label class="chk"><input type="checkbox" id="aaOn"> Aceitar pedidos automaticamente</label>
       <button class="pri">Salvar</button></form>
     <form class="panel" id="fKiosk"><h3>Totem de autoatendimento</h3>
-      <p class="mut" style="margin:0">Transforme um tablet em totem: o cliente escolhe os produtos, digita o nome e paga no caixa. O pedido chega no Preparo marcado como <b>Totem</b>. Use um tablet logado com uma conta da equipe.</p>
+      <p class="mut" style="margin:0">Transforme um tablet em totem: o cliente escolhe os produtos, digita o nome e paga no caixa. O pedido chega no Preparo marcado como <b>Totem</b>. No tablet, entre com uma conta de papel <b>Totem</b> (cadastre em <b>Configurações → Equipe</b>): ela só faz pedidos pelo totem e não vê o resto do painel.</p>
       <label>PIN para sair do totem (opcional, fica só neste aparelho)<input id="kioskPin" type="password" inputmode="numeric" maxlength="8" pattern="[0-9]{4,8}" value="${esc(local.get('kioskPin', ''))}" style="max-width:200px" autocomplete="off"></label>
       ${st.pix_online ? `<label>E-mail para os comprovantes do Pix do totem<input id="kioskEmail" type="email" maxlength="120" value="${esc(local.get('kioskEmail', '') || ME?.user?.email || '')}" style="max-width:320px"></label>
       <p class="mut" style="margin:0">Com o Pix online ligado, o cliente pode pagar no próprio totem pelo QR Code. O Mercado Pago pede um e-mail em cada cobrança: como o cliente não digita, usamos este.</p>` : '<p class="mut" style="margin:0">Ligue o <b>Pix online</b> (em Pagamentos) para o cliente poder pagar no próprio totem.</p>'}

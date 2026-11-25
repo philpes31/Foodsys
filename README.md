@@ -48,6 +48,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    35. `20261217000000_meio_a_meio.sql` (pizza meio a meio: cobrar o sabor mais caro ou a média; "1/2 Calabresa" no pedido; estoque fracionado)
    36. `20261218000000_chamados.sql` (aba Ajuda: chamados de suporte com print e diagnóstico; respostas em /plataforma/chamados)
    37. `20261219000000_avisos_loja_erros.sql` (aviso de pedido novo no aparelho da equipe; monitor de erros em /plataforma/erros)
+   38. `20261220000000_fiado.sql` (fiado: contas de clientes com limite, recebimentos no caixa, estorno no cancelamento)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -192,6 +193,10 @@ O que já está pronto:
 
 **Monitor de erros:** erros inesperados no navegador (painel, loja online, acompanhamento) são registrados sozinhos e aparecem em **Plataforma → Erros**, agrupados por mensagem, com quantas vezes e em quais lojas. "Marcar resolvido" tira da lista até acontecer de novo. Avisos de validação ("Escreva um assunto") e falta de internet não entram.
 
+**Fiado:** o dono liga em **Caixa → Fiado** e cadastra a conta de cada cliente de confiança (nome, telefone e limite opcional). No **Novo pedido**, com o telefone do cliente, a forma de pagamento **Fiado** mostra quanto ele deve e quanto ainda cabe no limite. O cliente nunca escolhe fiado pela loja online. Recebimentos (dinheiro, Pix ou cartão) abatem a dívida; em dinheiro entram na gaveta do caixa. Pedido cancelado estorna sozinho. Extrato imprimível e ajuste com motivo (só o dono).
+
+**Central de ajuda:** a aba **Ajuda** traz perguntas frequentes com busca; ao escrever um chamado, as respostas que combinam aparecem antes de enviar.
+
 - **Impressão da comanda:** na tela de preparo, o botão **Imprimir** abre a impressão do navegador já no formato 80 mm. Escolha a impressora térmica e, nas configurações de impressão, desmarque "Cabeçalhos e rodapés". Marque **Imprimir comanda ao aceitar** para imprimir automaticamente ao aceitar o pedido. No Chrome, dá para pular a janela de impressão abrindo o navegador com `--kiosk-printing`.
 - **Entregador:** em **Configurações → Entregadores → Enviar link**, cada entregador recebe pelo WhatsApp um link próprio. Ele abre no celular, sem senha, e mostra as entregas dele com endereço, valor a cobrar ou "já pago", e os botões de mapa, WhatsApp, ligar e **Entreguei**. **Novo link** desativa o anterior (use quando um entregador sair).
 - **Clientes:** a aba **Clientes** lista quem já pediu, com número de pedidos, total gasto e último pedido. Clientes que não pedem há mais de 30 dias aparecem como "sumido", e um botão de WhatsApp manda uma mensagem pronta para chamar de volta. Dá para baixar a lista em planilha (CSV).
@@ -256,7 +261,7 @@ O que já está pronto:
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 134 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 136 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;

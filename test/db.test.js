@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql', '20261219000000_avisos_loja_erros.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql', '20261219000000_avisos_loja_erros.sql', '20261220000000_fiado.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -618,7 +618,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 test('checagem: schema_status mostra todas as migrações em dia (só para quem tem conta)', () => {
   fails(`select public.schema_status()`, null, /permission denied/);
   const st = json(`public.schema_status()`, U.pizza);
-  assert.equal(st.length, 37);
+  assert.equal(st.length, 38);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, U.pizza).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1672,4 +1672,65 @@ test('monitor de erros: registra sem login, agrupa por mensagem, só a plataform
   sql(`select log_client_error('${pizzaId}', 'Cannot read properties of undefined (reading ''total'') at 7', 'app.js:812', '/painel/caixa', 'Chrome')`, U.pizza);
   assert.equal(json(`platform_errors(7, true)`, U.admin).length, 3);
   fails(`select platform_error_resolve('x')`, U.pizza, /Sem permissão/);
+});
+
+test('fiado: só equipe, conta liberada, limite, estorno no cancelamento, recebimento entra no caixa', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', min_order = 0 where id = '${pizzaId}'`);
+  sql(`update cash_sessions set closed_at = now() where tenant_id = '${pizzaId}' and closed_at is null`);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const cust = { name: 'Dona Cida', phone: '(11) 97777-6666' };
+  const body = (extra = {}) => `'${JSON.stringify({ channel: 'balcao', customer: cust, fulfillment: 'pickup', payment: 'Fiado', items: [{ productId: p.id, qty: 2 }], ...extra }).replace(/'/g, "''")}'::jsonb`;
+  fails(`select staff_place_order('${pizzaId}', ${body()})`, U.staff, /não trabalha com fiado/);
+  fails(`select set_fiado('${pizzaId}', true)`, U.staff, /Sem permissão/);
+  sql(`select set_fiado('${pizzaId}', true)`, U.pizza);
+  fails(`select staff_place_order('${pizzaId}', ${body()})`, U.staff, /não tem conta de fiado/);
+  fails(`select credit_account_save('${pizzaId}', null, '119777', 'Cida', null, true, null)`, U.pizza, /Telefone inválido/);
+  fails(`select credit_account_save('${pizzaId}', null, '11977776666', 'Cida', null, true, null)`, U.staff, /Sem permissão/);
+  const acc = sql(`select credit_account_save('${pizzaId}', null, '11977776666', 'Dona Cida', ${p.price * 3}, true, 'paga todo dia 10')`, U.pizza);
+  fails(`select credit_account_save('${pizzaId}', null, '11 97777-6666', 'Outra', null, true, null)`, U.pizza, /Já existe/);
+  // cliente pela loja online não consegue escolher fiado
+  fails(`select place_order('forno-da-vila', '${JSON.stringify({ customer: cust, fulfillment: 'pickup', payment: 'Fiado', items: [{ productId: p.id, qty: 1 }] })}'::jsonb)`, null, /Forma de pagamento inválida/);
+  const o1 = json(`staff_place_order('${pizzaId}', ${body()})`, U.staff);
+  assert.equal(o1.total, p.price * 2);
+  let look = json(`credit_lookup('${pizzaId}', '11977776666')`, U.staff);
+  assert.equal(look.balance, p.price * 2); assert.equal(look.available, p.price);
+  fails(`select staff_place_order('${pizzaId}', ${body()})`, U.staff, /Passa do limite do fiado/);   // 4 > limite de 3
+  // cancelou: estorna
+  sql(`select change_order_status(${o1.id}, 'cancelado')`, U.pizza);
+  assert.equal(json(`credit_lookup('${pizzaId}', '11977776666')`, U.staff).balance, 0);
+  sql(`update orders set status = 'cancelado' where id = ${o1.id}`);   // repetido não estorna de novo
+  assert.equal(json(`credit_lookup('${pizzaId}', '11977776666')`, U.staff).balance, 0);
+  const o2 = json(`staff_place_order('${pizzaId}', ${body({ items: [{ productId: p.id, qty: 3 }] })})`, U.staff);
+  assert.equal(json(`credit_lookup('${pizzaId}', '11977776666')`, U.staff).balance, p.price * 3);
+  // recebimento
+  fails(`select credit_pay('${pizzaId}', ${acc}, 100, 'Dinheiro', null)`, U.staff, /Abra o caixa/);
+  sql(`select cash_open('${pizzaId}', 10000)`, U.staff);
+  const exp0 = json(`cash_status('${pizzaId}')`, U.staff).expected;
+  fails(`select credit_pay('${pizzaId}', ${acc}, ${p.price * 3 + 1}, 'Dinheiro', null)`, U.staff, /maior que a dívida/);
+  fails(`select credit_pay('${pizzaId}', ${acc}, 100, 'Cheque', null)`, U.staff, /inválida/);
+  assert.equal(sql(`select credit_pay('${pizzaId}', ${acc}, ${p.price}, 'Dinheiro', null)`, U.staff), String(p.price * 2));
+  sql(`select credit_pay('${pizzaId}', ${acc}, ${p.price}, 'Pix', 'pagou metade')`, U.staff);
+  assert.equal(json(`cash_status('${pizzaId}')`, U.staff).expected, exp0 + p.price);   // só o dinheiro vai para a gaveta
+  const rep = json(`cash_report('${pizzaId}')`, U.staff);
+  assert.deepEqual(rep.creditReceived.map(x => x.method).sort(), ['Dinheiro', 'Pix']);
+  assert.ok(rep.byPayment.some(x => x.payment === 'Fiado'));
+  // ajuste só do dono, com motivo
+  fails(`select credit_adjust('${pizzaId}', ${acc}, -100, 'perdão')`, U.staff, /Sem permissão/);
+  fails(`select credit_adjust('${pizzaId}', ${acc}, -100, '')`, U.pizza, /motivo/);
+  fails(`select credit_adjust('${pizzaId}', ${acc}, -${p.price * 2}, 'perdão grande')`, U.pizza, /negativo/);
+  assert.equal(sql(`select credit_adjust('${pizzaId}', ${acc}, -100, 'arredondamento')`, U.pizza), String(p.price - 100));
+  const st = json(`credit_statement('${pizzaId}', ${acc})`, U.staff);
+  assert.deepEqual(st.moves.map(m => m.kind), ['ajuste', 'pagamento', 'pagamento', 'compra', 'estorno', 'compra']);
+  assert.equal(st.moves.find(m => m.kind === 'compra').order, o2.number);
+  const list = json(`credit_accounts_list('${pizzaId}')`, U.staff);
+  assert.equal(list.on, true); assert.equal(list.accounts.find(a => a.id === +acc).balance, p.price - 100);
+  // bloqueio e outra loja
+  sql(`select credit_account_save('${pizzaId}', ${acc}, '11977776666', 'Dona Cida', null, false, null)`, U.pizza);
+  fails(`select staff_place_order('${pizzaId}', ${body({ items: [{ productId: p.id, qty: 1 }] })})`, U.staff, /bloqueada/);
+  fails(`select credit_accounts_list('${pizzaId}')`, U.burger, /Sem permissão/);
+  fails(`select credit_pay('${pizzaId}', ${acc}, 1, 'Pix', null)`, U.burger, /Sem permissão/);
+  fails(`select * from credit_moves`, U.pizza, /permission denied/);
+  fails(`select fiado_on from tenants`, null, /permission denied/);
+  sql(`select cash_close('${pizzaId}', 0, null)`, U.staff);
+  sql(`select set_fiado('${pizzaId}', false)`, U.pizza);
 });

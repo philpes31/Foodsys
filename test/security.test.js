@@ -351,3 +351,20 @@ test('avisos da equipe e monitor de erros: outra loja não se inscreve, erros n�
   denied(`select _push_send(1)`, U.pizza);
   assert.throws(() => { for (let i = 0; i < 35; i++) sql(`select log_client_error(null, 'spam ${'$'}{i} ${Math.random()}', '', '/', '')`, null); }, /Muitos registros/);
 });
+
+test('fiado: cliente não compra fiado pela loja, outra loja não vê nem mexe nas contas', () => {
+  sql(`select set_fiado('${pizzaId}', true)`, U.pizza);
+  const acc = sql(`select credit_account_save('${pizzaId}', null, '11988887777', 'Cliente Real', 1000, true, null)`, U.pizza);
+  const p = simpleProduct(pizzaId);
+  denied(`select place_order('alvo', ${lit({ customer, fulfillment: 'pickup', payment: 'Fiado', items: [{ productId: p.id, qty: 1 }] })})`, null, /Forma de pagamento inválida|fechad|não está/);
+  denied(`select kiosk_place_order('${pizzaId}', ${lit({ customer, fulfillment: 'pickup', payment: 'Fiado', items: [{ productId: p.id, qty: 1 }] })})`, U.stranger);
+  denied(`select credit_accounts_list('${pizzaId}')`, U.burger);
+  denied(`select credit_statement('${pizzaId}', ${acc})`, U.burger);
+  denied(`select credit_statement('${burgerId}', ${acc})`, U.burger, /não encontrada/);   // conta de outra loja pelo id
+  denied(`select credit_pay('${burgerId}', ${acc}, 1, 'Pix', null)`, U.burger, /não encontrada/);
+  denied(`select credit_adjust('${pizzaId}', ${acc}, 999, 'golpe')`, U.staff);
+  denied(`select credit_account_save('${pizzaId}', ${acc}, '11988887777', 'x', 99999999, true, null)`, U.staff);
+  denied(`select credit_lookup('${pizzaId}', '11988887777')`, null);
+  nothing(`select count(*) from credit_accounts`, U.burger);
+  nothing(`with x as (insert into credit_moves (tenant_id, account_id, kind, amount) values ('${pizzaId}', ${acc}, 'pagamento', -1000) returning 1) select count(*) from x`, U.pizza);
+});
