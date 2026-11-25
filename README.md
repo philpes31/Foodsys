@@ -251,7 +251,7 @@ O que já está pronto:
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 132 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 131 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;
