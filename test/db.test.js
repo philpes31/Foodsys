@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -618,7 +618,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 test('checagem: schema_status mostra todas as migrações em dia (só para quem tem conta)', () => {
   fails(`select public.schema_status()`, null, /permission denied/);
   const st = json(`public.schema_status()`, U.pizza);
-  assert.equal(st.length, 34);
+  assert.equal(st.length, 35);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, U.pizza).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1532,4 +1532,37 @@ test('totem com cartão na maquininha: só com maquininha configurada; pago pelo
   assert.equal(sql(`select payment_status from orders where id = ${o.id}`), 'paid');
   fails(`select point_terminal_id from tenants where id = '${pizzaId}'`, null, /permission denied/);
   sql(`update tenants set point_terminal_id = null where id = '${pizzaId}'`, U.pizza);
+});
+
+test('pizza meio a meio: cobra o sabor mais caro ou a média, mostra 1/2 e gasta metade da receita de cada sabor', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', auto_accept = false where id = '${pizzaId}'`);
+  const body = pricing => `'${JSON.stringify({ category: 'Pizzas', name: 'Pizza 2 sabores', price: 0, groups: [
+    { name: 'Sabores', min_sel: 1, max_sel: 2, pricing, options: [{ name: 'Calabresa', price: 4000 }, { name: 'Camarão', price: 6500 }] },
+    { name: 'Borda', min_sel: 0, max_sel: 1, options: [{ name: 'Catupiry', price: 800 }] }] })}'::jsonb`;
+  fails(`select save_product('${pizzaId}', null, ${body('dobro')})`, U.pizza, /Forma de cobrança inválida/);
+  const id = sql(`select save_product('${pizzaId}', null, ${body('max')})`, U.pizza);
+  assert.equal(sql(`select string_agg(pricing, ',' order by sort) from option_groups where product_id = ${id}`), 'max,sum');
+  const p = menu('forno-da-vila').find(x => x.id === +id);
+  const [cal, cam] = p.groups[0].options, borda = p.groups[1].options[0];
+  const ord = ids => order('forno-da-vila', { customer, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 1, optionIds: ids }] });
+  const r1 = ord([cal.id, cam.id, borda.id]);
+  assert.equal(r1.total, 6500 + 800);   // o mais caro + borda (a borda continua somando)
+  assert.equal(sql(`select options_text || ' | ' || array_to_string(option_names, ',') from order_items oi join orders o on o.id = oi.order_id where o.public_code = '${r1.code}'`),
+    '1/2 Calabresa, 1/2 Camarão, Catupiry | Calabresa,Camarão,Catupiry');
+  assert.equal(ord([cal.id]).total, 4000);   // um sabor só: inteira, sem "1/2"
+  sql(`select save_product('${pizzaId}', ${id}, ${body('avg')})`, U.pizza);
+  const p2 = menu('forno-da-vila').find(x => x.id === +id);
+  assert.equal(ord(p2.groups[0].options.map(o => o.id)).total, 5250);   // média de 40,00 e 65,00
+  // estoque: cada sabor gasta metade da sua receita
+  const mus = sql(`insert into ingredients (tenant_id, name, unit) values ('${pizzaId}', 'Mussarela fracionada', 'g') returning id`, U.pizza);
+  sql(`select ingredient_move(${mus}, 'entrada', 1000, 4000, null)`, U.pizza);
+  sql(`select set_option_recipe(${id}, 'Calabresa', '[{"ingredientId":${mus},"qty":200}]')`, U.pizza);
+  sql(`select set_option_recipe(${id}, 'Camarão', '[{"ingredientId":${mus},"qty":300}]')`, U.pizza);
+  ord(p2.groups[0].options.map(o => o.id));
+  assert.equal(+sql(`select stock from ingredients where id = ${mus}`), 1000 - 100 - 150);
+  ord([p2.groups[0].options[0].id]);
+  assert.equal(+sql(`select stock from ingredients where id = ${mus}`), 750 - 200);
+  // cópia para outra unidade leva a forma de cobrança junto
+  assert.equal(sql(`select count(*) from information_schema.columns where table_name = 'option_groups' and column_name = 'pricing'`), '1');
+  sql(`delete from products where id = ${id}`);
 });

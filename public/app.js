@@ -684,15 +684,32 @@ async function tenantsQuery(build) {
   }
   throw new Error('Não foi possível ler a loja');
 }
-const MENU_COLS = 'id, category, name, description, price, icon, image_path, available, stock, sort, option_groups(id, name, min_sel, max_sel, sort, options(id, name, price, sort))';
+let MENU_COLS = 'id, category, name, description, price, icon, image_path, available, stock, sort, option_groups(id, name, min_sel, max_sel, pricing, sort, options(id, name, price, sort))';
+// Lê o cardápio; se a migração 35 (meio a meio) ainda não rodou, lê sem a forma de cobrança dos grupos
+async function menuQ(build) {
+  const { data, error } = await build(MENU_COLS);
+  if (!error) return data;
+  if (!/pricing/.test(error.message || '')) throw new Error(tr(error.message || 'Erro'));
+  MENU_COLS = MENU_COLS.replace(' pricing,', '');
+  return q(build(MENU_COLS));
+}
 
 // Montador de produto com grupos de opções (usado na loja e no lançamento de pedidos do painel)
-const unitOfP = (p, ids) => p.price + p.groups.flatMap(g => g.options).filter(o => ids.includes(o.id)).reduce((t, o) => t + o.price, 0);
+// Sabores fracionados (pizza meio a meio): o grupo pode cobrar o sabor mais caro ('max') ou a média ('avg') em vez de somar
+const SPLIT = g => g.pricing === 'max' || g.pricing === 'avg';
+const groupPrice = (g, prices) => !prices.length ? 0 : g.pricing === 'max' ? Math.max(...prices)
+  : g.pricing === 'avg' ? Math.round(prices.reduce((a, v) => a + v, 0) / prices.length) : prices.reduce((a, v) => a + v, 0);
+const unitOfP = (p, ids) => p.price + p.groups.reduce((t, g) => t + groupPrice(g, g.options.filter(o => ids.includes(o.id)).map(o => o.price)), 0);
+const FRAC = n => ({ 2: '1/2', 3: '1/3', 4: '1/4' })[n] || `1/${n}`;
+// "1/2 Calabresa, 1/2 Mussarela, Catupiry" (igual ao que o banco grava no pedido)
+const optTextOf = (p, ids) => p.groups.flatMap(g => { const on = g.options.filter(o => ids.includes(o.id));
+  return on.map(o => SPLIT(g) && on.length > 1 ? `${FRAC(on.length)} ${o.name}` : o.name); }).join(', ');
 // Preço "a partir de": soma as opções obrigatórias mais baratas (ex.: tamanho) ao preço base
 function fromPrice(p) {
   let price = p.price, from = false;
   for (const g of p.groups || []) if (g.min_sel > 0 && g.options?.length) {
-    const cheap = g.options.map(o => o.price || 0).sort((a, b) => a - b).slice(0, g.min_sel).reduce((a, v) => a + v, 0);
+    const sorted = g.options.map(o => o.price || 0).sort((a, b) => a - b);
+    const cheap = SPLIT(g) ? sorted[0] : sorted.slice(0, g.min_sel).reduce((a, v) => a + v, 0);   // meio a meio: o sabor mais barato inteiro
     if (g.options.some(o => o.price)) from = true;
     price += cheap;
   }
@@ -705,7 +722,8 @@ function openBuilder(p, onAdd) {
   const draw = () => {
     dialog(`<h2>${esc(p.name)}</h2><span class="mut">${esc(p.description)}</span>
     ${p.groups.map((g, i) => `<div class="grp"><h3><span>${esc(g.name)}</span><span class="badge ${g.min_sel ? 'b-a' : ''}">${g.min_sel ? (g.min_sel === g.max_sel ? `Escolha ${g.min_sel}` : `Mín. ${g.min_sel}, máx. ${g.max_sel}`) : g.max_sel > 1 ? `Até ${g.max_sel}` : 'Opcional'}</span></h3>
-      <div class="opts">${g.options.map(o => `<button data-g="${i}" data-o="${o.id}" class="${sel[i].includes(o.id) ? 'on' : ''}" aria-pressed="${sel[i].includes(o.id)}">${esc(o.name)}${o.price ? ' +' + brl(o.price) : ''}</button>`).join('')}</div></div>`).join('')}
+      ${SPLIT(g) && g.max_sel > 1 ? `<p class="mut split-hint">Escolha até ${g.max_sel} sabores. ${g.pricing === 'max' ? 'Vale o preço do sabor mais caro.' : 'O preço é a média dos sabores.'}</p>` : ''}
+      <div class="opts">${g.options.map(o => `<button data-g="${i}" data-o="${o.id}" class="${sel[i].includes(o.id) ? 'on' : ''}" aria-pressed="${sel[i].includes(o.id)}">${esc(o.name)}${o.price ? (SPLIT(g) ? ' ' : ' +') + brl(o.price) : ''}</button>`).join('')}</div></div>`).join('')}
     <label>Observação<input id="bObs" value="${esc(notes)}" maxlength="140" placeholder="Ex.: sem cebola"></label>
     <div class="row between"><span class="row"><button class="ghost sm" data-q="-1" aria-label="Menos">−</button><b>${qty}</b><button class="ghost sm" data-q="1" aria-label="Mais">+</button></span><span class="tot price">${brl(unitOfP(p, sel.flat()) * qty)}</span></div>
     <div class="row" style="justify-content:flex-end"><button class="ghost" id="bX">Cancelar</button><button class="pri" id="bOk">Adicionar</button></div>`);
@@ -723,8 +741,8 @@ function openBuilder(p, onAdd) {
       else if (b.id === 'bOk') {
         const bad = p.groups.findIndex((g, i) => sel[i].length < g.min_sel);
         if (bad >= 0) return toast(`Escolha ${p.groups[bad].min_sel} em ${p.groups[bad].name}`);
-        const ids = sel.flat().sort((a, b) => a - b), names = p.groups.flatMap(g => g.options).filter(o => ids.includes(o.id)).map(o => o.name);
-        closeDlg(); onAdd({ productId: p.id, name: p.name, optionIds: ids, optText: names.join(', '), unit: unitOfP(p, ids), qty, notes: notes.trim() });
+        const ids = sel.flat().sort((a, b) => a - b);
+        closeDlg(); onAdd({ productId: p.id, name: p.name, optionIds: ids, optText: optTextOf(p, ids), unit: unitOfP(p, ids), qty, notes: notes.trim() });
       }
     };
   };
@@ -735,7 +753,7 @@ async function vShop(slug) {
   const S = (await tenantsQuery(c => sb.from('tenants').select(`${c}, seg:segment_templates(name)`).eq('slug', slug).limit(1)))[0];
   if (!S) throw new Error('Loja não encontrada');
   const [rawP, zones] = await Promise.all([
-    q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id).eq('available', true)),
+    menuQ(c => sb.from('products').select(c).eq('tenant_id', S.id).eq('available', true)),
     q(sb.from('zones').select('id, name, fee').eq('tenant_id', S.id).order('name'))]);
   const products = sortMenu(rawP), OS = openState(S), DIST = S.delivery_mode === 'distance';
   const RV = await rpc('store_reviews', { p_slug: slug, p_limit: 10 }).catch(() => null);
@@ -1531,7 +1549,7 @@ async function pMenu(S, owner) {
   let prods = []; local.set(`seen-menu:${S.id}`, true);
   let sugg = null;   // ids marcados como sugestão no carrinho (null = migração ainda não rodou)
   const load = async () => {
-    [prods] = await Promise.all([q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id)).then(sortMenu),
+    [prods] = await Promise.all([menuQ(c => sb.from('products').select(c).eq('tenant_id', S.id)).then(sortMenu),
       owner ? q(sb.from('products').select('id').eq('tenant_id', S.id).eq('suggest', true)).then(r => { sugg = new Set(r.map(x => x.id)); }).catch(() => { sugg = null; }) : null]);
     draw();
   };
@@ -1604,7 +1622,7 @@ async function pMenu(S, owner) {
     const uploaded = [];
     const readForm = () => {
       st.name = $('#eN').value; st.category = $('#eC').value; st.description = $('#eD').value; st.price = toCents($('#eP').value); st.icon = $('#eI').value;
-      st.groups.forEach((g, i) => { g.name = $(`#gN${i}`).value; g.min_sel = +$(`#gMin${i}`).value; g.max_sel = +$(`#gMax${i}`).value;
+      st.groups.forEach((g, i) => { g.name = $(`#gN${i}`).value; g.min_sel = +$(`#gMin${i}`).value; g.max_sel = +$(`#gMax${i}`).value; g.pricing = $(`#gPr${i}`).value;
         g.options.forEach((o, k) => { o.name = $(`#o${i}_${k}`).value; o.price = toCents($(`#op${i}_${k}`).value || '0'); }); });
     };
     const drawEd = () => dialog(`<h2>${p ? 'Editar produto' : 'Novo produto'}</h2><form id="fEd" class="grid" novalidate>
@@ -1616,8 +1634,10 @@ async function pMenu(S, owner) {
         <span class="mut">JPG, PNG ou WebP. A foto é reduzida automaticamente antes de enviar.</span>
         ${st.image_path ? '<button type="button" class="ghost sm" id="rmImg">Remover foto</button>' : ''}</div></div>
       <div class="row between"><h3>Grupos de opções</h3><button type="button" class="ghost sm" id="addG">+ Grupo</button></div>
-      <p class="mut" style="margin:0">Mínimo 0 = opcional. Mínimo 1 e máximo 1 = escolha obrigatória de uma opção (ex.: tamanho). Máximo maior que 1 = várias escolhas (ex.: adicionais). O preço da opção soma ao preço base.</p>
+      <p class="mut" style="margin:0">Mínimo 0 = opcional. Mínimo 1 e máximo 1 = escolha obrigatória de uma opção (ex.: tamanho). Máximo maior que 1 = várias escolhas (ex.: adicionais). O preço da opção soma ao preço base.
+        <b>Pizza meio a meio:</b> preço base 0, um grupo "Sabores" com mínimo 1 e máximo 2 (ou 3, 4), o preço de cada sabor na opção e "cobrar o sabor mais caro". No pedido aparece "1/2 Calabresa, 1/2 Mussarela".</p>
       ${st.groups.map((g, i) => `<div class="ged"><div class="g3"><label>Nome do grupo<input id="gN${i}" value="${esc(g.name)}" placeholder="Ex.: Tamanho"></label><label>Mínimo<input id="gMin${i}" type="number" min="0" value="${g.min_sel}"></label><label>Máximo<input id="gMax${i}" type="number" min="1" value="${g.max_sel}"></label><button type="button" class="ghost sm" data-rg="${i}">Remover</button></div>
+        <label class="gpr">Como cobrar este grupo<select id="gPr${i}">${[['sum', 'Somar o preço das opções escolhidas'], ['max', 'Pizza meio a meio: cobrar o sabor mais caro'], ['avg', 'Pizza meio a meio: cobrar a média dos sabores']].map(([v, t]) => `<option value="${v}" ${(g.pricing || 'sum') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
         ${g.options.map((o, k) => `<div class="o2"><input id="o${i}_${k}" value="${esc(o.name)}" placeholder="Opção" aria-label="Nome da opção"><input id="op${i}_${k}" inputmode="decimal" value="${fromCents(o.price)}" aria-label="Preço adicional"><button type="button" class="ghost sm" data-ro="${i}_${k}" aria-label="Remover opção">×</button></div>`).join('')}
         <button type="button" class="ghost sm" data-ao="${i}">+ Opção</button></div>`).join('')}
       <div class="row between">${p ? '<button type="button" class="ghost" id="delP">Excluir produto</button>' : '<span></span>'}<span class="row"><button type="button" class="ghost" id="eX">Cancelar</button><button class="pri">Salvar</button></span></div></form>`, true);
@@ -1645,7 +1665,7 @@ async function pMenu(S, owner) {
       if (!Number.isInteger(st.price) || st.price < 0) throw new Error('Preço base inválido');
       if (st.groups.some(g => g.options.some(o => !Number.isInteger(o.price) || o.price < 0))) throw new Error('Preço de opção inválido');
       const body = { category: st.category, name: st.name, description: st.description, price: st.price, icon: st.icon, available: st.available, image_path: st.image_path,
-        groups: st.groups.map(g => ({ name: g.name, min_sel: g.min_sel, max_sel: g.max_sel, options: g.options.filter(o => o.name.trim()).map(o => ({ name: o.name, price: o.price })) })) };
+        groups: st.groups.map(g => ({ name: g.name, min_sel: g.min_sel, max_sel: g.max_sel, ...(g.pricing && g.pricing !== 'sum' ? { pricing: g.pricing } : {}), options: g.options.filter(o => o.name.trim()).map(o => ({ name: o.name, price: o.price })) })) };
       await rpc('save_product', { p_tenant: S.id, p_id: p?.id ?? null, p: body });
       // apaga do Storage as fotos que deixaram de ser usadas
       const unused = [...uploaded, p?.image_path].filter(x => x && x !== st.image_path);
@@ -1753,7 +1773,7 @@ async function pKitchenScreen(S) {
 /* ---------- lançar pedido (balcão, telefone, mesa) ---------- */
 async function pNewOrder(S) {
   const [rawP, zones] = await Promise.all([
-    q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id).eq('available', true)),
+    menuQ(c => sb.from('products').select(c).eq('tenant_id', S.id).eq('available', true)),
     q(sb.from('zones').select('id, name, fee').eq('tenant_id', S.id).order('name'))]);
   const products = sortMenu(rawP), DIST = S.delivery_mode === 'distance';
   const qs = new URLSearchParams(location.search), fromWaiter = qs.get('volta') === 'garcom', preTable = S.allow_tables ? qs.get('mesa') : null;
@@ -2280,7 +2300,7 @@ async function pTables(S) {
 async function pKiosk(S) {
   document.body.classList.add('kds-on', 'kiosk'); setColor(S.color); brand(S.name, S.logo_path);
   local.set('kioskLock', true);
-  const all = sortMenu(await q(sb.from('products').select(MENU_COLS).eq('tenant_id', S.id).eq('available', true)));
+  const all = sortMenu(await menuQ(c => sb.from('products').select(c).eq('tenant_id', S.id).eq('available', true)));
   const DONE_SECS = 10;
   let stage = 'start', cart = [], cat = null, name = '', away = false, done = null, idleT, warnT, backT;
   // Pagamento no totem: Pix na tela (se a loja usa Pix online) ou no caixa

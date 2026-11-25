@@ -465,3 +465,6 @@ body.kiosk .opts button{min-height:56px;font-size:17px}
 .ks-bar{width:100%;align-self:stretch;height:4px;border-radius:4px;background:#0001;overflow:hidden}
 .ks-bar i{display:block;height:100%;background:var(--red);transform-origin:left;animation:kback linear forwards}
 @keyframes kback{from{transform:scaleX(1)}to{transform:scaleX(0)}}
+
+.split-hint{margin:-4px 0 8px;font-size:13px}
+.ged .gpr{margin:6px 0 4px;font-size:13px}
