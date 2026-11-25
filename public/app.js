@@ -2820,6 +2820,53 @@ async function pTables(S) {
 }
 
 /* ---------- totem de autoatendimento ---------- */
+/* ---------- comprovante do totem ----------
+   Cada aparelho escolhe como imprimir (fica salvo só nele):
+   - 'browser': janela de impressão do navegador. No computador, o Chrome aberto com --kiosk --kiosk-printing imprime direto
+     na impressora padrão, sem janela. No iPad aparece a janela do AirPrint (o iOS não deixa imprimir sem ela).
+   - 'rawbt': Android com o app RawBT (impressora térmica Bluetooth/USB). O site manda o texto pronto (ESC/POS) e o app imprime. */
+const kioskPrintCfg = () => ({ mode: local.get('kioskPrint', 'off'), width: +local.get('kioskPaper', 58) === 80 ? 80 : 58 });
+const noAccent = t => String(t ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\x20-\x7E\n]/g, '');
+function kioskTicketLines(S, d, items, cols) {
+  const line = (l, r = '') => { l = noAccent(l); r = noAccent(r); const sp = Math.max(1, cols - l.length - r.length); return (l + ' '.repeat(sp) + r).length > cols ? [l.slice(0, cols), ' '.repeat(Math.max(0, cols - r.length)) + r] : [l + ' '.repeat(sp) + r]; };
+  const wrap = t => { const out = []; let cur = ''; for (const w of noAccent(t).split(' ')) { if ((cur + ' ' + w).trim().length > cols) { out.push(cur); cur = w; } else cur = (cur + ' ' + w).trim(); } if (cur) out.push(cur); return out; };
+  const L = [];
+  for (const it of items) { L.push(...line(`${it.qty}x ${it.name}`, brl(it.qty * it.unit).replace(/\s/g, ' '))); if (it.optText) L.push(...wrap('  ' + it.optText)); if (it.notes) L.push(...wrap('  Obs: ' + it.notes)); }
+  return { L, line, wrap };
+}
+// texto para impressora térmica (ESC/POS): senha grande, itens, total, forma de pagamento
+function kioskEscpos(S, d, items, cols) {
+  const { L, line, wrap } = kioskTicketLines(S, d, items, cols);
+  const E = '\x1b', G = '\x1d', dash = '-'.repeat(cols) + '\n';
+  let t = E + '@' + E + 'a\x01' + E + '!\x30' + noAccent(S.name).slice(0, Math.floor(cols / 2)) + '\n' + E + '!\x00';
+  t += 'SENHA\n' + G + '!\x33' + d.number + '\n' + G + '!\x00';
+  if (d.name) t += E + 'E\x01' + noAccent(d.name).slice(0, cols) + '\n' + E + 'E\x00';
+  t += E + 'a\x00' + dash + L.join('\n') + '\n' + dash;
+  t += E + 'E\x01' + line('TOTAL', brl(d.total).replace(/\s/g, ' ')).join('\n') + '\n' + E + 'E\x00';
+  t += line(d.paid ? `Pago: ${d.payment === 'Cartão no totem' ? 'cartao' : 'Pix'}` : 'Pagar no caixa').join('\n') + '\n';
+  t += noAccent(new Date().toLocaleString('pt-BR')) + '\n' + E + 'a\x01' + wrap(d.paid ? 'Aguarde: chamamos pelo numero no painel.' : 'Va ao caixa com esta senha.').join('\n') + '\n\n\n\n' + G + 'V\x42\x00';
+  return t;
+}
+function kioskPrint(S, d, items, force = false) {
+  const c = kioskPrintCfg();
+  if (c.mode === 'off' && !force) return false;
+  if (c.mode === 'rawbt') {
+    const bytes = kioskEscpos(S, d, items, c.width === 80 ? 48 : 32);
+    const b64 = btoa(bytes);
+    location.href = `intent:base64,${b64}#Intent;scheme=rawbt;package=ru.a402d.rawbtprinter;end;`;
+    return true;
+  }
+  $('#print').innerHTML = `<div class="tkt kt${c.width}"><div class="kt-c"><b class="big">${esc(S.name)}</b><div>SENHA</div><div class="kt-num">${d.number}</div>${d.name ? `<b>${esc(d.name)}</b>` : ''}</div><hr>
+    ${items.map(it => `<div class="li"><span>${it.qty}× ${esc(it.name)}</span><span>${brl(it.qty * it.unit)}</span></div>${it.optText ? `<div class="sub">${esc(it.optText)}</div>` : ''}${it.notes ? `<div class="sub">Obs: ${esc(it.notes)}</div>` : ''}`).join('')}<hr>
+    <div class="li"><b>TOTAL</b><b>${brl(d.total)}</b></div><div>${d.paid ? `Pago: ${d.payment === 'Cartão no totem' ? 'cartão' : 'Pix'}` : 'Pagar no caixa'}</div>
+    <div>${new Date().toLocaleString('pt-BR')}</div><div class="kt-c" style="margin-top:6px">${d.paid ? 'Aguarde: chamamos pelo número no painel.' : 'Vá ao caixa com esta senha.'}</div></div>`;
+  let ps = $('#ktPage'); if (!ps) { ps = document.createElement('style'); ps.id = 'ktPage'; document.head.appendChild(ps); }
+  ps.textContent = `@media print{@page{size:${c.width}mm auto;margin:2mm}}`;
+  window.addEventListener('afterprint', () => { ps.textContent = ''; }, { once: true });
+  setTimeout(() => window.print(), 50);
+  return true;
+}
+
 async function pKiosk(S) {
   document.body.classList.add('kds-on', 'kiosk'); setColor(S.color); brand(S.name, S.logo_path);
   local.set('kioskLock', true);
@@ -2888,6 +2935,7 @@ async function pKiosk(S) {
         <p>${done.paid ? 'Tudo certo! Agora é só aguardar: chamamos pelo número no painel.' : done.status === 'preparo' ? 'Já começamos a preparar. Pague no caixa e aguarde: chamamos pelo número.' : `Vá ao caixa, diga o número <b>${done.number}</b> e faça o pagamento. Depois é só aguardar a chamada.`}</p>
         <div class="ks-total"><span>Total</span><b>${brl(done.total)}</b></div>
         <button class="ks-cta" data-k="new">Fazer outro pedido</button>
+        ${kioskPrintCfg().mode !== 'off' ? '<button class="kw-link" data-k="reprint">Imprimir o comprovante de novo</button>' : ''}
         <p class="ks-back" id="kBack">Voltando ao início em <b>${DONE_SECS}</b> s</p><div class="ks-bar"><i style="animation-duration:${DONE_SECS}s"></i></div></div></div>`;
       // Volta sozinho para a tela inicial, mesmo que alguém toque na tela
       clearInterval(backT); let left = DONE_SECS;
@@ -2952,7 +3000,10 @@ async function pKiosk(S) {
       draw();   // atualiza o relógio
     }, 3000);
   };
-  const paid = () => { stopPix(); done = { ...done, paid: true }; stage = 'done'; cart = []; draw(); poke(); };
+  let printedFor = null;
+  const printTicket = (force = false) => { if (!done || (!force && printedFor === done.code)) return; printedFor = done.code;
+    try { kioskPrint(S, { ...done, name }, lastCart, force); } catch (e) { logError(e.message, 'impressão'); } };
+  const paid = () => { stopPix(); done = { ...done, paid: true }; stage = 'done'; cart = []; draw(); poke(); printTicket(); };
   // Cartão: a cobrança vai para a maquininha pelo Mercado Pago; confere o pedido a cada 3 s e o Mercado Pago a cada 6 s
   const startCard = async r => {
     done = r; stage = 'card'; clearInterval(pixPoll); card = { sent: false }; draw(); poke();
@@ -2995,6 +3046,7 @@ async function pKiosk(S) {
     const b = e.target.closest('button,[data-k]'); if (!b) return;
     const k = b.dataset.k;
     if (k === 'exit') return exit();
+    if (k === 'reprint') return printTicket(true);
     if (k === 'cardretry') return startCard(done);
     if (k === 'counter') { if (stage === 'card') await pixCall({ action: 'point_cancel', code: done.code }).catch(() => {}); const st = await rpc('kiosk_pay_at_counter', { p_tenant: S.id, p_code: done.code }); stopPix(); if (st === 'paid') return paid(); done = { ...done, status: st }; cart = []; stage = 'done'; draw(); return poke(); }
     if (k === 'tocard' || k === 'topix') {
@@ -3020,7 +3072,7 @@ async function pKiosk(S) {
         items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: (away ? (c.notes ? `Para levar · ${c.notes}` : 'Para levar') : c.notes).slice(0, 140) })) } });
       lastCart = cart.slice();
       if (r.status === 'pagamento') { cart = []; return r.payment === 'Cartão no totem' ? startCard(r) : startPix(r); }
-      done = r; cart = []; stage = 'done'; draw(); poke();
+      done = r; cart = []; stage = 'done'; draw(); poke(); printTicket();
   };
   app.onsubmit = attempt(async e => {
     e.preventDefault();
@@ -3406,6 +3458,15 @@ async function pConfig(S) {
       ${st.pix_online ? `<label>E-mail para os comprovantes do Pix do totem<input id="kioskEmail" type="email" maxlength="120" value="${esc(local.get('kioskEmail', '') || ME?.user?.email || '')}" style="max-width:320px"></label>
       <p class="mut" style="margin:0">Com o Pix online ligado, o cliente pode pagar no próprio totem pelo QR Code. O Mercado Pago pede um e-mail em cada cobrança: como o cliente não digita, usamos este.</p>` : '<p class="mut" style="margin:0">Ligue o <b>Pix online</b> (em Pagamentos) para o cliente poder pagar no próprio totem.</p>'}
       ${ME.role === 'owner' ? '<div id="pointBox" class="pointbox"></div>' : ''}
+      <h4 style="margin:14px 0 2px">Comprovante para o cliente (neste aparelho)</h4>
+      <p class="mut" style="margin:0">Depois do pagamento, o totem imprime a senha com os itens e o total. A escolha fica salva só neste aparelho.</p>
+      <div class="two" style="gap:10px"><label>Como imprimir<select id="kpMode">${[['off', 'Não imprimir'], ['browser', 'Computador ou iPad (impressora do sistema)'], ['rawbt', 'Android com impressora térmica (app RawBT)']].map(([v, t]) => `<option value="${v}" ${kioskPrintCfg().mode === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+        <label>Largura do papel<select id="kpW"><option value="58" ${kioskPrintCfg().width === 58 ? 'selected' : ''}>58 mm</option><option value="80" ${kioskPrintCfg().width === 80 ? 'selected' : ''}>80 mm</option></select></label></div>
+      <details class="mut kp-help"><summary>Como deixar a impressão automática</summary>
+        <p><b>Computador (Windows):</b> instale a impressora térmica e deixe-a como <b>padrão</b>. Crie um atalho do Chrome com <code>--kiosk --kiosk-printing</code> no final do destino e abra o totem por ele: o comprovante sai direto, sem janela.</p>
+        <p><b>Android:</b> instale o app <b>RawBT</b> (Play Store), conecte a impressora térmica (Bluetooth ou USB) e escolha-a no app. Depois toque em "Imprimir teste" aqui. Na primeira vez, o Android pergunta se o Chrome pode abrir o RawBT: marque "sempre".</p>
+        <p><b>iPad:</b> o iPad não deixa imprimir sem a janela do AirPrint. A janela aparece e o cliente toca em "Imprimir". Se preferir não incomodar o cliente, deixe "Não imprimir": o número aparece grande na tela e a comanda sai na cozinha.</p></details>
+      <button type="button" class="ghost sm" id="kpTest">Imprimir teste</button>
       <button class="pri">Abrir o totem neste aparelho</button></form>
     <form class="panel" id="fCall" hidden><h3>Painel de chamada</h3><p class="mut" style="margin:0">Tela para TV voltada aos clientes, com os pedidos de retirada sendo preparados e prontos. <a href="/chamada/${esc(st.slug)}" target="_blank" rel="noopener">Abrir o painel</a></p>
       <label class="chk"><input type="checkbox" id="cnOn"> Mostrar o nome do cliente junto do número</label>
@@ -3539,6 +3600,12 @@ async function pConfig(S) {
   };
   const refreshBrand = async () => { await loadMe(); setColor(ME.tenant.color); brand(ME.tenant.name, ME.tenant.logo_path); };
   app.onclick = attempt(async e => {
+    if (e.target.id === 'kpTest') {
+      local.set('kioskPrint', $('#kpMode').value); local.set('kioskPaper', +$('#kpW').value);
+      if ($('#kpMode').value === 'off') return toast('Escolha como imprimir para fazer o teste');
+      kioskPrint(ME.tenant, { number: 123, name: 'Teste', total: 3990, paid: true, payment: 'Pix online' }, [{ qty: 1, name: 'Produto de teste', unit: 3990, optText: 'Opção de exemplo', notes: '' }], true);
+      return toast('Teste enviado para a impressora');
+    }
     // botões de envio de formulário são tratados no onsubmit; os demais (fora de formulários) aqui
     const b = e.target.closest('button'); if (!b || (b.type === 'submit' && b.closest('form'))) return;
     if (b.id === 'shLogoRm') { await q(sb.from('tenants').update({ logo_path: null }).eq('id', S.id)); if (st0?.logo_path) sb.storage.from(BUCKET).remove([st0.logo_path]).catch(() => {}); await refreshBrand(); toast('Logotipo removido'); return draw(); }
@@ -3614,6 +3681,7 @@ async function pConfig(S) {
       await refreshBrand();
     }
     if (id === 'fKiosk') { const pin = $('#kioskPin').value.trim(); if (pin && !/^\d{4,8}$/.test(pin)) throw new Error('O PIN deve ter de 4 a 8 números'); local.set('kioskPin', pin);
+      local.set('kioskPrint', $('#kpMode').value); local.set('kioskPaper', +$('#kpW').value);
       if ($('#kioskEmail')) { const em = $('#kioskEmail').value.trim(); if (em && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(em)) throw new Error('E-mail inválido'); local.set('kioskEmail', em); }
       return go('/painel/totem'); }
     if (id === 'fCall') await q(sb.from('tenants').update({ call_names: $('#cnOn').checked }).eq('id', S.id));

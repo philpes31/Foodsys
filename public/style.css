@@ -514,3 +514,12 @@ body.kiosk .opts button{min-height:56px;font-size:17px}
 .link-tag{align-self:center;font-size:14px;cursor:help}
 .kw-img{position:relative}
 .kw-save{position:absolute;left:8px;top:8px;background:#1f8a4c;color:#fff;font-weight:800;font-size:12px;padding:3px 8px;border-radius:99px}
+
+/* Comprovante do totem */
+.kp-help p{margin:6px 0}
+@media print{
+  .tkt.kt58{width:48mm;font-size:11px}
+  .tkt.kt80{width:72mm}
+  .tkt .kt-c{text-align:center}
+  .tkt .kt-num{font:800 44px/1 system-ui,sans-serif;margin:4px 0}
+}
