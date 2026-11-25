@@ -49,6 +49,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    36. `20261218000000_chamados.sql` (aba Ajuda: chamados de suporte com print e diagnóstico; respostas em /plataforma/chamados)
    37. `20261219000000_avisos_loja_erros.sql` (aviso de pedido novo no aparelho da equipe; monitor de erros em /plataforma/erros)
    38. `20261220000000_fiado.sql` (fiado: contas de clientes com limite, recebimentos no caixa, estorno no cancelamento)
+   39. `20261221000000_search_path.sql` (verificador de segurança do Supabase: search_path fixo nas funções auxiliares)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
