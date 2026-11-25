@@ -252,7 +252,9 @@ test('conta de totem só faz pedido pelo totem: não vê pedidos, clientes nem c
   sql(`select add_member('${pizzaId}', 'totem@pizza.t', 'totem')`, U.pizza);
   for (const t of ['orders', 'order_items', 'cashback_ledger', 'gift_cards', 'reservations', 'expenses', 'cash_sessions', 'couriers', 'blocked_phones']) nothing(`select count(*) from ${t}`, T);
   assert.equal(sql(`select is_member('${pizzaId}')`, T), 'f');
-  assert.deepEqual(json(`tenant_settings('${pizzaId}')`, T), { point_terminal_id: null });
+  sql(`update tenants set pix_online = false, point_terminal_id = null where id = '${pizzaId}'`);
+  assert.deepEqual(json(`tenant_settings('${pizzaId}')`, T), { point_terminal_id: null, kiosk_counter: true });   // sem Pix nem maquininha: caixa liberado
+  denied(`select set_kiosk_counter('${pizzaId}', false)`, T);
   denied(`select set_category_availability('${pizzaId}', 'Bebidas', false)`, T);
   denied(`select gift_card_create('${pizzaId}', 5000, '', '', '', 'Dinheiro', 365)`, T);
   const p = simpleProduct(pizzaId);

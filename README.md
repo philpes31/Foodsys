@@ -51,6 +51,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    38. `20261220000000_fiado.sql` (fiado: contas de clientes com limite, recebimentos no caixa, estorno no cancelamento)
    39. `20261221000000_search_path.sql` (verificador de segurança do Supabase: search_path fixo nas funções auxiliares)
    40. `20261222000000_combos.sql` (combos com produtos do cardápio: estoque, ficha técnica, item esgotado some, economia na loja)
+   41. `20261223000000_totem_so_paga_no_totem.sql` (totem: pagamento no próprio totem, Pix ou maquininha; "pagar no caixa" só se o dono liberar)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login

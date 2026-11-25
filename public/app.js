@@ -2832,9 +2832,16 @@ async function pKiosk(S) {
   const kioskStatus = code => rpc('kiosk_status', { p_tenant: S.id, p_code: code }).then(r => r || {})
     .catch(() => q(sb.from('orders').select('status, payment_status').eq('public_code', code).single()));
   // Maquininha Mercado Pago Point ligada ao totem (configurada pelo dono)
-  let POINT = null;
-  tset(S.id, 'point_terminal_id').then(r => { POINT = r.point_terminal_id || null; if (stage === 'name') draw(); }).catch(() => {});
-  const payOpts = () => [...(S.pix_online ? [['pix', 'Pix aqui no totem']] : []), ...(POINT ? [['cartao', 'Cartão na maquininha']] : []), ['caixa', 'No caixa']];
+  // COUNTER: a loja deixa pagar no caixa pelo totem? (padrão: não, quando há Pix online ou maquininha)
+  let POINT = null, COUNTER = true, lastCart = [];
+  tset(S.id, 'point_terminal_id').then(r => { POINT = r.point_terminal_id || null; COUNTER = r.kiosk_counter ?? true;
+    if (pay === 'caixa' && !COUNTER) pay = S.pix_online ? 'pix' : POINT ? 'cartao' : 'caixa';
+    if (stage === 'name') draw(); }).catch(() => {});
+  const payOpts = () => [...(S.pix_online ? [['pix', 'Pix aqui no totem']] : []), ...(POINT ? [['cartao', 'Cartão na maquininha']] : []), ...(COUNTER || (!S.pix_online && !POINT) ? [['caixa', 'No caixa']] : [])];
+  // troca de forma no meio do pagamento: cancela o pedido atual e refaz com a outra forma
+  const altPay = () => [stage === 'pix' && POINT ? '<button class="kw-link" data-k="tocard">Prefiro pagar com cartão</button>' : '',
+    stage === 'card' && S.pix_online ? '<button class="kw-link" data-k="topix">Prefiro pagar com Pix</button>' : '',
+    COUNTER ? '<button class="kw-link" data-k="counter">Prefiro pagar no caixa</button>' : ''].join('');
   const items = () => all.filter(p => p.stock !== 0 && catOpen(S, p.category, new Date()));
   const cats = () => [...new Set(items().map(p => p.category))];
   const total = () => cart.reduce((t, c) => t + c.unit * c.qty, 0), count = () => cart.reduce((t, c) => t + c.qty, 0);
@@ -2850,7 +2857,7 @@ async function pKiosk(S) {
         <div class="ks-hero">${logo('ks-logo')}<h1>${esc(S.name)}</h1>
           ${os.open ? `<p class="ks-sub">Faça seu pedido aqui e retire no balcão</p><button class="ks-cta" data-k="begin">Toque para começar</button>`
             : `<p class="ks-closed">Estamos fechados agora</p>${os.label ? `<p class="ks-sub">${esc(os.label)}</p>` : ''}`}</div>
-        <ol class="ks-steps"><li><b>1</b><span>Escolha os itens</span></li><li><b>2</b><span>Confirme com seu nome</span></li><li><b>3</b><span>Pague no caixa e aguarde a chamada</span></li></ol>
+        <ol class="ks-steps"><li><b>1</b><span>Escolha os itens</span></li><li><b>2</b><span>Confirme com seu nome</span></li><li><b>3</b><span>${payOpts().some(([k]) => k === 'caixa') && payOpts().length === 1 ? 'Pague no caixa e aguarde a chamada' : payOpts().some(([k]) => k === 'caixa') ? 'Pague aqui ou no caixa e aguarde a chamada' : 'Pague aqui no totem e aguarde a chamada'}</span></li></ol>
         <button class="kexit" data-k="exit" aria-label="Sair do totem">🔒 Sair do totem</button></div>`;
       return;
     }
@@ -2861,7 +2868,7 @@ async function pKiosk(S) {
         ${pix?.qrBase64 ? `<img class="ks-qr" src="data:image/png;base64,${esc(pix.qrBase64)}" alt="QR Code do Pix">` : pix?.qr ? `<img class="ks-qr" src="https://api.qrserver.com/v1/create-qr-code/?size=400x400&margin=8&data=${encodeURIComponent(pix.qr)}" alt="QR Code do Pix">` : pix === null && pixPoll ? '<div class="ks-wait">Gerando o QR Code…</div>' : '<div class="ks-wait">Gerando o QR Code…</div>'}
         <p>Abra o app do seu banco, escolha <b>Pix → Ler QR Code</b> e aponte para a tela.</p>
         <p class="ks-status"><span class="ks-dot"></span>Aguardando o pagamento${left != null ? ` · ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` : ''}</p>
-        <div class="ks-pix-actions"><button class="kw-link" data-k="counter">Prefiro pagar no caixa</button><button class="kw-link" data-k="pixcancel">Cancelar pedido</button></div></div></div>`;
+        <div class="ks-pix-actions">${altPay()}<button class="kw-link" data-k="pixcancel">Cancelar pedido</button></div></div></div>`;
       return;
     }
     if (stage === 'card') {
@@ -2872,7 +2879,7 @@ async function pKiosk(S) {
         ${failed ? `<p class="ks-fail">${esc(card.msg || 'O pagamento não foi concluído.')}</p><button class="ks-cta" data-k="cardretry">Tentar de novo</button>`
           : `<p>${card?.sent ? 'Aproxime, insira ou passe o cartão na <b>maquininha ao lado</b> e siga as instruções na tela dela.' : 'Enviando a cobrança para a maquininha…'}</p>
             <p class="ks-status"><span class="ks-dot"></span>${card?.sent ? 'Aguardando o pagamento' : 'Conectando'}</p>`}
-        <div class="ks-pix-actions"><button class="kw-link" data-k="counter">Prefiro pagar no caixa</button><button class="kw-link" data-k="pixcancel">Cancelar pedido</button></div></div></div>`;
+        <div class="ks-pix-actions">${altPay()}<button class="kw-link" data-k="pixcancel">Cancelar pedido</button></div></div></div>`;
       return;
     }
     if (stage === 'done') {
@@ -2904,6 +2911,7 @@ async function pKiosk(S) {
         <div class="kw-foot2">
           ${stage === 'name' ? `<form id="kF" class="kw-form"><label>Seu nome, para chamarmos<input id="kName" value="${esc(name)}" required maxlength="40" autocomplete="off" placeholder="Ex.: Ana"></label>
             <div class="kw-seg"><button type="button" data-away="0" class="${away ? '' : 'on'}">Comer aqui</button><button type="button" data-away="1" class="${away ? 'on' : ''}">Para levar</button></div>
+            ${payOpts().length === 1 && payOpts()[0][0] !== 'caixa' ? `<div class="kw-paylbl">Pagamento aqui no totem: <b>${payOpts()[0][1].replace(' aqui no totem', '')}</b></div>` : ''}
             ${payOpts().length > 1 ? `<div class="kw-paylbl">Como você quer pagar?</div><div class="kw-seg kw-seg${payOpts().length}">${payOpts().map(([k, l]) => `<button type="button" data-pay="${k}" class="${pay === k ? 'on' : ''}">${l}</button>`).join('')}</div>
               <p class="kw-note">${pay === 'pix' ? 'O QR Code aparece na tela. Pagou, o pedido é confirmado na hora.' : pay === 'cartao' ? 'Crédito ou débito na maquininha ao lado do totem. Aprovou, o pedido é confirmado na hora.' : 'No caixa: dinheiro, Pix ou cartão.'}</p>` : '<p class="kw-note">Pagamento no caixa: dinheiro, Pix ou cartão.</p>'}</form>` : ''}
           <div class="kw-total"><span>Total</span><b>${brl(total())}</b></div>
@@ -2989,6 +2997,12 @@ async function pKiosk(S) {
     if (k === 'exit') return exit();
     if (k === 'cardretry') return startCard(done);
     if (k === 'counter') { if (stage === 'card') await pixCall({ action: 'point_cancel', code: done.code }).catch(() => {}); const st = await rpc('kiosk_pay_at_counter', { p_tenant: S.id, p_code: done.code }); stopPix(); if (st === 'paid') return paid(); done = { ...done, status: st }; cart = []; stage = 'done'; draw(); return poke(); }
+    if (k === 'tocard' || k === 'topix') {
+      const code = done.code, wasCard = stage === 'card'; stopPix();
+      if (wasCard) await pixCall({ action: 'point_cancel', code }).catch(() => {});
+      await rpc('kiosk_cancel', { p_tenant: S.id, p_code: code }).catch(() => {});
+      pay = k === 'tocard' ? 'cartao' : 'pix'; cart = lastCart.slice(); return placeOrder();
+    }
     if (k === 'pixcancel') { if (!sure(b)) return; return cancelPix(false); }
     if (b.dataset.pay) { name = $('#kName')?.value || name; pay = b.dataset.pay; return draw(); }
     if (k === 'begin' && openState(S).open) { stage = 'menu'; draw(); return poke(); }
@@ -3001,15 +3015,20 @@ async function pKiosk(S) {
     if (b.dataset.p) { const p = all.find(x => x.id === +b.dataset.p); return openBuilder(p, add); }
     if (b.dataset.q != null) { const c = cart[+b.dataset.q]; c.qty += +b.dataset.d; if (c.qty <= 0) cart.splice(+b.dataset.q, 1); return draw(); }
   });
+  const placeOrder = async () => {
+      const r = await rpc('kiosk_place_order', { p_tenant: S.id, p: { customer: { name }, fulfillment: 'pickup', payment: pay === 'pix' && S.pix_online ? 'Pix online' : pay === 'cartao' && POINT ? 'Cartão no totem' : 'Pagar no caixa',
+        items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: (away ? (c.notes ? `Para levar · ${c.notes}` : 'Para levar') : c.notes).slice(0, 140) })) } });
+      lastCart = cart.slice();
+      if (r.status === 'pagamento') { cart = []; return r.payment === 'Cartão no totem' ? startCard(r) : startPix(r); }
+      done = r; cart = []; stage = 'done'; draw(); poke();
+  };
   app.onsubmit = attempt(async e => {
     e.preventDefault();
     name = $('#kName').value.trim(); if (!name) throw new Error('Digite seu nome');
+    if (!payOpts().length) throw new Error('O totem está sem forma de pagamento. Chame um atendente.');
+    if (!payOpts().some(([k2]) => k2 === pay)) pay = payOpts()[0][0];
     const btn = $('#kSend'); btn.disabled = true; btn.textContent = 'Enviando…';
-    try {
-      const r = await rpc('kiosk_place_order', { p_tenant: S.id, p: { customer: { name }, fulfillment: 'pickup', payment: pay === 'pix' && S.pix_online ? 'Pix online' : pay === 'cartao' && POINT ? 'Cartão no totem' : 'Pagar no caixa',
-        items: cart.map(c => ({ productId: c.productId, qty: c.qty, optionIds: c.optionIds, notes: (away ? (c.notes ? `Para levar · ${c.notes}` : 'Para levar') : c.notes).slice(0, 140) })) } });
-      if (r.status === 'pagamento') { cart = []; return r.payment === 'Cartão no totem' ? startCard(r) : startPix(r); }
-      done = r; cart = []; stage = 'done'; draw(); poke();
+    try { await placeOrder();
     } finally { const b2 = $('#kSend'); if (b2) { b2.disabled = false; b2.textContent = 'Confirmar pedido'; } }
   });
   const tick = setInterval(() => { if (stage === 'start') draw(); }, 60000);   // abre/fecha sozinho pelo horário
@@ -3314,7 +3333,8 @@ let pointList = null;
 async function pointBox() {
   const box = $('#pointBox'); if (!box) return;
   const S = ME.tenant;
-  let cur; try { cur = (await tset(S.id, 'point_terminal_id')).point_terminal_id; } catch { box.innerHTML = ''; return; }
+  let cur, ts; try { ts = await tset(S.id, 'point_terminal_id'); cur = ts.point_terminal_id; } catch { box.innerHTML = ''; return; }
+  const hasPay = S.pix_online || !!cur, counterSet = !!ts.kiosk_counter_set;
   const sel = pointList?.find(t => t.id === cur);
   box.innerHTML = `<h4 style="margin:6px 0 2px">Cartão no totem (maquininha Mercado Pago Point)</h4>
     <p class="mut" style="margin:0">Com uma <b>Point Smart</b> ou <b>Point Pro 2</b> da mesma conta do Mercado Pago da loja, o cliente paga com cartão no totem: o sistema manda o valor para a maquininha e confirma sozinho. A maquininha precisa estar no <b>modo integrado (PDV)</b>.</p>
@@ -3322,7 +3342,16 @@ async function pointBox() {
     ${pointList ? (pointList.length ? `<div class="grid" style="gap:6px">${pointList.map(t => `<div class="ci"><span><b class="mono">${esc(t.id)}</b><br><small class="mut">${t.mode === 'PDV' ? 'Modo integrado (PDV)' : `Modo ${esc(t.mode || '?')}: precisa ativar o modo integrado`}</small></span>
         <span class="row" style="flex-wrap:nowrap">${t.mode !== 'PDV' ? `<button type="button" class="ghost sm" data-ptsetup="${esc(t.id)}">Ativar modo integrado</button>` : ''}${t.id === cur ? '<span class="badge b-g">Escolhida</span>' : `<button type="button" class="pri sm" data-ptuse="${esc(t.id)}">Usar no totem</button>`}</span></div>`).join('')}</div>`
       : '<p class="mut" style="margin:0">Nenhuma maquininha Point encontrada nesta conta do Mercado Pago.</p>') : ''}
-    <span class="row"><button type="button" class="ghost sm" id="ptList">${pointList ? 'Buscar de novo' : 'Buscar maquininhas da conta'}</button>${cur ? '<button type="button" class="ghost sm" id="ptOff">Não usar maquininha</button>' : ''}</span>`;
+    <span class="row"><button type="button" class="ghost sm" id="ptList">${pointList ? 'Buscar de novo' : 'Buscar maquininhas da conta'}</button>${cur ? '<button type="button" class="ghost sm" id="ptOff">Não usar maquininha</button>' : ''}</span>
+    ${'kiosk_counter_set' in ts ? `<h4 style="margin:14px 0 2px">Onde o cliente paga</h4>
+      ${hasPay ? `<p class="mut" style="margin:0">${counterSet ? 'O totem oferece Pix/cartão e também <b>pagar no caixa</b>.' : 'O cliente <b>paga no próprio totem</b> (Pix ou maquininha); "pagar no caixa" não aparece.'}</p>`
+        : '<p class="mut" style="margin:0">Sem Pix online e sem maquininha, o totem só pode deixar o pagamento para o caixa. Ligue o Pix online ou escolha uma maquininha para o cliente pagar no totem.</p>'}
+      <label class="chk"><input type="checkbox" id="kcOn" ${counterSet ? 'checked' : ''}> Permitir "Pagar no caixa" no totem</label>` : ''}`;
+  box.onchange = attempt(async e => {
+    if (e.target.id !== 'kcOn') return;
+    await rpc('set_kiosk_counter', { p_tenant: S.id, p_on: e.target.checked });
+    toast(e.target.checked ? 'O totem volta a oferecer "pagar no caixa"' : 'Agora o cliente paga no próprio totem'); return pointBox();
+  });
   box.onclick = attempt(async e => {
     const b = e.target.closest('button'); if (!b) return;
     if (b.id === 'ptList') { b.disabled = true; try { pointList = (await pixCall({ action: 'point_terminals', tenant: S.id })).terminals; } finally { b.disabled = false; } return pointBox(); }
@@ -3372,7 +3401,7 @@ async function pConfig(S) {
       <label class="chk"><input type="checkbox" id="aaOn"> Aceitar pedidos automaticamente</label>
       <button class="pri">Salvar</button></form>
     <form class="panel" id="fKiosk"><h3>Totem de autoatendimento</h3>
-      <p class="mut" style="margin:0">Transforme um tablet em totem: o cliente escolhe os produtos, digita o nome e paga no caixa. O pedido chega no Preparo marcado como <b>Totem</b>. No tablet, entre com uma conta de papel <b>Totem</b> (cadastre em <b>Configurações → Equipe</b>): ela só faz pedidos pelo totem e não vê o resto do painel.</p>
+      <p class="mut" style="margin:0">Transforme um tablet em totem: o cliente escolhe os produtos, digita o nome e paga ali mesmo com Pix ou cartão na maquininha (ou no caixa, se você liberar). O pedido chega no Preparo marcado como <b>Totem</b>. No tablet, entre com uma conta de papel <b>Totem</b> (cadastre em <b>Configurações → Equipe</b>): ela só faz pedidos pelo totem e não vê o resto do painel.</p>
       <label>PIN para sair do totem (opcional, fica só neste aparelho)<input id="kioskPin" type="password" inputmode="numeric" maxlength="8" pattern="[0-9]{4,8}" value="${esc(local.get('kioskPin', ''))}" style="max-width:200px" autocomplete="off"></label>
       ${st.pix_online ? `<label>E-mail para os comprovantes do Pix do totem<input id="kioskEmail" type="email" maxlength="120" value="${esc(local.get('kioskEmail', '') || ME?.user?.email || '')}" style="max-width:320px"></label>
       <p class="mut" style="margin:0">Com o Pix online ligado, o cliente pode pagar no próprio totem pelo QR Code. O Mercado Pago pede um e-mail em cada cobrança: como o cliente não digita, usamos este.</p>` : '<p class="mut" style="margin:0">Ligue o <b>Pix online</b> (em Pagamentos) para o cliente poder pagar no próprio totem.</p>'}
@@ -3708,7 +3737,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
   '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql',
-  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql', '20261219000000_avisos_loja_erros.sql', '20261220000000_fiado.sql', '20261221000000_search_path.sql'];
+  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql', '20261219000000_avisos_loja_erros.sql', '20261220000000_fiado.sql', '20261221000000_search_path.sql', '20261222000000_combos.sql', '20261223000000_totem_so_paga_no_totem.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };
