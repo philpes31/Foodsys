@@ -302,3 +302,31 @@ test('abuso: força bruta de vale-presente e enxurrada de reservas são barradas
     assert.ok(blocked, 'pedidos de reserva em massa são bloqueados');
   }
 });
+
+test('chamados de ajuda: outra loja, visitante e prints alheios não passam; enxurrada é barrada', () => {
+  const id = sql(`select support_open('${pizzaId}', 'Erro no caixa', 'erro', 'Detalhes com telefone do cliente 11999990000', null, null)`, U.pizza);
+  nothing(`select count(*) from support_tickets`, U.burger);
+  nothing(`select count(*) from support_messages`, U.burger);
+  nothing(`select count(*) from support_tickets`, U.stranger);
+  denied(`select count(*) from support_tickets`, null);
+  denied(`select support_thread(${id})`, U.burger);
+  denied(`select support_thread(${id})`, U.stranger);
+  denied(`select support_reply(${id}, 'oi', null)`, U.stranger);
+  denied(`select support_set_status(${id}, 'resolvido')`, U.burger);
+  denied(`select support_open('${pizzaId}', 'Falso', 'erro', 'Chamado em nome de outra loja', null, null)`, U.burger);
+  denied(`select support_list('${pizzaId}')`, U.burger);
+  denied(`select support_admin_list(null)`, U.pizza);
+  denied(`select support_open('${pizzaId}', 'Visitante', 'erro', 'tentativa sem login', null, null)`, null);
+  // escrita direta nas tabelas é recusada até para a própria loja
+  denied(`update support_tickets set status = 'respondido' where id = ${id}`, U.pizza);
+  denied(`insert into support_messages (ticket_id, tenant_id, from_support, body) values (${id}, '${pizzaId}', true, 'resposta falsa do suporte')`, U.pizza);
+  // prints: cada um só envia e vê na pasta da sua loja; pasta "suporte" só a plataforma
+  sql(`insert into storage.objects (bucket_id, name) values ('support-files', '${pizzaId}/print.png')`, U.pizza);
+  denied(`insert into storage.objects (bucket_id, name) values ('support-files', '${pizzaId}/plantado.png')`, U.burger);
+  denied(`insert into storage.objects (bucket_id, name) values ('support-files', 'suporte/falso.png')`, U.pizza);
+  nothing(`select count(*) from storage.objects where bucket_id = 'support-files'`, U.burger);
+  assert.equal(sql(`select count(*) from storage.objects where bucket_id = 'support-files'`, U.admin), '1');
+  assert.equal(sql(`select public from storage.buckets where id = 'support-files'`), 'f');
+  // enxurrada de chamados
+  assert.throws(() => { for (let i = 0; i < 12; i++) sql(`select support_open('${pizzaId}', 'Spam ${i}', 'erro', 'mensagem repetida', null, null)`, U.staff); }, /Muitos chamados/);
+});

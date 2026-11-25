@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -618,7 +618,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 test('checagem: schema_status mostra todas as migrações em dia (só para quem tem conta)', () => {
   fails(`select public.schema_status()`, null, /permission denied/);
   const st = json(`public.schema_status()`, U.pizza);
-  assert.equal(st.length, 35);
+  assert.equal(st.length, 36);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, U.pizza).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1565,4 +1565,43 @@ test('pizza meio a meio: cobra o sabor mais caro ou a média, mostra 1/2 e gasta
   // cópia para outra unidade leva a forma de cobrança junto
   assert.equal(sql(`select count(*) from information_schema.columns where table_name = 'option_groups' and column_name = 'pricing'`), '1');
   sql(`delete from products where id = ${id}`);
+});
+
+test('chamados de ajuda: loja abre, suporte responde, avisos de resposta nova e permissões', () => {
+  const diag = `'${JSON.stringify({ page: '/painel/caixa', agent: 'Teste', errors: [{ at: 'x', msg: 'Falhou' }] })}'::jsonb`;
+  fails(`select support_open('${pizzaId}', 'Oi', 'erro', 'Não abre o caixa', null, null)`, U.pizza, /assunto/);
+  fails(`select support_open('${pizzaId}', 'Caixa não abre', 'outro', 'Não abre o caixa', null, null)`, U.pizza, /Tipo/);
+  fails(`select support_open('${pizzaId}', 'Caixa não abre', 'erro', 'Não abre', '${burgerId}/x.png', null)`, U.pizza, /Anexo inválido/);
+  fails(`select support_open('${pizzaId}', 'Caixa não abre', 'erro', 'Não abre o caixa', null, null)`, U.burger, /Sem permissão/);
+  const id = sql(`select support_open('${pizzaId}', 'Caixa não abre', 'erro', 'Cliquei em abrir caixa e deu erro', '${pizzaId}/print-1.png', ${diag})`, U.pizza);
+  assert.equal(sql(`select support_admin_unread()`, U.admin), '1');
+  assert.equal(sql(`select support_admin_unread()`, U.pizza), '0');   // quem não é da plataforma não vê nada
+  fails(`select support_admin_list(null)`, U.pizza, /Sem permissão/);
+  const adm = JSON.parse(sql(`select support_admin_list('aberto')::text`, U.admin));
+  assert.ok(adm.some(t => t.id === +id && t.unread && t.store === 'Forno da Vila'));
+  // o suporte lê com diagnóstico e e-mail de quem abriu; a loja não recebe o diagnóstico de volta
+  const th = JSON.parse(sql(`select support_thread(${id})::text`, U.admin));
+  assert.equal(th.diagnostics.page, '/painel/caixa'); assert.ok(th.openedBy);
+  assert.equal(th.messages[0].attachment, `${pizzaId}/print-1.png`);
+  assert.equal(sql(`select support_admin_unread()`, U.admin), '0');   // abriu = leu
+  fails(`select support_reply(${id}, 'oi', '${pizzaId}/x.png')`, U.admin, /Anexo inválido/);   // suporte anexa só na pasta dele
+  sql(`select support_reply(${id}, 'Já corrigimos, pode testar?', 'suporte/resp-1.png')`, U.admin);
+  assert.equal(sql(`select status || ',' || last_from from support_tickets where id = ${id}`), 'respondido,suporte');
+  assert.equal(sql(`select support_unread('${pizzaId}')`, U.pizza), '1');
+  assert.equal(sql(`select support_unread('${pizzaId}')`, U.burger), '0');
+  const mine = JSON.parse(sql(`select support_thread(${id})::text`, U.pizza));
+  assert.equal(mine.diagnostics, null); assert.equal(mine.openedBy, null);
+  assert.deepEqual(mine.messages.map(m => m.fromSupport), [false, true]);
+  assert.equal(sql(`select support_unread('${pizzaId}')`, U.pizza), '0');
+  // atendente também abre e responde; outra loja não enxerga nem responde
+  sql(`select support_reply(${id}, 'Funcionou, obrigado!', null)`, U.staff);
+  assert.equal(sql(`select status from support_tickets where id = ${id}`), 'aberto');
+  fails(`select support_reply(${id}, 'invasão', null)`, U.burger, /não encontrado/);
+  fails(`select support_thread(${id})`, U.burger, /não encontrado/);
+  assert.equal(sql(`select count(*) from support_tickets`, U.burger), '0');
+  assert.equal(sql(`select count(*) from support_messages`, U.burger), '0');
+  fails(`select support_set_status(${id}, 'respondido')`, U.pizza, /Sem permissão/);
+  sql(`select support_set_status(${id}, 'resolvido')`, U.pizza);
+  assert.equal(JSON.parse(sql(`select support_list('${pizzaId}')::text`, U.pizza))[0].status, 'resolvido');
+  fails(`insert into support_tickets (tenant_id, subject) values ('${pizzaId}', 'direto')`, U.pizza, /permission denied/);
 });

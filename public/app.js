@@ -92,7 +92,15 @@ addEventListener('appinstalled', () => { installEvt = null; $('#installBtn').hid
 $('#installBtn')?.addEventListener('click', async () => { if (!installEvt) return; installEvt.prompt(); await installEvt.userChoice.catch(() => {}); installEvt = null; $('#installBtn').hidden = true; });
 { const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) && !navigator.standalone; if ($('#iosHint')) $('#iosHint').hidden = !ios; }
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
-const attempt = fn => async (...a) => { try { await fn(...a); } catch (e) { toast(e.message); } };
+// Diagnóstico automático: últimos erros vistos nesta aba (vão junto do chamado, se a pessoa deixar)
+const ERRLOG = [];
+function logError(msg, src) {
+  ERRLOG.push({ at: new Date().toISOString(), page: location.pathname, msg: String(msg || '').slice(0, 300), src: src || '' });
+  if (ERRLOG.length > 15) ERRLOG.shift();
+}
+window.addEventListener('error', e => logError(e.message, `${(e.filename || '').split('/').pop()}:${e.lineno || ''}`));
+window.addEventListener('unhandledrejection', e => logError(e.reason?.message || e.reason, 'promessa'));
+const attempt = fn => async (...a) => { try { await fn(...a); } catch (e) { logError(e.message, 'ação'); toast(e.message); } };
 const sure = b => { if (b.dataset.sure) return true; b.dataset.sure = 1; b.textContent = 'Confirmar?'; return false; };
 
 function art(ic, c) {
@@ -409,9 +417,9 @@ async function render() {
     await loadMe();
     if (p[0] === 'comecar') { if (!ME) return go('/entrar/cadastro'); return await vStart(); }
     if (p[0] === 'painel') { if (!ME) return go('/entrar'); if (!ME.tenant) return go(ME.isAdmin ? '/plataforma' : '/comecar'); return await vPanel(p[1] || 'pedidos'); }
-    if (p[0] === 'plataforma') { if (!ME?.isAdmin) return go('/entrar'); return await vPlatform(); }
+    if (p[0] === 'plataforma') { if (!ME?.isAdmin) return go('/entrar'); return p[1] === 'chamados' ? await vSupportAdmin() : await vPlatform(); }
     return vHome();
-  } catch (e) { app.innerHTML = `<div class="panel auth"><h2>Ops</h2><p>${esc(e.message)}</p><a class="btn" href="/" data-link>Voltar ao início</a></div>`; }
+  } catch (e) { logError(e.message, 'tela'); app.innerHTML = `<div class="panel auth"><h2>Ops</h2><p>${esc(e.message)}</p><a class="btn" href="/" data-link>Voltar ao início</a></div>`; }
 }
 
 function vSetup() {
@@ -1135,13 +1143,176 @@ async function vTrack(code) {
 async function vPanel(tab) {
   const S = ME.tenant, owner = ME.role === 'owner';
   setColor(S.color); brand(S.name, S.logo_path);
-  const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ...(S.allow_tables ? [['garcom', 'Garçom'], ['mesas', 'Mesas']] : []), ['cardapio', 'Cardápio'], ['estoque', 'Estoque'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['unidades', 'Unidades'], ['config', 'Configurações']] : [])];
+  const tabs = [['pedidos', S.seg?.prep || 'Preparo'], ['entregas', 'Entregas'], ...(S.allow_tables ? [['garcom', 'Garçom'], ['mesas', 'Mesas']] : []), ['cardapio', 'Cardápio'], ['estoque', 'Estoque'], ['caixa', 'Caixa'], ...(owner ? [['clientes', 'Clientes'], ['relatorios', 'Relatórios'], ['unidades', 'Unidades'], ['config', 'Configurações']] : []), ['ajuda', 'Ajuda']];
   if (tab === 'kds') return pKitchenScreen(S);
   if (tab === 'totem' || ME.role === 'totem') { if (tab !== 'totem') history.replaceState(null, '', '/painel/totem'); return pKiosk(S); }
   if (!tabs.some(t => t[0] === tab) && tab !== 'novo') tab = 'pedidos';
   $('#banner').innerHTML = billingBanner(S, owner);
+  rpc('support_unread', { p_tenant: S.id }).then(n => { const a = $('a[href="/painel/ajuda"]'); if (n && a && !a.querySelector('.nbadge')) a.insertAdjacentHTML('beforeend', ` <span class="nbadge">${n}</span>`); }).catch(() => {});
   header(tabs.map(([k, n]) => `<a href="/painel/${k}" data-link class="${k === tab ? 'on' : ''}">${esc(n)}</a>`).join('') + `<a href="/loja/${S.slug}" target="_blank" rel="noopener">Ver loja ↗</a>` + (ME.isAdmin ? '<a href="/plataforma" data-link>Plataforma</a>' : ''));
-  await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, caixa: pCash, novo: pNewOrder, clientes: pCustomers, relatorios: pReports, unidades: pUnits, config: pConfig, mesas: pTables, garcom: pWaiter, estoque: pStock })[tab](S, owner);
+  await ({ pedidos: pOrders, entregas: pDelivery, cardapio: pMenu, caixa: pCash, novo: pNewOrder, clientes: pCustomers, relatorios: pReports, unidades: pUnits, config: pConfig, mesas: pTables, garcom: pWaiter, estoque: pStock, ajuda: pHelp })[tab](S, owner);
+}
+
+/* ================= AJUDA: chamados de suporte ================= */
+const diagnostics = () => ({ page: location.pathname, agent: navigator.userAgent, screen: `${innerWidth}×${innerHeight}`, online: navigator.onLine,
+  store: ME?.tenant?.slug || null, role: ME?.role || null, at: new Date().toISOString(), errors: ERRLOG.slice(-10) });
+const SUP_BUCKET = 'support-files';
+const SUP_CAT = { erro: 'Erro no sistema', duvida: 'Dúvida', financeiro: 'Assinatura e pagamento', sugestao: 'Sugestão' };
+// mesma situação, contada do ponto de vista de quem lê
+const supStatus = (s, admin) => ({
+  aberto: admin ? ['Aguardando você', 'b-a'] : ['Aguardando o suporte', 'b-a'],
+  respondido: admin ? ['Respondido', 'b-g'] : ['Respondido', 'b-g'],
+  resolvido: ['Resolvido', ''] })[s] || [s, ''];
+const supWhen = d => new Date(d).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+
+// Campo de print: escolher arquivo ou colar (Ctrl+V) a imagem da área de transferência
+function shotField(id) {
+  return `<div class="shot" id="${id}"><label class="ghost btn sm" for="${id}F">Anexar print</label><input type="file" id="${id}F" accept="image/png,image/jpeg,image/webp" hidden>
+    <span class="mut shot-name">ou cole a imagem aqui com Ctrl+V</span><button type="button" class="ghost sm shot-rm" hidden>Tirar</button></div>`;
+}
+function bindShot(root, id, state) {
+  const box = root.querySelector('#' + id), name = box.querySelector('.shot-name'), rm = box.querySelector('.shot-rm');
+  const set = f => { state.file = f; name.textContent = f ? `📎 ${f.name || 'print colado'} (${Math.ceil(f.size / 1024)} KB)` : 'ou cole a imagem aqui com Ctrl+V'; rm.hidden = !f; };
+  box.querySelector('input').onchange = e => set(e.target.files[0] || null);
+  rm.onclick = () => { box.querySelector('input').value = ''; set(null); };
+  root.addEventListener('paste', e => { const f = [...(e.clipboardData?.files || [])].find(x => x.type.startsWith('image/')); if (f) { e.preventDefault(); set(f); } });
+}
+async function uploadShot(file, folder) {
+  if (!file) return null;
+  if (!file.type.startsWith('image/')) throw new Error('O anexo precisa ser uma imagem (print da tela)');
+  const blob = await shrinkImage(file, 1800, 'image/jpeg');
+  const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+  await q(sb.storage.from(SUP_BUCKET).upload(path, blob, { contentType: 'image/jpeg' }));
+  return path;
+}
+async function shotUrls(paths) {
+  const out = {};
+  await Promise.all(paths.filter(Boolean).map(async p => {
+    try { const { data } = await sb.storage.from(SUP_BUCKET).createSignedUrl(p, 3600); if (data?.signedUrl) out[p] = data.signedUrl; } catch {}
+  }));
+  return out;
+}
+
+function openTicketDialog(S, onDone, preset = {}) {
+  const st = { file: null };
+  dialog(`<h2>Abrir chamado</h2>
+    <p class="mut" style="margin-top:-6px">Conte o que aconteceu. A resposta chega na aba <b>Ajuda</b>.</p>
+    <form id="tkF">
+      <label>Tipo<select id="tkC">${Object.entries(SUP_CAT).map(([k, v]) => `<option value="${k}" ${k === (preset.category || 'erro') ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+      <label>Assunto<input id="tkS" maxlength="120" required placeholder="Ex.: Não consigo fechar o caixa" value="${esc(preset.subject || '')}"></label>
+      <label>Descrição<textarea id="tkB" rows="6" maxlength="4000" required placeholder="O que você estava fazendo, o que esperava que acontecesse e o que aconteceu. Se apareceu uma mensagem de erro, copie aqui.">${esc(preset.body || '')}</textarea></label>
+      <div class="lbl">Print da tela <span class="mut">(opcional, ajuda muito)</span></div>${shotField('tkShot')}
+      <label class="chk"><input type="checkbox" id="tkD" checked> Enviar informações técnicas para ajudar a achar o erro</label>
+      <details class="mut diag-peek"><summary>O que é enviado</summary>Página atual, navegador, tamanho da tela e os últimos erros que apareceram nesta aba
+        (${ERRLOG.length ? `${ERRLOG.length} registrado(s)` : 'nenhum registrado'}). Nenhuma senha ou dado de pagamento.</details>
+      <div class="row end" style="margin-top:14px"><button type="button" class="ghost" data-close>Cancelar</button><button class="pri" id="tkGo">Enviar chamado</button></div>
+    </form>`);
+  const body = $('#dlgBody'); bindShot(body, 'tkShot', st);
+  body.onsubmit = attempt(async e => {
+    e.preventDefault(); const btn = $('#tkGo'); btn.disabled = true; btn.textContent = 'Enviando…';
+    try {
+      const att = await uploadShot(st.file, S.id);
+      const id = await rpc('support_open', { p_tenant: S.id, p_subject: $('#tkS').value, p_category: $('#tkC').value, p_body: $('#tkB').value,
+        p_attachment: att, p_diag: $('#tkD').checked ? diagnostics() : null });
+      closeDlg(); toast(`Chamado #${id} aberto. Respondemos por aqui.`); onDone(id);
+    } finally { btn.disabled = false; btn.textContent = 'Enviar chamado'; }
+  });
+}
+
+// Conversa de um chamado. A mesma tela serve à loja e ao suporte (admin = true).
+async function ticketView(id, { admin, back, folder }) {
+  let last = '', st = { file: null };
+  const draw = async (keepText) => {
+    const t = await rpc('support_thread', { p_ticket: id });
+    const sig = JSON.stringify([t.status, t.messages.length]);
+    if (keepText && sig === last) return; last = sig;
+    const urls = await shotUrls(t.messages.map(m => m.attachment));
+    const [stl, stc] = supStatus(t.status, admin);
+    const typed = $('#tkR')?.value || '';
+    const diag = admin && t.diagnostics ? `<details class="panel diag"><summary><b>Informações técnicas</b> ${t.diagnostics.errors?.length ? `<span class="badge b-r">${t.diagnostics.errors.length} erro(s)</span>` : ''}</summary>
+        <p class="mut" style="margin:8px 0">Página <code>${esc(t.diagnostics.page || '—')}</code> · tela ${esc(t.diagnostics.screen || '—')} · ${t.diagnostics.online === false ? 'sem internet' : 'on-line'} · papel ${esc(t.diagnostics.role || '—')}<br>${esc(t.diagnostics.agent || '')}</p>
+        ${(t.diagnostics.errors || []).map(e => `<div class="ci"><span><code>${esc(e.msg)}</code><br><span class="mut">${esc(e.page || '')} ${esc(e.src || '')}</span></span><span class="mut">${e.at ? supWhen(e.at) : ''}</span></div>`).join('') || '<p class="mut">Nenhum erro registrado na aba.</p>'}</details>` : '';
+    app.innerHTML = `<p><a href="#" id="tkBack">← ${admin ? 'Todos os chamados' : 'Meus chamados'}</a></p>
+      <div class="row between" style="align-items:flex-start;gap:12px"><div><h2 style="margin:0">${esc(t.subject)}</h2>
+        <p class="mut" style="margin:4px 0 0">#${t.id} · ${esc(SUP_CAT[t.category] || t.category)} · aberto em ${supWhen(t.createdAt)}${admin ? ` · <a href="/loja/${esc(t.store.slug)}" target="_blank" rel="noopener">${esc(t.store.name)}</a>${t.store.phone ? ` · ${esc(t.store.phone)}` : ''}${t.openedBy ? ` · <a href="mailto:${esc(t.openedBy)}">${esc(t.openedBy)}</a>` : ''}` : ''}</p></div>
+        <span class="badge ${stc}">${stl}</span></div>
+      ${diag}
+      <div class="thread">${t.messages.map(m => { const fromMe = admin ? m.fromSupport : !m.fromSupport;
+        return `<div class="msg ${fromMe ? 'me' : 'them'} ${m.fromSupport ? 'sup' : ''}"><div class="who">${m.fromSupport ? 'Suporte' : admin ? esc(t.store.name) : (m.mine ? 'Você' : 'Sua equipe')} · ${supWhen(m.at)}</div>
+          <div class="txt">${esc(m.body).replace(/\n/g, '<br>')}</div>
+          ${m.attachment ? (urls[m.attachment] ? `<a href="${esc(urls[m.attachment])}" target="_blank" rel="noopener"><img class="shot-img" src="${esc(urls[m.attachment])}" alt="Print anexado"></a>` : '<span class="mut">📎 print anexado</span>') : ''}</div>`; }).join('')}</div>
+      <form class="panel reply" id="tkRF"><label>${t.status === 'resolvido' ? 'Escrever de novo reabre o chamado' : 'Responder'}<textarea id="tkR" rows="3" maxlength="4000" placeholder="${admin ? 'Resposta para a loja' : 'Escreva aqui'}"></textarea></label>
+        ${shotField('tkRShot')}
+        <div class="row between" style="margin-top:10px">${t.status === 'resolvido' ? '<button type="button" class="ghost sm" data-st="aberto">Reabrir</button>' : '<button type="button" class="ghost sm" data-st="resolvido">Marcar como resolvido</button>'}
+          <button class="pri" id="tkSend">Enviar</button></div></form>`;
+    $('#tkR').value = typed; st = { file: null }; bindShot($('#tkRF'), 'tkRShot', st);
+    const th = $('.thread'); th.lastElementChild?.scrollIntoView({ block: 'nearest' });
+    $('#tkRF').onsubmit = attempt(async e => {
+      e.preventDefault(); const b = $('#tkSend'); b.disabled = true;
+      try {
+        const att = await uploadShot(st.file, folder);
+        await rpc('support_reply', { p_ticket: id, p_body: $('#tkR').value, p_attachment: att });
+        $('#tkR').value = ''; last = ''; await draw(false);
+      } finally { if (b.isConnected) b.disabled = false; }
+    });
+  };
+  app.onclick = attempt(async e => {
+    if (e.target.closest('#tkBack')) { e.preventDefault(); return back(); }
+    const s = e.target.closest('button[data-st]'); if (s) { await rpc('support_set_status', { p_ticket: id, p_status: s.dataset.st }); toast(s.dataset.st === 'resolvido' ? 'Chamado resolvido' : 'Chamado reaberto'); last = ''; return draw(false); }
+  });
+  await draw(false);
+  const h = setInterval(() => draw(true).catch(() => {}), 20000);
+  cleanup = () => { clearInterval(h); app.onclick = null; };
+}
+
+async function pHelp(S) {
+  const list = async () => {
+    cleanup?.(); cleanup = null;
+    let items;
+    try { items = await rpc('support_list', { p_tenant: S.id }); }
+    catch (e) { if (/support_list|function|schema cache/i.test(e.message)) { app.innerHTML = '<div class="panel"><h2>Ajuda</h2><p>Os chamados ainda não estão ativos: falta rodar a migração <code>20261218000000_chamados.sql</code> no Supabase.</p></div>'; return; } throw e; }
+    app.innerHTML = `<div class="row between"><div><h2 style="margin:0">Ajuda</h2><p class="lead" style="margin:4px 0 0">Tire dúvidas ou avise sobre um erro. A equipe de suporte responde por aqui.</p></div>
+        <button class="pri" id="tkNew">Abrir chamado</button></div>
+      <div class="panel" style="margin-top:16px">${items.length ? items.map(t => { const [l, c] = supStatus(t.status, false);
+        return `<a class="tk-row ci" href="#" data-tk="${t.id}"><span><b>${esc(t.subject)}</b> ${t.unread ? '<span class="badge b-g">Resposta nova</span>' : ''}<br>
+          <span class="mut">#${t.id} · ${esc(SUP_CAT[t.category] || t.category)} · atualizado em ${supWhen(t.updatedAt)}</span></span><span class="badge ${c}">${l}</span></a>`; }).join('')
+        : `<div class="empty"><p><b>Nenhum chamado ainda.</b></p><p class="mut">Se algo não funcionar como esperado, abra um chamado. Um print da tela ajuda muito:
+            aperte <b>Print Screen</b> (ou <b>Win+Shift+S</b>) e cole no chamado com <b>Ctrl+V</b>.</p></div>`}</div>`;
+    app.onclick = attempt(async e => {
+      if (e.target.closest('#tkNew')) return openTicketDialog(S, open);
+      const r = e.target.closest('[data-tk]'); if (r) { e.preventDefault(); return open(+r.dataset.tk); }
+    });
+    cleanup = () => { app.onclick = null; };
+    if (location.hash === '#novo') { history.replaceState(null, '', location.pathname); openTicketDialog(S, open); }
+  };
+  const open = async id => { cleanup?.(); cleanup = null; await ticketView(id, { admin: false, back: list, folder: S.id }); $('a[href="/painel/ajuda"] .nbadge')?.remove(); };
+  await list();
+}
+
+// Caixa de chamados da plataforma
+async function vSupportAdmin() {
+  let filter = 'aberto';
+  setColor('#1d1716'); brand('Balcão');
+  header('<a href="/plataforma" data-link>Plataforma</a><a class="on" href="/plataforma/chamados" data-link>Chamados</a>' + (ME.tenant ? '<a href="/painel" data-link>Minha loja</a>' : ''));
+  const badge = () => rpc('support_admin_unread').then(n => { const a = $('a[href="/plataforma/chamados"]'); a?.querySelector('.nbadge')?.remove(); if (n && a) a.insertAdjacentHTML('beforeend', ` <span class="nbadge">${n}</span>`); }).catch(() => {});
+  const list = async () => {
+    cleanup?.(); cleanup = null;
+    const items = await rpc('support_admin_list', { p_status: filter });
+    const F = [['aberto', 'Aguardando resposta'], ['respondido', 'Respondidos'], ['resolvido', 'Resolvidos'], [null, 'Todos']];
+    app.innerHTML = `<h2>Chamados</h2><p class="lead">Pedidos de ajuda das lojas. Responda por aqui: a loja vê a resposta na aba Ajuda.</p>
+      <div class="row" style="margin-bottom:12px">${F.map(([k, n]) => `<button class="sm ${k === filter ? 'pri' : 'ghost'}" data-f="${k ?? ''}">${n}</button>`).join('')}</div>
+      <div class="panel">${items.length ? items.map(t => { const [l, c] = supStatus(t.status, true);
+        return `<a class="tk-row ci" href="#" data-tk="${t.id}"><span><b>${esc(t.subject)}</b> ${t.unread ? '<span class="badge b-a">Novo</span>' : ''}<br>
+          <span class="mut">#${t.id} · ${esc(t.store)} · ${esc(SUP_CAT[t.category] || t.category)} · ${t.messages} mensagem(ns) · ${supWhen(t.updatedAt)}</span></span><span class="badge ${c}">${l}</span></a>`; }).join('')
+        : '<p class="mut">Nenhum chamado aqui.</p>'}</div>`;
+    app.onclick = attempt(async e => {
+      const f = e.target.closest('button[data-f]'); if (f) { filter = f.dataset.f || null; return list(); }
+      const r = e.target.closest('[data-tk]'); if (r) { e.preventDefault(); cleanup?.(); cleanup = null; return ticketView(+r.dataset.tk, { admin: true, back: list, folder: 'suporte' }); }
+    });
+    cleanup = () => { app.onclick = null; };
+    badge();
+  };
+  await list();
 }
 
 function billingBanner(t, owner) {
@@ -3185,7 +3356,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
   '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql',
-  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql'];
+  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };
@@ -3211,7 +3382,8 @@ async function pushSetupDialog(after) {
 async function vPlatform() {
   let hDays = 30;
   setColor('#1d1716'); brand('Balcão');
-  header('<a class="on" href="/plataforma" data-link>Plataforma</a>' + (ME.tenant ? '<a href="/painel" data-link>Minha loja</a>' : ''));
+  header('<a class="on" href="/plataforma" data-link>Plataforma</a><a href="/plataforma/chamados" data-link>Chamados</a>' + (ME.tenant ? '<a href="/painel" data-link>Minha loja</a>' : ''));
+  rpc('support_admin_unread').then(n => { const a = $('a[href="/plataforma/chamados"]'); if (n && a) a.insertAdjacentHTML('beforeend', ` <span class="nbadge">${n}</span>`); }).catch(() => {});
   const plans = await q(sb.from('plans').select('name').order('sort'));
   const draw = async () => {
     const [o, sch, h] = await Promise.all([rpc('platform_overview'), rpc('schema_status').catch(() => null), rpc('platform_health', { p_days: hDays }).catch(() => null)]);

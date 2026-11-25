@@ -468,3 +468,24 @@ body.kiosk .opts button{min-height:56px;font-size:17px}
 
 .split-hint{margin:-4px 0 8px;font-size:13px}
 .ged .gpr{margin:6px 0 4px;font-size:13px}
+
+/* Ajuda: chamados */
+.nbadge{display:inline-block;min-width:18px;padding:0 5px;border-radius:99px;background:var(--red);color:#fff;font-size:11px;font-weight:800;line-height:18px;text-align:center;vertical-align:1px}
+.tk-row{text-decoration:none;color:inherit;align-items:center}
+.tk-row:hover b{text-decoration:underline}
+.shot{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px;border:1px dashed var(--line);border-radius:12px;margin:4px 0 10px}
+.shot .btn{cursor:pointer;margin:0}
+.lbl{font-weight:600;font-size:14px;margin:6px 0 2px}
+.chk{display:flex;gap:8px;align-items:center;font-weight:500}
+.chk input{width:auto;margin:0}
+.diag-peek{font-size:13px;margin:4px 0 0}
+.thread{display:flex;flex-direction:column;gap:10px;margin:16px 0}
+.msg{max-width:min(620px,88%);padding:10px 14px;border-radius:14px;background:var(--soft);border:1px solid var(--line)}
+.msg.me{align-self:flex-end;background:#fff}
+.msg.sup{border-left:4px solid var(--red)}
+.msg .who{font-size:12px;color:var(--mut,#777);margin-bottom:4px;font-weight:600}
+.msg .txt{white-space:normal;overflow-wrap:anywhere}
+.shot-img{display:block;max-width:100%;max-height:320px;margin-top:8px;border-radius:10px;border:1px solid var(--line)}
+.diag{margin:14px 0;padding:12px 16px}
+.diag summary{cursor:pointer}
+.reply textarea{width:100%}
