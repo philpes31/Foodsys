@@ -47,6 +47,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    34. `20261216000000_seguranca_2.sql` (teste de segurança 2: configurações internas só para a equipe, conta de totem, avisos só para serviços conhecidos)
    35. `20261217000000_meio_a_meio.sql` (pizza meio a meio: cobrar o sabor mais caro ou a média; "1/2 Calabresa" no pedido; estoque fracionado)
    36. `20261218000000_chamados.sql` (aba Ajuda: chamados de suporte com print e diagnóstico; respostas em /plataforma/chamados)
+   37. `20261219000000_avisos_loja_erros.sql` (aviso de pedido novo no aparelho da equipe; monitor de erros em /plataforma/erros)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -187,6 +188,10 @@ O que já está pronto:
 
 **Ajuda (chamados):** dono e atendentes abrem chamados na aba **Ajuda** do painel, com print da tela (anexar ou colar com Ctrl+V) e, se deixarem marcado, um diagnóstico automático (página, navegador e os últimos erros da aba). A administração responde em **Plataforma → Chamados**; o número ao lado da aba avisa quando há resposta nova. Os prints ficam num bucket privado (`support-files`), visível só para a loja e para a plataforma.
 
+**Aviso de pedido novo no celular:** na tela de Pedidos, toque em **🔔 Avisar neste aparelho** (dono ou atendente). Quando entrar pedido pela loja online, totem ou mesa, o aparelho recebe uma notificação mesmo com o painel fechado; Pix online avisa quando o pagamento é confirmado. Pedidos lançados pela equipe não avisam. Precisa dos avisos no celular configurados na Plataforma. No iPhone, abra o painel pela Tela de Início.
+
+**Monitor de erros:** erros inesperados no navegador (painel, loja online, acompanhamento) são registrados sozinhos e aparecem em **Plataforma → Erros**, agrupados por mensagem, com quantas vezes e em quais lojas. "Marcar resolvido" tira da lista até acontecer de novo. Avisos de validação ("Escreva um assunto") e falta de internet não entram.
+
 - **Impressão da comanda:** na tela de preparo, o botão **Imprimir** abre a impressão do navegador já no formato 80 mm. Escolha a impressora térmica e, nas configurações de impressão, desmarque "Cabeçalhos e rodapés". Marque **Imprimir comanda ao aceitar** para imprimir automaticamente ao aceitar o pedido. No Chrome, dá para pular a janela de impressão abrindo o navegador com `--kiosk-printing`.
 - **Entregador:** em **Configurações → Entregadores → Enviar link**, cada entregador recebe pelo WhatsApp um link próprio. Ele abre no celular, sem senha, e mostra as entregas dele com endereço, valor a cobrar ou "já pago", e os botões de mapa, WhatsApp, ligar e **Entreguei**. **Novo link** desativa o anterior (use quando um entregador sair).
 - **Clientes:** a aba **Clientes** lista quem já pediu, com número de pedidos, total gasto e último pedido. Clientes que não pedem há mais de 30 dias aparecem como "sumido", e um botão de WhatsApp manda uma mensagem pronta para chamar de volta. Dá para baixar a lista em planilha (CSV).
@@ -251,7 +256,7 @@ O que já está pronto:
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 131 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 134 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;

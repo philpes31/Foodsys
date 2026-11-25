@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql', '20261219000000_avisos_loja_erros.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -618,7 +618,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 test('checagem: schema_status mostra todas as migrações em dia (só para quem tem conta)', () => {
   fails(`select public.schema_status()`, null, /permission denied/);
   const st = json(`public.schema_status()`, U.pizza);
-  assert.equal(st.length, 36);
+  assert.equal(st.length, 37);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, U.pizza).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1604,4 +1604,72 @@ test('chamados de ajuda: loja abre, suporte responde, avisos de resposta nova e 
   sql(`select support_set_status(${id}, 'resolvido')`, U.pizza);
   assert.equal(JSON.parse(sql(`select support_list('${pizzaId}')::text`, U.pizza))[0].status, 'resolvido');
   fails(`insert into support_tickets (tenant_id, subject) values ('${pizzaId}', 'direto')`, U.pizza, /permission denied/);
+});
+
+test('aviso de pedido novo no aparelho da equipe: só pedidos de fora, Pix ao confirmar, equipe atual', () => {
+  sql(`update tenants set is_open = true, auto_hours = false, billing_status = 'free', auto_accept = false where id = '${pizzaId}'`);
+  const S = x => `'${JSON.stringify(x)}'::jsonb`;
+  const dev = n => ({ endpoint: `https://fcm.googleapis.com/fcm/send/equipe${n}`, keys: { p256dh: 'C'.repeat(87), auth: 'b'.repeat(22) } });
+  fails(`select staff_push_subscribe('${pizzaId}', ${S(dev(1))})`, U.burger, /Sem permissão/);
+  fails(`select staff_push_subscribe('${pizzaId}', ${S(dev(1))})`, null, /permission denied/);
+  fails(`select staff_push_subscribe('${pizzaId}', ${S({ ...dev(1), endpoint: 'https://127.0.0.1/x' })})`, U.pizza, /não suportado/);
+  assert.equal(sql(`select staff_push_subscribe('${pizzaId}', ${S(dev(1))})`, U.pizza), 't');
+  assert.equal(sql(`select staff_push_subscribe('${pizzaId}', ${S(dev(2))})`, U.staff), 't');
+  assert.deepEqual(json(`staff_push_state('${pizzaId}', '${dev(1).endpoint}')`, U.pizza), { on: true, devices: 2 });
+  fails(`select * from staff_push_subs`, U.pizza, /permission denied/);
+  const p = menu('forno-da-vila').find(x => x.name === 'Água sem gás');
+  const before = +sql(`select coalesce(max(id), 0) from push_queue`);
+  const r = order('forno-da-vila', { customer: { name: 'Maria Souza', phone: '11944443333' }, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 2 }] });
+  const q = json(`(select jsonb_agg(jsonb_build_object('id', id, 'title', title, 'body', body, 'url', url, 'audience', audience)) from push_queue where id > ${before})`);
+  assert.equal(q.length, 1); assert.equal(q[0].audience, 'loja'); assert.equal(q[0].url, '/painel/pedidos');
+  assert.match(q[0].title, new RegExp(`^Novo pedido #\\d+ · R\\$ \\d+,\\d\\d$`)); assert.match(q[0].body, /Maria S\. · Retirada · Dinheiro/);
+  const t = json(`push_take(${q[0].id})`, 'service');
+  assert.equal(t.subs.length, 2); assert.ok(t.subs.every(s => s.id < 0));
+  // atendente que saiu da loja deixa de receber; aparelho vencido é apagado pelo id negativo
+  sql(`delete from memberships where tenant_id = '${pizzaId}' and user_id = '${U.staff}'`);
+  const r2 = order('forno-da-vila', { customer: { name: 'João', phone: '11944443334' }, fulfillment: 'pickup', payment: 'Dinheiro', items: [{ productId: p.id, qty: 1 }] });
+  const q2 = sql(`select max(id) from push_queue where audience = 'loja'`);
+  const t2 = json(`push_take(${q2})`, 'service');
+  assert.equal(t2.subs.length, 1);
+  sql(`select push_drop(${t2.subs[0].id})`, 'service');
+  assert.equal(sql(`select count(*) from staff_push_subs where tenant_id = '${pizzaId}' and endpoint = '${dev(1).endpoint}'`), '0');
+  sql(`insert into memberships (tenant_id, user_id, role) values ('${pizzaId}', '${U.staff}', 'staff') on conflict do nothing`);
+  // pedido lançado pela equipe (balcão) não avisa; mudança de status comum também não
+  const n0 = +sql(`select count(*) from push_queue where audience = 'loja'`);
+  sql(`update orders set channel = 'balcao' where public_code = '${r2.code}'`);
+  sql(`update orders set status = 'preparo' where public_code = '${r2.code}'`);
+  assert.equal(+sql(`select count(*) from push_queue where audience = 'loja'`), n0);
+  // Pix online: avisa quando sai de "pagamento"
+  sql(`update orders set status = 'pagamento', channel = 'online' where public_code = '${r.code}'`);
+  assert.equal(+sql(`select count(*) from push_queue where audience = 'loja'`), n0);
+  sql(`update orders set status = 'novo' where public_code = '${r.code}'`);
+  assert.equal(+sql(`select count(*) from push_queue where audience = 'loja'`), n0 + 1);
+  sql(`select staff_push_unsubscribe('${pizzaId}', '${dev(2).endpoint}')`, U.staff);
+  assert.equal(json(`staff_push_state('${pizzaId}', '${dev(2).endpoint}')`, U.staff).devices, 0);
+});
+
+test('monitor de erros: registra sem login, agrupa por mensagem, só a plataforma lê e marca resolvido', () => {
+  sql(`delete from client_errors`);
+  sql(`select log_client_error('${pizzaId}', 'Cannot read properties of undefined (reading ''total'') at 123', 'app.js:812', '/painel/caixa', 'Chrome')`, U.pizza);
+  sql(`select log_client_error('${pizzaId}', 'Cannot read properties of undefined (reading ''total'') at 456', 'app.js:812', '/painel/caixa', 'Chrome')`, U.staff);
+  sql(`select log_client_error('${burgerId}', 'Cannot read properties of undefined (reading ''total'') at 9', 'app.js:812', '/painel/caixa', 'Safari')`, U.burger);
+  sql(`select log_client_error(null, 'Falhou o mapa', 'app.js:90', '/loja/forno-da-vila', 'Firefox')`, null);
+  sql(`select log_client_error('00000000-0000-0000-0000-000000000001', 'x de loja inexistente', '', '/pedido/X', '')`, null);
+  sql(`select log_client_error(null, '', '', '', '')`, null);   // vazio é ignorado
+  fails(`select * from client_errors`, U.pizza, /permission denied/);
+  fails(`select platform_errors(7, false)`, U.pizza, /Sem permissão/);
+  assert.equal(sql(`select platform_errors_open()`, U.pizza), '0');
+  const e = json(`platform_errors(7, false)`, U.admin);
+  assert.equal(e.length, 3);
+  const burgerAlive = sql(`select count(*) from tenants where id = '${burgerId}'`) === '1';   // outro teste pode ter apagado a loja
+  assert.equal(e[0].count, 3); assert.equal(e[0].stores, burgerAlive ? 2 : 1); assert.deepEqual(e[0].areas, ['painel']);
+  assert.ok(e[0].storeNames.includes('Forno da Vila'));
+  assert.equal(e.find(x => x.msg === 'x de loja inexistente').stores, 0);   // loja inexistente não é gravada
+  assert.equal(sql(`select platform_errors_open()`, U.admin), '3');
+  sql(`select platform_error_resolve('${e[0].fingerprint}')`, U.admin);
+  assert.equal(json(`platform_errors(7, true)`, U.admin).length, 2);
+  // acontece de novo: volta a aparecer
+  sql(`select log_client_error('${pizzaId}', 'Cannot read properties of undefined (reading ''total'') at 7', 'app.js:812', '/painel/caixa', 'Chrome')`, U.pizza);
+  assert.equal(json(`platform_errors(7, true)`, U.admin).length, 3);
+  fails(`select platform_error_resolve('x')`, U.pizza, /Sem permissão/);
 });

@@ -97,6 +97,20 @@ const ERRLOG = [];
 function logError(msg, src) {
   ERRLOG.push({ at: new Date().toISOString(), page: location.pathname, msg: String(msg || '').slice(0, 300), src: src || '' });
   if (ERRLOG.length > 15) ERRLOG.shift();
+  reportError(msg, src);
+}
+// Monitor de erros: erros inesperados (não os avisos de validação, como "Escreva um assunto") vão para a plataforma.
+// Cada mensagem vai uma vez por visita, no máximo 8 por página, e nada sai quando está sem internet.
+const ERR_SENT = new Set();
+const ERR_NOISE = /ResizeObserver loop|^Script error\.?$|Failed to fetch|NetworkError|Load failed|AbortError|The user aborted|Sem permissão para avisos|Notification|play\(\) request/i;
+function reportError(msg, src) {
+  try {
+    msg = String(msg || '').slice(0, 300);
+    if (src === 'ação' || (src === 'tela' && /não encontrad|Sem permissão|inválid|expirad|encerrad|suspens|não está/i.test(msg)) || !msg || ERR_NOISE.test(msg) || !navigator.onLine || /extension:\/\//.test(src || '') || ERR_SENT.size >= 8 || ERR_SENT.has(msg)) return;
+    if (typeof sb === 'undefined' || !sb) return;
+    ERR_SENT.add(msg);
+    sb.rpc('log_client_error', { p_tenant: ME?.tenant?.id || null, p_msg: msg, p_src: String(src || '').slice(0, 120), p_page: location.pathname, p_agent: navigator.userAgent.slice(0, 300) }).then(() => {}, () => {});
+  } catch {}
 }
 window.addEventListener('error', e => logError(e.message, `${(e.filename || '').split('/').pop()}:${e.lineno || ''}`));
 window.addEventListener('unhandledrejection', e => logError(e.reason?.message || e.reason, 'promessa'));
@@ -417,7 +431,7 @@ async function render() {
     await loadMe();
     if (p[0] === 'comecar') { if (!ME) return go('/entrar/cadastro'); return await vStart(); }
     if (p[0] === 'painel') { if (!ME) return go('/entrar'); if (!ME.tenant) return go(ME.isAdmin ? '/plataforma' : '/comecar'); return await vPanel(p[1] || 'pedidos'); }
-    if (p[0] === 'plataforma') { if (!ME?.isAdmin) return go('/entrar'); return p[1] === 'chamados' ? await vSupportAdmin() : await vPlatform(); }
+    if (p[0] === 'plataforma') { if (!ME?.isAdmin) return go('/entrar'); return p[1] === 'chamados' ? await vSupportAdmin() : p[1] === 'erros' ? await vErrors() : await vPlatform(); }
     return vHome();
   } catch (e) { logError(e.message, 'tela'); app.innerHTML = `<div class="panel auth"><h2>Ops</h2><p>${esc(e.message)}</p><a class="btn" href="/" data-link>Voltar ao início</a></div>`; }
 }
@@ -1014,6 +1028,31 @@ async function pushSubscribe(code, key) {
   const ok = await rpc('push_subscribe', { p_code: code, p_sub: sub.toJSON() });
   if (!ok) throw new Error('Este pedido já foi encerrado');
 }
+// Aviso de pedido novo no aparelho da equipe (mesma infraestrutura dos avisos do cliente)
+async function staffPushInfo(S) {
+  if (!pushSupported()) return null;
+  const key = await rpc('push_public_key').catch(() => null); if (!key) return null;
+  const reg = await navigator.serviceWorker.getRegistration().catch(() => null);
+  const sub = reg ? await reg.pushManager.getSubscription().catch(() => null) : null;
+  const st = await rpc('staff_push_state', { p_tenant: S.id, p_endpoint: sub?.endpoint || '' }).catch(() => null);
+  if (!st) return null;   // migração 37 ainda não rodou
+  return { key, on: !!st.on, devices: st.devices };
+}
+async function staffPushToggle(S, info) {
+  if (info.on) {
+    const sub = await (await navigator.serviceWorker.ready).pushManager.getSubscription();
+    if (sub) await rpc('staff_push_unsubscribe', { p_tenant: S.id, p_endpoint: sub.endpoint });
+    toast('Avisos desligados neste aparelho'); return { ...info, on: false };
+  }
+  if (isIOS() && !isStandalone()) throw new Error('No iPhone, primeiro adicione o painel à Tela de Início (Compartilhar → Adicionar à Tela de Início) e abra por lá.');
+  if (Notification.permission === 'denied') throw new Error('Os avisos estão bloqueados no navegador. Libere nas configurações do site.');
+  if (await Notification.requestPermission() !== 'granted') throw new Error('Sem permissão para avisos');
+  const reg = await navigator.serviceWorker.ready, key = info.key;
+  const sub = (await reg.pushManager.getSubscription()) || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: Uint8Array.from(atob(key.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - key.length % 4) % 4)), c => c.charCodeAt(0)) });
+  await rpc('staff_push_subscribe', { p_tenant: S.id, p_sub: sub.toJSON() });
+  toast('Pronto! Este aparelho avisa quando chegar pedido.'); return { ...info, on: true };
+}
+
 async function vTrack(code) {
   let lastSig = '', rating = 0, pushKey = null, REF, LIVE = null, liveAt = 0;
   // Entregador ao vivo: posição a cada 15 s enquanto o pedido está em rota
@@ -1290,11 +1329,52 @@ async function pHelp(S) {
 }
 
 // Caixa de chamados da plataforma
+// Cabeçalho da plataforma, com os números de chamados esperando e de erros abertos nas últimas 24 h
+function platformHeader(on) {
+  const L = [['', 'Plataforma'], ['chamados', 'Chamados'], ['erros', 'Erros']];
+  header(L.map(([k, n]) => `<a ${k === on ? 'class="on"' : ''} href="/plataforma${k ? '/' + k : ''}" data-link>${n}</a>`).join('') + (ME.tenant ? '<a href="/painel" data-link>Minha loja</a>' : ''));
+  platformBadges();
+}
+function platformBadges() {
+  const put = (href, n) => { const a = $(`a[href="${href}"]`); a?.querySelector('.nbadge')?.remove(); if (n && a) a.insertAdjacentHTML('beforeend', ` <span class="nbadge">${n}</span>`); };
+  rpc('support_admin_unread').then(n => put('/plataforma/chamados', n)).catch(() => {});
+  rpc('platform_errors_open').then(n => put('/plataforma/erros', n)).catch(() => {});
+}
+
+// Monitor de erros: o que deu errado no navegador das lojas e dos clientes, agrupado
+async function vErrors() {
+  let days = 7, open = true;
+  setColor('#1d1716'); brand('Balcão'); platformHeader('erros');
+  const AREA = { painel: 'Painel', loja: 'Loja online', acompanhamento: 'Acompanhamento', entregador: 'Entregador', plataforma: 'Plataforma', outros: 'Outros' };
+  const ago = d => { const m = Math.max(0, Math.round((Date.now() - new Date(d)) / 60000)); return m < 60 ? `há ${m} min` : m < 1440 ? `há ${Math.round(m / 60)} h` : `há ${Math.round(m / 1440)} dia(s)`; };
+  const draw = async () => {
+    let items;
+    try { items = await rpc('platform_errors', { p_days: days, p_open: open }); }
+    catch (e) { if (/platform_errors|function|schema cache/i.test(e.message)) { app.innerHTML = '<div class="panel"><h2>Erros</h2><p>O monitor de erros ainda não está ativo: falta rodar a migração <code>20261219000000_avisos_loja_erros.sql</code>.</p></div>'; return; } throw e; }
+    app.innerHTML = `<h2>Erros</h2><p class="lead">Erros inesperados que apareceram no navegador das lojas e dos clientes. Registrados sozinhos, sem a loja precisar avisar. Mensagens iguais ficam agrupadas.</p>
+      <div class="row between" style="margin-bottom:12px"><span class="row">${[[true, 'Abertos'], [false, 'Todos']].map(([v, n]) => `<button class="sm ${v === open ? 'pri' : 'ghost'}" data-open="${v}">${n}</button>`).join('')}</span>
+        <span class="row">${[1, 7, 30].map(d => `<button class="sm ${d === days ? 'pri' : 'ghost'}" data-days="${d}">${d === 1 ? '24 h' : d + ' dias'}</button>`).join('')}</span></div>
+      ${items.length ? items.map(x => `<div class="panel err ${x.open ? '' : 'done'}">
+        <div class="row between" style="align-items:flex-start;gap:12px"><div style="min-width:0"><code class="err-msg">${esc(x.msg)}</code>
+          <p class="mut" style="margin:6px 0 0">${x.count}× · ${x.stores ? `${x.stores} loja(s)${x.storeNames?.length ? ': ' + x.storeNames.map(esc).join(', ') : ''}` : 'sem loja (visitantes)'} · ${(x.areas || []).map(a => AREA[a] || a).join(', ')} · última ${ago(x.lastAt)}${x.firstAt !== x.lastAt ? ` · primeira ${ago(x.firstAt)}` : ''}</p>
+          <p class="mut" style="margin:2px 0 0;font-size:12px;overflow-wrap:anywhere">${x.src ? `<code>${esc(x.src)}</code> · ` : ''}página ${esc(x.page || '—')} · ${esc((x.agent || '').slice(0, 140))}</p></div>
+          ${x.open ? `<button class="ghost sm" data-fp="${esc(x.fingerprint)}">Marcar resolvido</button>` : '<span class="badge b-g">Resolvido</span>'}</div></div>`).join('')
+        : `<div class="panel empty"><p><b>Nenhum erro ${open ? 'aberto ' : ''}no período.</b></p><p class="mut">Quando algo der errado no navegador de alguém, aparece aqui.</p></div>`}`;
+  };
+  app.onclick = attempt(async e => {
+    const d = e.target.closest('button[data-days]'); if (d) { days = +d.dataset.days; return draw(); }
+    const o = e.target.closest('button[data-open]'); if (o) { open = o.dataset.open === 'true'; return draw(); }
+    const f = e.target.closest('button[data-fp]'); if (f) { await rpc('platform_error_resolve', { p_fingerprint: f.dataset.fp }); toast('Marcado como resolvido. Se acontecer de novo, volta para a lista.'); await draw(); return platformBadges(); }
+  });
+  cleanup = () => { app.onclick = null; };
+  await draw();
+}
+
 async function vSupportAdmin() {
   let filter = 'aberto';
   setColor('#1d1716'); brand('Balcão');
-  header('<a href="/plataforma" data-link>Plataforma</a><a class="on" href="/plataforma/chamados" data-link>Chamados</a>' + (ME.tenant ? '<a href="/painel" data-link>Minha loja</a>' : ''));
-  const badge = () => rpc('support_admin_unread').then(n => { const a = $('a[href="/plataforma/chamados"]'); a?.querySelector('.nbadge')?.remove(); if (n && a) a.insertAdjacentHTML('beforeend', ` <span class="nbadge">${n}</span>`); }).catch(() => {});
+  platformHeader('chamados');
+  const badge = () => platformBadges();
   const list = async () => {
     cleanup?.(); cleanup = null;
     const items = await rpc('support_admin_list', { p_status: filter });
@@ -1367,6 +1447,8 @@ async function pOrders(S, owner) {
     markPrinted(fresh.map(o => o.id));
     fresh.forEach((o, i) => setTimeout(() => printOrder(S, o), i * 3000));
   };
+  let sp = null;   // avisos de pedido novo neste aparelho
+  staffPushInfo(S).then(r => { sp = r; if (r) draw(); }).catch(() => {});
   let lowIng = [];
   const loadLow = () => q(sb.from('ingredients').select('name, stock, min_stock').eq('tenant_id', S.id).gt('min_stock', 0)).then(r => { lowIng = r.filter(i => +i.stock <= +i.min_stock); }).catch(() => {});
   let steps = null;
@@ -1396,7 +1478,7 @@ async function pOrders(S, owner) {
     const isLater = o => o.scheduled_for && o.status === 'novo' && new Date(o.scheduled_for) - Date.now() > 60 * 60000;
     const later = orders.filter(isLater).sort((a, b) => new Date(a.scheduled_for) - new Date(b.scheduled_for)), soon = orders.filter(o => !isLater(o));
     app.innerHTML = `<div class="row between"><div><h2>${esc(S.seg?.prep || 'Preparo')}</h2><p class="lead">Pedidos chegam aqui na hora, com aviso sonoro. Tickets com mais de 25 min ficam em alerta.</p></div>
-      <span class="row"><label class="chk" style="gap:6px">Imprimir comanda <select id="printMode" style="width:auto;min-height:36px;padding:4px 8px">${[['off', 'só no botão'], ['accept', 'ao aceitar'], ['arrive', 'assim que chegar']].map(([v, t]) => `<option value="${v}" ${v === pmode ? 'selected' : ''}>${t}</option>`).join('')}</select></label>${stationList(S).length > 1 ? `<select id="printStation" aria-label="O que imprimir" style="width:auto;min-height:36px;padding:4px 8px">${[['all', 'pedido completo'], ['split', 'uma comanda por estação'], ...stationList(S).map(n => [n, 'só ' + n])].map(([v, t]) => `<option value="${esc(v)}" ${v === local.get('printStation', 'all') ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>` : ''}<button class="ghost sm" id="printHelp" title="Imprimir sem abrir a janela">?</button><a class="btn ghost" href="/painel/kds" data-link>Tela da cozinha</a><a class="btn ghost" href="/chamada/${esc(S.slug)}" target="_blank" rel="noopener" title="Abra numa TV voltada para os clientes">Painel de chamada</a><a class="btn pri" href="/painel/novo" data-link>+ Novo pedido</a></span></div>
+      <span class="row"><label class="chk" style="gap:6px">Imprimir comanda <select id="printMode" style="width:auto;min-height:36px;padding:4px 8px">${[['off', 'só no botão'], ['accept', 'ao aceitar'], ['arrive', 'assim que chegar']].map(([v, t]) => `<option value="${v}" ${v === pmode ? 'selected' : ''}>${t}</option>`).join('')}</select></label>${stationList(S).length > 1 ? `<select id="printStation" aria-label="O que imprimir" style="width:auto;min-height:36px;padding:4px 8px">${[['all', 'pedido completo'], ['split', 'uma comanda por estação'], ...stationList(S).map(n => [n, 'só ' + n])].map(([v, t]) => `<option value="${esc(v)}" ${v === local.get('printStation', 'all') ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>` : ''}<button class="ghost sm" id="printHelp" title="Imprimir sem abrir a janela">?</button>${sp ? `<button class="${sp.on ? 'ok' : 'ghost'} sm" id="staffPush" title="${sp.on ? 'Toque para desligar' : 'Notificação no celular ou computador mesmo com o painel fechado'}">${sp.on ? '🔔 Avisos ligados aqui' : '🔔 Avisar neste aparelho'}</button>` : ''}<a class="btn ghost" href="/painel/kds" data-link>Tela da cozinha</a><a class="btn ghost" href="/chamada/${esc(S.slug)}" target="_blank" rel="noopener" title="Abra numa TV voltada para os clientes">Painel de chamada</a><a class="btn pri" href="/painel/novo" data-link>+ Novo pedido</a></span></div>
     ${later.length ? `<div class="panel sched"><h3>Agendados para mais tarde (${later.length})</h3><div class="row">${later.map(o => `<span class="badge b-a" title="${esc(o.customer_name)}">${esc(fmtWhen(o.scheduled_for, S.timezone))} · #${o.number} · ${esc(where(o))}</span>`).join('')}</div>
       <p class="mut" style="margin:0">Eles entram nas colunas 1 hora antes do horário marcado.</p></div>` : ''}
     <div class="stuck" id="stuck" role="alert" hidden></div>
@@ -1425,6 +1507,7 @@ async function pOrders(S, owner) {
     stuck();
   };
   app.onclick = attempt(async e => {
+    if (e.target.closest('#staffPush')) { sp = await staffPushToggle(S, sp); return draw(); }
     const pr = e.target.closest('button[data-print]');
     if (pr) return printOrder(S, orders.find(o => o.id === +pr.dataset.print));
     if (e.target.closest('#setupHide')) { local.set(`setup-done:${S.id}`, true); steps = null; return draw(); }
@@ -3356,7 +3439,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
   '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql',
-  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql'];
+  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql', '20261219000000_avisos_loja_erros.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };
@@ -3382,8 +3465,7 @@ async function pushSetupDialog(after) {
 async function vPlatform() {
   let hDays = 30;
   setColor('#1d1716'); brand('Balcão');
-  header('<a class="on" href="/plataforma" data-link>Plataforma</a><a href="/plataforma/chamados" data-link>Chamados</a>' + (ME.tenant ? '<a href="/painel" data-link>Minha loja</a>' : ''));
-  rpc('support_admin_unread').then(n => { const a = $('a[href="/plataforma/chamados"]'); if (n && a) a.insertAdjacentHTML('beforeend', ` <span class="nbadge">${n}</span>`); }).catch(() => {});
+  platformHeader('');
   const plans = await q(sb.from('plans').select('name').order('sort'));
   const draw = async () => {
     const [o, sch, h] = await Promise.all([rpc('platform_overview'), rpc('schema_status').catch(() => null), rpc('platform_health', { p_days: hDays }).catch(() => null)]);
@@ -3392,7 +3474,7 @@ async function vPlatform() {
     const pushBox = !push ? '' : `<div class="panel" style="margin-bottom:20px"><div class="row between"><h3 style="margin:0">Avisos no celular do cliente</h3>
         <span class="badge ${push.configured ? 'b-g' : 'b-a'}">${push.configured ? 'Ativados' : 'Não configurados'}</span></div>
       <p class="mut" style="margin:6px 0">O cliente toca em "Me avise no celular" na página do pedido e recebe uma notificação quando o pedido é aceito, fica pronto, sai para entrega ou é cancelado.
-        ${push.configured ? `${push.subscriptions} aparelho(s) inscrito(s) · ${push.sent7d} aviso(s) enviados em 7 dias${push.pending ? ` · <b>${push.pending} na fila sem envio</b> (confira a função push e os segredos)` : ''}.` : ''}
+        ${push.configured ? `${push.subscriptions} aparelho(s) de cliente${push.staffDevices != null ? ` e ${push.staffDevices} de loja` : ''} inscrito(s) · ${push.sent7d} aviso(s) enviados em 7 dias${push.pending ? ` · <b>${push.pending} na fila sem envio</b> (confira a função push e os segredos)` : ''}.` : ''}
         ${push.configured && !push.pgNet ? '<br><b>A extensão pg_net não está ligada:</b> em Database → Extensions, ative <b>pg_net</b>.' : ''}</p>
       <button class="${push.configured ? 'ghost' : 'pri'} sm" id="pushGen">${push.configured ? 'Gerar chaves novas' : 'Gerar chaves e ativar'}</button></div>`;
     const missing = sch ? MIGRATIONS.map((file, i) => ({ n: i + 1, file, ok: sch.find(m => m.file === file)?.ok ?? false })).filter(m => !m.ok) : null;

@@ -330,3 +330,24 @@ test('chamados de ajuda: outra loja, visitante e prints alheios não passam; enx
   // enxurrada de chamados
   assert.throws(() => { for (let i = 0; i < 12; i++) sql(`select support_open('${pizzaId}', 'Spam ${i}', 'erro', 'mensagem repetida', null, null)`, U.staff); }, /Muitos chamados/);
 });
+
+test('avisos da equipe e monitor de erros: outra loja não se inscreve, erros não vazam, enxurrada barrada', () => {
+  const dev = { endpoint: 'https://fcm.googleapis.com/fcm/send/intruso', keys: { p256dh: 'D'.repeat(87), auth: 'c'.repeat(22) } };
+  denied(`select staff_push_subscribe('${pizzaId}', ${lit(dev)})`, U.burger);
+  denied(`select staff_push_subscribe('${pizzaId}', ${lit(dev)})`, U.stranger);
+  denied(`select staff_push_subscribe('${pizzaId}', ${lit(dev)})`, null);
+  denied(`select staff_push_state('${pizzaId}', 'x')`, U.burger);
+  denied(`select staff_push_unsubscribe('${pizzaId}', 'x')`, U.burger);
+  assert.throws(() => sql(`select staff_push_subscribe('${pizzaId}', ${lit({ ...dev, endpoint: 'https://169.254.169.254/latest' })})`, U.pizza), /não suportado/);
+  nothing(`select count(*) from staff_push_subs`, U.pizza);
+  denied(`select count(*) from staff_push_subs`, null);
+  denied(`select push_take(1)`, U.pizza);
+  // erros: qualquer um registra, ninguém além da plataforma lê
+  sql(`select log_client_error(null, 'erro com dado pessoal 11999990000', 'app.js:1', '/pedido/ABC', 'x')`, null);
+  denied(`select count(*) from client_errors`, null);
+  nothing(`select count(*) from client_errors`, U.pizza);
+  denied(`select platform_errors(7, false)`, U.pizza);
+  denied(`select platform_error_resolve('x')`, U.burger);
+  denied(`select _push_send(1)`, U.pizza);
+  assert.throws(() => { for (let i = 0; i < 35; i++) sql(`select log_client_error(null, 'spam ${'$'}{i} ${Math.random()}', '', '/', '')`, null); }, /Muitos registros/);
+});
