@@ -52,6 +52,7 @@ Plataforma multiempresa de pedidos online e delivery para pizzaria, hamburgueria
    39. `20261221000000_search_path.sql` (verificador de segurança do Supabase: search_path fixo nas funções auxiliares)
    40. `20261222000000_combos.sql` (combos com produtos do cardápio: estoque, ficha técnica, item esgotado some, economia na loja)
    41. `20261223000000_totem_so_paga_no_totem.sql` (totem: pagamento no próprio totem, Pix ou maquininha; "pagar no caixa" só se o dono liberar)
+   42. `20261224000000_emails.sql` (e-mails automáticos pelo Resend: chamados, teste grátis acabando, assinatura vencida, resumo do dia)
    - Se você usa a Supabase CLI: `supabase link` e depois `supabase db push`.
 
 ### 2. Configurar o login
@@ -204,6 +205,8 @@ O que já está pronto:
 
 **Comprovante do totem:** em **Configurações → Totem**, cada aparelho escolhe como imprimir a senha (número, nome, itens, total e forma de pagamento) depois do pagamento: **computador ou iPad** pela impressora do sistema (no computador, o Chrome aberto com `--kiosk --kiosk-printing` imprime sem janela; no iPad sempre aparece a janela do AirPrint) ou **Android com impressora térmica** pelo app RawBT. Papel de 58 ou 80 mm e botão de "Imprimir teste".
 
+**E-mails automáticos:** em **Plataforma → E-mails automáticos**, toque em "Ativar e-mails" e siga os passos: conta grátis no Resend (com o domínio do site verificado), segredos `EMAIL_SECRET`, `RESEND_API_KEY`, `EMAIL_FROM` e `SITE_URL` no Supabase e a função `email` publicada sem Verify JWT. Você recebe os chamados novos e as mensagens das lojas; a loja recebe a resposta do suporte, o aviso de teste grátis acabando (3 dias antes) e de assinatura vencida. O dono pode ligar o **resumo do dia** em Configurações (chega às 7h). Os e-mails diários usam a extensão pg_cron.
+
 - **Impressão da comanda:** na tela de preparo, o botão **Imprimir** abre a impressão do navegador já no formato 80 mm. Escolha a impressora térmica e, nas configurações de impressão, desmarque "Cabeçalhos e rodapés". Marque **Imprimir comanda ao aceitar** para imprimir automaticamente ao aceitar o pedido. No Chrome, dá para pular a janela de impressão abrindo o navegador com `--kiosk-printing`.
 - **Entregador:** em **Configurações → Entregadores → Enviar link**, cada entregador recebe pelo WhatsApp um link próprio. Ele abre no celular, sem senha, e mostra as entregas dele com endereço, valor a cobrar ou "já pago", e os botões de mapa, WhatsApp, ligar e **Entreguei**. **Novo link** desativa o anterior (use quando um entregador sair).
 - **Clientes:** a aba **Clientes** lista quem já pediu, com número de pedidos, total gasto e último pedido. Clientes que não pedem há mais de 30 dias aparecem como "sumido", e um botão de WhatsApp manda uma mensagem pronta para chamar de volta. Dá para baixar a lista em planilha (CSV).
@@ -268,7 +271,7 @@ O que já está pronto:
 
 ## Testes
 
-`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 137 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
+`test/db.test.js` aplica a migração num Postgres 16 comum, com uma simulação mínima do `auth` do Supabase (`test/supabase-shim.sql`). Os 143 testes (banco e Edge Functions com Mercado Pago simulado) cobrem:
 - isolamento entre empresas;
 - permissões de dono, atendente e anônimo;
 - cálculo de preço com opções e cupom;

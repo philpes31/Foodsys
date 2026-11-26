@@ -3552,6 +3552,7 @@ async function pConfig(S) {
     <div class="panel"><h3>Entregadores</h3><table><tbody>${couriers.map(c => `<tr><td>${esc(c.name)}<br><span class="mut">${esc(c.phone)}</span></td><td class="n"><span class="row" style="justify-content:flex-end"><button class="ghost sm" data-clink="${c.id}">Enviar link</button><button class="ghost sm" data-crot="${c.id}">Novo link</button><button class="ghost sm" data-del="couriers:${c.id}" aria-label="Remover">×</button></span></td></tr>`).join('')}</tbody></table>
       <p class="mut" style="margin:0">Cada entregador recebe um link próprio para ver as entregas dele no celular e marcar "Entreguei", sem precisar de senha. "Novo link" desativa o anterior.</p>
       <form id="fCour" class="row" style="flex-wrap:nowrap"><input id="crN" placeholder="Nome" required maxlength="60"><input id="crP" placeholder="Telefone"><button class="ghost">Adicionar</button></form></div>
+    ${ME.role === 'owner' ? '<div class="panel" id="dailyBox" hidden><h3>Resumo do dia por e-mail</h3><label class="chk"><input type="checkbox" id="dailyOn"> Receber todo dia, às 7h, o resumo de vendas do dia anterior (pedidos, total, ticket médio e mais vendidos)</label><p class="mut" style="margin:4px 0 0">Vai para o e-mail de quem é dono da loja.</p></div>' : ''}
     <div class="panel"><h3>Equipe</h3><table><tbody>${team.map(u => `<tr><td>${esc(u.email)}</td><td>${u.role === 'owner' ? 'Dono' : u.role === 'totem' ? 'Totem' : 'Atendente'}</td><td class="n">${u.role !== 'owner' ? `<button class="ghost sm" data-staff="${u.user_id}" aria-label="Remover">×</button>` : ''}</td></tr>`).join('')}</tbody></table>
       <form id="fTeam" class="row" style="flex-wrap:nowrap"><input id="tE" type="email" placeholder="E-mail da pessoa ou do tablet" required><select id="tR" style="width:auto"><option value="staff">Atendente</option><option value="totem">Totem</option></select><button class="ghost">Adicionar</button></form>
       <p class="mut" style="margin:0">A conta precisa ser criada antes em /entrar/cadastro. O <b>atendente</b> opera pedidos, entregas e disponibilidade do cardápio, sem relatórios e configurações. A conta de <b>totem</b> só abre o totem de autoatendimento: não vê pedidos, clientes nem nada do painel. Use uma conta de totem no tablet do totem.</p></div>
@@ -3597,6 +3598,8 @@ async function pConfig(S) {
     tset(S.id, 'auto_accept').then(r => { if ($('#fAuto')) { $('#aaOn').checked = !!r.auto_accept; $('#fAuto').hidden = false; } }).catch(() => {});
     tset(S.id, 'call_names').then(r => { if ($('#fCall')) { $('#cnOn').checked = !!r.call_names; $('#fCall').hidden = false; } }).catch(() => {});
     if (ME.role === 'owner') pointBox().catch(() => {});
+    if (ME.role === 'owner') rpc('daily_email_on', { p_tenant: S.id }).then(on => { const b = $('#dailyBox'); if (!b) return; b.hidden = false; $('#dailyOn').checked = !!on;
+      $('#dailyOn').onchange = attempt(async e => { await rpc('set_daily_email', { p_tenant: S.id, p_on: e.target.checked }); toast(e.target.checked ? 'Pronto: o resumo chega amanhã às 7h' : 'Resumo diário desligado'); }); }).catch(() => {});
   };
   const refreshBrand = async () => { await loadMe(); setColor(ME.tenant.color); brand(ME.tenant.name, ME.tenant.logo_path); };
   app.onclick = attempt(async e => {
@@ -3805,7 +3808,7 @@ const MIGRATIONS = ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.
   '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql',
   '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql',
   '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql',
-  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql', '20261219000000_avisos_loja_erros.sql', '20261220000000_fiado.sql', '20261221000000_search_path.sql', '20261222000000_combos.sql', '20261223000000_totem_so_paga_no_totem.sql'];
+  '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql', '20261219000000_avisos_loja_erros.sql', '20261220000000_fiado.sql', '20261221000000_search_path.sql', '20261222000000_combos.sql', '20261223000000_totem_so_paga_no_totem.sql', '20261224000000_emails.sql'];
 const sparkCols = (rows, val, fmt, color) => { const m = Math.max(1, ...rows.map(val));
   return `<div class="spark">${rows.map(x => `<i title="${esc(x.d.split('-').reverse().join('/'))}: ${esc(fmt(x))}" style="height:${Math.max(2, val(x) / m * 100)}%;background:${color || 'var(--amber)'}"></i>`).join('')}</div>
     <div class="row between mut" style="font-size:12px"><span>${rows[0]?.d.split('-').reverse().slice(0, 2).join('/')}</span><span>hoje</span></div>`; };
@@ -3828,6 +3831,23 @@ async function pushSetupDialog(after) {
   $('#dlgBody').onclick = e => { const c = e.target.closest('[data-copy]'); if (c) navigator.clipboard?.writeText(c.dataset.copy).then(() => toast('Copiado')).catch(() => {}); };
   after();
 }
+async function mailSetupDialog(after) {
+  const b64u = a => btoa(String.fromCharCode(...new Uint8Array(a))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const secret = b64u(crypto.getRandomValues(new Uint8Array(32))), url = `${SUPABASE_URL}/functions/v1/email`;
+  await rpc('email_setup', { p_secret: secret, p_url: url });
+  const row = (n, v, ro = true) => `<label>${n}<span class="row" style="flex-wrap:nowrap"><input ${ro ? 'readonly' : ''} value="${esc(v)}"><button type="button" class="ghost sm" data-copy="${esc(v)}">Copiar</button></span></label>`;
+  dialog(`<h2>E-mails: falta o Resend e o Supabase</h2>
+    <p style="margin:0">O banco já está configurado. <b>Copie agora</b> o segredo abaixo: ele não aparece de novo.</p>
+    <ol class="mut" style="margin:0;padding-left:18px">
+      <li>Crie uma conta grátis em <b>resend.com</b> (3.000 e-mails por mês) e, em <b>API Keys</b>, crie uma chave.</li>
+      <li>Para enviar para qualquer pessoa, cadastre e verifique o domínio do seu site em <b>Domains</b>. Sem domínio, o Resend só entrega para o e-mail da sua própria conta (dá para testar).</li>
+      <li>No Supabase, em <b>Edge Functions → Secrets</b>, crie: <b>EMAIL_SECRET</b> (abaixo), <b>RESEND_API_KEY</b> (a chave do Resend), <b>EMAIL_FROM</b> (ex.: <code>Balcão &lt;avisos@seudominio.com.br&gt;</code>) e <b>SITE_URL</b> (o endereço do sistema, para os botões dos e-mails).</li>
+      <li>Publique a função <b>email</b> (conteúdo de <code>supabase/functions/email/index.ts</code>) com <b>Verify JWT</b> desligado.</li></ol>
+    ${row('EMAIL_SECRET', secret)}${row('SITE_URL', location.origin)}
+    <div class="row"><button class="pri" data-close>Pronto, copiei</button></div>`, true);
+  $('#dlgBody').onclick = e => { const c = e.target.closest('[data-copy]'); if (c) navigator.clipboard?.writeText(c.dataset.copy).then(() => toast('Copiado')).catch(() => {}); };
+  after();
+}
 async function vPlatform() {
   let hDays = 30;
   setColor('#1d1716'); brand('Balcão');
@@ -3843,6 +3863,15 @@ async function vPlatform() {
         ${push.configured ? `${push.subscriptions} aparelho(s) de cliente${push.staffDevices != null ? ` e ${push.staffDevices} de loja` : ''} inscrito(s) · ${push.sent7d} aviso(s) enviados em 7 dias${push.pending ? ` · <b>${push.pending} na fila sem envio</b> (confira a função push e os segredos)` : ''}.` : ''}
         ${push.configured && !push.pgNet ? '<br><b>A extensão pg_net não está ligada:</b> em Database → Extensions, ative <b>pg_net</b>.' : ''}</p>
       <button class="${push.configured ? 'ghost' : 'pri'} sm" id="pushGen">${push.configured ? 'Gerar chaves novas' : 'Gerar chaves e ativar'}</button></div>`;
+    const mailSt = await rpc('email_status').catch(() => null);
+    const mailBox = !mailSt ? '' : `<div class="panel" style="margin-bottom:20px"><div class="row between"><h3 style="margin:0">E-mails automáticos</h3>
+        <span class="badge ${mailSt.configured ? (mailSt.lastError && mailSt.failed7d ? 'b-a' : 'b-g') : 'b-a'}">${mailSt.configured ? 'Ativados' : 'Não configurados'}</span></div>
+      <p class="mut" style="margin:6px 0">Chamado novo e mensagens das lojas chegam no seu e-mail; a loja recebe a resposta do suporte, o aviso de teste grátis acabando e de assinatura vencida e, se ligar, o resumo do dia.
+        ${mailSt.configured ? `${mailSt.sent7d} enviado(s) em 7 dias${mailSt.failed7d ? ` · <b>${mailSt.failed7d} com erro</b>` : ''}${mailSt.pending ? ` · <b>${mailSt.pending} na fila sem envio</b> (confira a função email e os segredos)` : ''}` : ''}
+        ${mailSt.configured && !mailSt.pgNet ? '<br><b>A extensão pg_net não está ligada:</b> em Database → Extensions, ative <b>pg_net</b>.' : ''}
+        ${mailSt.configured && !mailSt.cron ? '<br>Os e-mails diários (teste acabando, resumo do dia) precisam da extensão <b>pg_cron</b> ligada.' : ''}
+        ${mailSt.lastError ? `<br>Último erro: <code>${esc(mailSt.lastError.slice(0, 200))}</code>` : ''}</p>
+      <span class="row"><button class="${mailSt.configured ? 'ghost' : 'pri'} sm" id="mailGen">${mailSt.configured ? 'Gerar segredo novo' : 'Ativar e-mails'}</button>${mailSt.configured ? '<button class="ghost sm" id="mailTest">Enviar e-mail de teste</button>' : ''}</span></div>`;
     const missing = sch ? MIGRATIONS.map((file, i) => ({ n: i + 1, file, ok: sch.find(m => m.file === file)?.ok ?? false })).filter(m => !m.ok) : null;
     const dbBox = !missing ? `<div class="banner warn" style="margin-bottom:16px;text-align:left;border:1px solid var(--line);border-radius:12px"><b>Não consegui conferir o banco.</b> Rode no SQL Editor do Supabase a migração <code>20261123000000_checagem.sql</code> (e as anteriores que faltarem). Depois recarregue esta página.</div>`
       : missing.length ? `<div class="banner warn" style="margin-bottom:16px;text-align:left;border:1px solid var(--line);border-radius:12px"><b>Faltam ${missing.length} migraç${missing.length > 1 ? 'ões' : 'ão'} no banco.</b> Rode no SQL Editor do Supabase, nesta ordem, cada uma numa consulta nova:<ol style="margin:6px 0 0">${missing.map(m => `<li><code>${esc(m.file)}</code></li>`).join('')}</ol>Os arquivos estão na pasta <code>supabase/migrations</code> do GitHub. Enquanto faltarem, algumas telas mostram erro.</div>`
@@ -3870,7 +3899,7 @@ async function vPlatform() {
     <div class="kpis"><div class="kpi"><span class="mut">Empresas</span><b>${o.tenants.length}</b><span class="mut">${o.paying ?? 0} pagando · ${o.trials ?? 0} em teste</span></div><div class="kpi"><span class="mut">Receita mensal (MRR)</span><b class="price">${brl(o.mrr)}</b><span class="mut">+ ${brl(o.potentialMrr || 0)} se os testes virarem assinatura</span></div>
       <div class="kpi"><span class="mut">Vendido pelas lojas</span><b class="price">${brl(o.gmv)}</b></div><div class="kpi"><span class="mut">Pedidos</span><b>${o.orders}</b></div></div>
     ${healthBox}
-    ${pushBox}
+    ${pushBox}${mailBox}
     ${doms?.length ? `<div class="panel" style="margin-bottom:20px"><h3>Domínios próprios (${doms.length})</h3>
       <p class="mut" style="margin:0 0 8px">Para ativar, adicione cada domínio na Vercel: projeto → <b>Settings → Domains → Add</b>. A Vercel confere o DNS da loja e cria o certificado sozinha.</p>
       ${doms.map(d => `<div class="ci"><span><b>${esc(d.domain)}</b><br><span class="mut">${esc(d.name)}</span></span><span class="row"><button class="ghost sm" data-copydom="${esc(d.domain)}">Copiar</button><a class="btn ghost sm" href="https://${esc(d.domain)}" target="_blank" rel="noopener">Testar</a></span></div>`).join('')}</div>` : ''}
@@ -3883,6 +3912,8 @@ async function vPlatform() {
   app.onclick = attempt(async e => {
     const hd = e.target.closest('button[data-hdays]'); if (hd) { hDays = +hd.dataset.hdays; return draw(); }
     if (e.target.closest('#pushGen')) return pushSetupDialog(draw);
+    if (e.target.closest('#mailGen')) return mailSetupDialog(draw);
+    if (e.target.closest('#mailTest')) { const id = await rpc('email_test'); toast(id ? 'E-mail de teste enviado para você. Confira a caixa de entrada (e o spam).' : 'Não consegui enfileirar o teste'); setTimeout(() => draw().catch(() => {}), 4000); return; }
     const cd = e.target.closest('button[data-copydom]'); if (cd) { try { await navigator.clipboard.writeText(cd.dataset.copydom); toast('Domínio copiado'); } catch { toast(cd.dataset.copydom); } return; }
     const bb = e.target.closest('button[data-bill]');
     if (bb) { await rpc('platform_set_billing', { p_tenant: bb.dataset.bill, p_status: bb.dataset.st, p_add_days: bb.dataset.days ? +bb.dataset.days : null }); toast('Assinatura atualizada'); return draw(); }

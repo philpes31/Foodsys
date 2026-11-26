@@ -31,7 +31,7 @@ before(() => {
   psql(['-d', DB, '-f', path.join(ROOT, 'test/supabase-shim.sql')]);
   // os testes de regras fazem dezenas de pedidos seguidos com o mesmo telefone; o limite de tentativas é testado em security.test.js
   psql(['-d', 'postgres', '-c', `alter database ${DB} set balcao.rate_limit = 'off'`]);
-  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql', '20261219000000_avisos_loja_erros.sql', '20261220000000_fiado.sql', '20261221000000_search_path.sql', '20261222000000_combos.sql', '20261223000000_totem_so_paga_no_totem.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
+  for (const f of ['20261113000000_balcao.sql', '20261114000000_horarios_fotos.sql', '20261115000000_pix_online.sql', '20261116000000_assinaturas.sql', '20261117000000_entregador_clientes_lgpd.sql', '20261118000000_distancia_fidelidade.sql', '20261119000000_balcao_mesa_caixa.sql', '20261120000000_cupons_avaliacoes_estoque.sql', '20261121000000_agendamento_vitrine.sql', '20261122000000_promocoes.sql', '20261123000000_checagem.sql', '20261124000000_saude_plataforma.sql', '20261125000000_cartao_dominio_unidades.sql', '20261126000000_seguranca.sql', '20261127000000_mesa_servico_pedidos_antigos.sql', '20261128000000_vitrine_previsao_mesas.sql', '20261129000000_pausa_feriados_estacoes.sql', '20261130000000_caixa_acerto_bloqueio.sql', '20261201000000_insumos_financeiro.sql', '20261202000000_adicionais_importacao.sql', '20261203000000_cashback_atividades.sql', '20261204000000_metas_cardapio_chamada.sql', '20261205000000_aceite_reajuste.sql', '20261206000000_logotipo.sql', '20261207000000_chamada_nomes.sql', '20261208000000_sugestoes_garcom_avisos.sql', '20261209000000_totem_indicacao.sql', '20261210000000_entregador_ao_vivo.sql', '20261211000000_unidades_notas_produto.sql', '20261212000000_acerto_entregadores.sql', '20261213000000_vale_reservas.sql', '20261214000000_totem_pix.sql', '20261215000000_totem_cartao_point.sql', '20261216000000_seguranca_2.sql', '20261217000000_meio_a_meio.sql', '20261218000000_chamados.sql', '20261219000000_avisos_loja_erros.sql', '20261220000000_fiado.sql', '20261221000000_search_path.sql', '20261222000000_combos.sql', '20261223000000_totem_so_paga_no_totem.sql', '20261224000000_emails.sql']) psql(['-d', DB, '-f', path.join(ROOT, 'supabase/migrations', f)]);
   sql(`insert into auth.users (id, email) values ('${U.pizza}','dono@pizza.test'),('${U.burger}','dono@burger.test'),('${U.staff}','atendente@pizza.test'),('${U.admin}','admin@balcao.test');
        insert into platform_admins values ('${U.admin}')`);
   pizzaId = sql(`select (create_my_tenant('Forno da Vila', 'pizzaria')).id`, U.pizza);
@@ -618,7 +618,7 @@ test('promoções: leve 3 pague 2, % por categoria, dia/horário e frete grátis
 test('checagem: schema_status mostra todas as migrações em dia (só para quem tem conta)', () => {
   fails(`select public.schema_status()`, null, /permission denied/);
   const st = json(`public.schema_status()`, U.pizza);
-  assert.equal(st.length, 41);
+  assert.equal(st.length, 42);
   assert.ok(st.every(m => m.ok), JSON.stringify(st.filter(m => !m.ok)));
   sql(`alter table orders rename column scheduled_for to scheduled_tmp`);
   try { assert.deepEqual(json(`public.schema_status()`, U.pizza).filter(m => !m.ok).map(m => m.n), [9]); }
@@ -1781,4 +1781,48 @@ test('combos: itens ligados a produtos baixam estoque e receita, bloqueiam esgot
   sql(`delete from products where id = ${guar}`);
   assert.equal(sql(`select count(*) from options where name = 'Guaraná 2L' and product_id is null`), '1');
   sql(`delete from products where id in (${id}, ${coca}, ${piz})`);
+});
+
+test('e-mails: fila para chamados, aviso de teste acabando, resumo do dia e permissões', () => {
+  sql(`delete from email_queue; delete from platform_settings where key in ('email_secret', 'email_url')`);
+  // sem configuração, nada entra na fila
+  sql(`select support_open('${pizzaId}', 'Teste sem e-mail', 'duvida', 'Pergunta qualquer', null, null)`, U.pizza);
+  assert.equal(sql(`select count(*) from email_queue`), '0');
+  fails(`select email_setup('${'x'.repeat(40)}', 'https://x.supabase.co/functions/v1/email')`, U.pizza, /Sem permissão/);
+  fails(`select email_setup('curto', 'https://x.supabase.co/functions/v1/email')`, U.admin, /curto/);
+  fails(`select email_setup('${'x'.repeat(40)}', 'https://evil.com/x')`, U.admin, /Endereço/);
+  assert.equal(json(`email_setup('${'s'.repeat(40)}', 'https://x.supabase.co/functions/v1/email')`, U.admin).configured, true);
+  const id = sql(`select support_open('${pizzaId}', 'Caixa travou', 'erro', 'Não fecha o caixa', null, null)`, U.pizza);
+  let q = json(`(select jsonb_agg(jsonb_build_object('kind', kind, 'to', to_email, 'data', data) order by id) from email_queue)`);
+  assert.equal(q.length, 1); assert.equal(q[0].kind, 'chamado_novo'); assert.equal(q[0].data.subject, 'Caixa travou');
+  assert.ok(q[0].to.length >= 1);
+  sql(`select support_reply(${id}, 'Já resolvemos', null)`, U.admin);
+  sql(`select support_reply(${id}, 'Obrigado', null)`, U.pizza);
+  q = json(`(select jsonb_agg(jsonb_build_object('kind', kind, 'to', to_email) order by id) from email_queue)`);
+  assert.deepEqual(q.map(x => x.kind), ['chamado_novo', 'chamado_resposta', 'chamado_mensagem']);
+  assert.deepEqual(q[1].to, [sql(`select lower(email) from auth.users where id = '${U.pizza}'`)]);
+  // diário: teste acabando (uma vez só) e resumo para quem ligou
+  fails(`select set_daily_email('${pizzaId}', true)`, U.staff, /Sem permissão/);
+  sql(`select set_daily_email('${pizzaId}', true)`, U.pizza);
+  assert.equal(sql(`select daily_email_on('${pizzaId}')`, U.pizza), 't');
+  assert.equal(sql(`select daily_email_on('${pizzaId}')`, U.staff), '');
+  sql(`update tenants set billing_status = 'trial', trial_ends_at = now() + interval '2 days', trial_mail_at = null where id = '${pizzaId}'`);
+  sql(`select email_daily()`); sql(`select email_daily()`);
+  const kinds = json(`(select jsonb_agg(kind order by id) from email_queue where tenant_id = '${pizzaId}' and kind in ('teste_acabando', 'resumo_dia'))`);
+  assert.equal(kinds.filter(k => k === 'teste_acabando').length, 1);
+  assert.equal(kinds.filter(k => k === 'resumo_dia').length, 2);
+  const resumo = json(`(select data from email_queue where kind = 'resumo_dia' order by id desc limit 1)`);
+  assert.ok('orders' in resumo && 'total' in resumo && Array.isArray(resumo.top)); assert.equal(resumo.store, 'Forno da Vila');
+  // função "email": só a chave de serviço pega a fila; cada item sai uma vez
+  const first = sql(`select min(id) from email_queue`);
+  fails(`select email_take(${first})`, U.admin, /permission denied/);
+  assert.equal(json(`email_take(${first})`, 'service').kind, 'chamado_novo');
+  assert.equal(sql(`select email_take(${first}) is null`, 'service'), 't');
+  sql(`select email_result(${first}, 'Resend 403: domínio não verificado')`, 'service');
+  assert.equal(json(`email_status()`, U.admin).lastError, 'Resend 403: domínio não verificado');
+  fails(`select email_status()`, U.pizza, /Sem permissão/);
+  fails(`select * from email_queue`, U.admin, /permission denied/);
+  fails(`select email_daily()`, U.admin, /permission denied/);
+  sql(`update tenants set billing_status = 'free', trial_mail_at = null, daily_email = false where id = '${pizzaId}'`);
+  sql(`delete from platform_settings where key in ('email_secret', 'email_url'); delete from email_queue`);
 });
